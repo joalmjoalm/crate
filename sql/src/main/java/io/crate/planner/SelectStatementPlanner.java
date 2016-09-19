@@ -24,10 +24,7 @@ package io.crate.planner;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.crate.analyze.MultiSourceSelect;
-import io.crate.analyze.QueriedSelectRelation;
-import io.crate.analyze.QuerySpec;
-import io.crate.analyze.SelectAnalyzedStatement;
+import io.crate.analyze.*;
 import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.analyze.relations.AnalyzedRelationVisitor;
 import io.crate.analyze.relations.PlannedAnalyzedRelation;
@@ -44,10 +41,7 @@ import io.crate.planner.consumer.SimpleSelect;
 import io.crate.planner.fetch.FetchPushDown;
 import io.crate.planner.fetch.MultiSourceFetchPushDown;
 import io.crate.planner.node.NoopPlannedAnalyzedRelation;
-import io.crate.planner.node.dql.CollectAndMerge;
-import io.crate.planner.node.dql.MergePhase;
-import io.crate.planner.node.dql.QueryThenFetch;
-import io.crate.planner.node.dql.RoutedCollectPhase;
+import io.crate.planner.node.dql.*;
 import io.crate.planner.node.fetch.FetchPhase;
 import io.crate.planner.node.fetch.FetchSource;
 import io.crate.planner.projection.FetchProjection;
@@ -57,6 +51,7 @@ import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.inject.Singleton;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Map;
 
 @Singleton
@@ -223,6 +218,15 @@ public class SelectStatementPlanner {
 
             plannedSubQuery.addProjection(fp);
             return new QueryThenFetch(plannedSubQuery.plan(), fetchPhase, null, context.jobId());
+        }
+
+        @Override
+        public Plan visitTwoRelationsUnion(TwoRelationsUnion twoRelationsUnion, Planner.Context context) {
+            // Currently we only support UNION ALL so it's ok to flatten the union pairs
+            Plan plan1 = process(twoRelationsUnion.first(), context);
+            Plan plan2 = process(twoRelationsUnion.second(), context);
+            UnionPhase unionPhase = new UnionPhase();
+            return new UnionPlan(unionPhase, Arrays.asList(plan1, plan2));
         }
 
         @Override
