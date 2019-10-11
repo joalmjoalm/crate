@@ -21,35 +21,39 @@
 
 package io.crate.blob;
 
-import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.support.replication.ReplicationRequest;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.index.shard.ShardId;
 
 import java.io.IOException;
 import java.util.UUID;
 
 public class PutChunkReplicaRequest extends ReplicationRequest<PutChunkReplicaRequest> implements IPutChunkRequest {
 
+    public final String sourceNodeId;
+    public final UUID transferId;
+    public final long currentPos;
+    public final BytesReference content;
+    public final boolean isLast;
 
-    public String sourceNodeId;
-    public UUID transferId;
-    public long currentPos;
-    public BytesReference content;
-    public boolean isLast;
-
-    public PutChunkReplicaRequest() {
+    public PutChunkReplicaRequest(ShardId shardId,
+                                  String sourceNodeId,
+                                  UUID transferId,
+                                  long currentPos,
+                                  BytesReference content,
+                                  boolean isLast) {
+        super(shardId);
+        this.sourceNodeId = sourceNodeId;
+        this.transferId = transferId;
+        this.currentPos = currentPos;
+        this.content = content;
+        this.isLast = isLast;
     }
 
-    @Override
-    public ActionRequestValidationException validate() {
-        return null;
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
+    public PutChunkReplicaRequest(StreamInput in) throws IOException {
+        super(in);
         sourceNodeId = in.readString();
         transferId = new UUID(in.readLong(), in.readLong());
         currentPos = in.readVInt();
@@ -78,5 +82,15 @@ public class PutChunkReplicaRequest extends ReplicationRequest<PutChunkReplicaRe
 
     public boolean isLast() {
         return isLast;
+    }
+
+    @Override
+    public String toString() {
+        return "PutChunkReplicaRequest{" +
+               "sourceNodeId='" + sourceNodeId + '\'' +
+               ", transferId=" + transferId +
+               ", currentPos=" + currentPos +
+               ", isLast=" + isLast +
+               '}';
     }
 }

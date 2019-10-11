@@ -21,7 +21,7 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLResponse;
+import io.crate.testing.SQLResponse;
 import org.junit.After;
 import org.junit.Test;
 
@@ -37,7 +37,6 @@ public class SysJobsTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testQueryAllColumns() throws Exception {
-        execute("set global stats.enabled = true");
         String stmt = "select * from sys.jobs";
 
         // the response contains all current jobs, if the tests are executed in parallel
@@ -47,7 +46,7 @@ public class SysJobsTest extends SQLTransportIntegrationTest {
 
         for (Object[] objects : response.rows()) {
             assertNotNull(objects[0]);
-            statements.add((String) objects[2]);
+            statements.add((String) objects[3]);
         }
         assertTrue(statements.contains(stmt));
     }

@@ -21,8 +21,15 @@
 
 package io.crate.analyze.expressions;
 
-import io.crate.core.collections.Row;
-import io.crate.sql.tree.*;
+import io.crate.data.Row;
+import io.crate.sql.tree.AstVisitor;
+import io.crate.sql.tree.DoubleLiteral;
+import io.crate.sql.tree.LongLiteral;
+import io.crate.sql.tree.NegativeExpression;
+import io.crate.sql.tree.Node;
+import io.crate.sql.tree.NullLiteral;
+import io.crate.sql.tree.ParameterExpression;
+import io.crate.sql.tree.StringLiteral;
 
 import java.util.Locale;
 
@@ -34,13 +41,13 @@ public class ExpressionToNumberVisitor extends AstVisitor<Number, Row> {
     }
 
     public static Number convert(Node node, Row parameters) {
-        return INSTANCE.process(node, parameters);
+        return node.accept(INSTANCE, parameters);
     }
 
-    private Number parseString(String value) {
+    private static Number parseString(String value) {
         Number stringNum;
         try {
-            stringNum = Long.parseLong(value);
+            stringNum = Long.valueOf(value);
         } catch (NumberFormatException e) {
             try {
                 stringNum = Double.valueOf(value);
@@ -89,15 +96,8 @@ public class ExpressionToNumberVisitor extends AstVisitor<Number, Row> {
 
     @Override
     protected Number visitNegativeExpression(NegativeExpression node, Row context) {
-        Number n = process(node.getValue(), context);
-        if (n instanceof Long) {
-            return -1L * (Long) n;
-        } else if (n instanceof Double) {
-            return -1 * (Double) n;
-        } else {
-            throw new IllegalArgumentException(
-                String.format(Locale.ENGLISH, "invalid number %s", node.getValue()));
-        }
+        Number n = node.getValue().accept(this, context);
+        return NegativeExpression.negate(n);
     }
 
     @Override

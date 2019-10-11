@@ -21,24 +21,23 @@
 
 package io.crate.analyze;
 
-import io.crate.core.collections.Row;
+import io.crate.data.Row;
 import io.crate.sql.tree.ClusteredBy;
 import io.crate.sql.tree.LongLiteral;
 import io.crate.sql.tree.QualifiedName;
 import io.crate.sql.tree.QualifiedNameReference;
 import io.crate.test.integration.CrateUnitTest;
-import org.elasticsearch.cluster.ClusterService;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
 import java.util.Locale;
+import java.util.Optional;
 
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.mock;
@@ -52,9 +51,6 @@ public class NumberOfShardsTest extends CrateUnitTest {
     private static ClusterState clusterState = mock(ClusterState.class);
     private static NumberOfShards numberOfShards;
 
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
-
     @BeforeClass
     public static void beforeClass() {
         when(clusterService.state()).thenReturn(clusterState);
@@ -62,8 +58,8 @@ public class NumberOfShardsTest extends CrateUnitTest {
     }
 
     @Before
-    public void before() {
-        when(discoveryNodes.dataNodes()).thenReturn(createDataNodes(3));
+    public void setupNumberOfShards() {
+        when(discoveryNodes.getDataNodes()).thenReturn(createDataNodes(3));
         numberOfShards = new NumberOfShards(clusterService);
     }
 
@@ -82,14 +78,14 @@ public class NumberOfShardsTest extends CrateUnitTest {
 
     @Test
     public void testDefaultNumberOfShardsLessThanMinimumShardsNumber() {
-        when(discoveryNodes.dataNodes()).thenReturn(createDataNodes(1));
+        when(discoveryNodes.getDataNodes()).thenReturn(createDataNodes(1));
         numberOfShards = new NumberOfShards(clusterService);
         assertThat(numberOfShards.defaultNumberOfShards(), is(4));
     }
 
     @Test
     public void testGetNumberOfShards() {
-        ClusteredBy clusteredBy = new ClusteredBy(QNAME_REF, LongLiteral.fromObject(7));
+        ClusteredBy clusteredBy = new ClusteredBy(Optional.of(QNAME_REF), Optional.of(LongLiteral.fromObject(7)));
         assertThat(numberOfShards.fromClusteredByClause(clusteredBy, Row.EMPTY), is(7));
     }
 
@@ -98,7 +94,7 @@ public class NumberOfShardsTest extends CrateUnitTest {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("num_shards in CLUSTERED clause must be greater than 0");
         numberOfShards.fromClusteredByClause(
-            new ClusteredBy(QNAME_REF, LongLiteral.fromObject(0)), Row.EMPTY);
+            new ClusteredBy(Optional.of(QNAME_REF), Optional.of(LongLiteral.fromObject(0))), Row.EMPTY);
     }
 
 }

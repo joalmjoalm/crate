@@ -22,27 +22,33 @@
 package io.crate.sql.tree;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
+import java.util.function.Function;
 
-public class AlterTable extends Statement {
+public class AlterTable<T> extends Statement {
 
-    private final Table table;
-    private final Optional<GenericProperties> genericProperties;
+    private final Table<T> table;
+    private final GenericProperties<T> genericProperties;
     private final List<String> resetProperties;
 
-    public AlterTable(Table table, GenericProperties genericProperties) {
+    public AlterTable(Table<T> table, GenericProperties<T> genericProperties) {
         this.table = table;
-        this.genericProperties = Optional.of(genericProperties);
+        this.genericProperties = genericProperties;
         this.resetProperties = ImmutableList.of();
     }
 
-    public AlterTable(Table table, List<String> resetProperties) {
+    public AlterTable(Table<T> table, List<String> resetProperties) {
         this.table = table;
         this.resetProperties = resetProperties;
-        this.genericProperties = Optional.absent();
+        this.genericProperties = GenericProperties.empty();
+    }
+
+    private AlterTable(Table<T> table, GenericProperties<T> genericProperties, List<String> resetProperties) {
+        this.table = table;
+        this.genericProperties = genericProperties;
+        this.resetProperties = resetProperties;
     }
 
     @Override
@@ -50,16 +56,24 @@ public class AlterTable extends Statement {
         return visitor.visitAlterTable(this, context);
     }
 
-    public Table table() {
+    public Table<T> table() {
         return table;
     }
 
-    public Optional<GenericProperties> genericProperties() {
+    public GenericProperties<T> genericProperties() {
         return genericProperties;
     }
 
     public List<String> resetProperties() {
         return resetProperties;
+    }
+
+    public <U> AlterTable<U> map(Function<? super T, ? extends U> mapper) {
+        return new AlterTable<>(
+            table.map(mapper),
+            genericProperties.map(mapper),
+            resetProperties
+        );
     }
 
     @Override

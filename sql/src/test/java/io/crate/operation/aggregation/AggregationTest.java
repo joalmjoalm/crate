@@ -22,22 +22,27 @@
 package io.crate.operation.aggregation;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
+import io.crate.action.sql.SessionContext;
 import io.crate.breaker.RamAccountingContext;
-import io.crate.core.collections.ArrayBucket;
-import io.crate.core.collections.Row;
+import io.crate.data.ArrayBucket;
+import io.crate.data.Row;
+import io.crate.execution.engine.aggregation.AggregationFunction;
+import io.crate.execution.engine.collect.InputCollectExpression;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
 import io.crate.metadata.FunctionIdent;
 import io.crate.metadata.Functions;
-import io.crate.metadata.StmtCtx;
-import io.crate.operation.collect.InputCollectExpression;
+import io.crate.metadata.SearchPath;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.types.DataType;
+import org.elasticsearch.Version;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.NoopCircuitBreaker;
 import org.junit.Before;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -55,15 +60,15 @@ public abstract class AggregationTest extends CrateUnitTest {
         functions = getFunctions();
     }
 
-    public Object[][] executeAggregation(String name, DataType dataType, Object[][] data) throws Exception {
+    public Object executeAggregation(String name, DataType dataType, Object[][] data) throws Exception {
         if (dataType == null) {
-            return executeAggregation(name, dataType, data, ImmutableList.<DataType>of());
+            return executeAggregation(name, dataType, data, ImmutableList.of());
         } else {
             return executeAggregation(name, dataType, data, ImmutableList.of(dataType));
         }
     }
 
-    public Object[][] executeAggregation(String name, DataType dataType, Object[][] data, List<DataType> argumentTypes) throws Exception {
+    public Object executeAggregation(String name, DataType dataType, Object[][] data, List<DataType> argumentTypes) throws Exception {
         FunctionIdent fi;
         InputCollectExpression[] inputs;
         if (dataType != null) {
@@ -73,23 +78,27 @@ public abstract class AggregationTest extends CrateUnitTest {
                 inputs[i] = new InputCollectExpression(i);
             }
         } else {
-            fi = new FunctionIdent(name, ImmutableList.<DataType>of());
+            fi = new FunctionIdent(name, ImmutableList.of());
             inputs = new InputCollectExpression[0];
         }
-        AggregationFunction impl = (AggregationFunction) functions.get(fi);
-        Object state = impl.newState(ramAccountingContext);
-
-        ArrayBucket bucket = new ArrayBucket(data);
-
-        for (Row row : bucket) {
-            for (InputCollectExpression i : inputs) {
-                i.setNextRow(row);
+        AggregationFunction impl = (AggregationFunction) functions.getQualified(fi);
+        List<Object> states = new ArrayList<>();
+        states.add(impl.newState(ramAccountingContext, Version.CURRENT));
+        for (Row row : new ArrayBucket(data)) {
+            for (InputCollectExpression input : inputs) {
+                input.setNextRow(row);
             }
-            state = impl.iterate(ramAccountingContext, state, inputs);
-
+            if (randomIntBetween(1, 4) == 1) {
+                states.add(impl.newState(ramAccountingContext, Version.CURRENT));
+            }
+            int idx = states.size() - 1;
+            states.set(idx, impl.iterate(ramAccountingContext, states.get(idx), inputs));
         }
-        state = impl.terminatePartial(ramAccountingContext, state);
-        return new Object[][]{{state}};
+        Object state = states.get(0);
+        for (int i = 1; i < states.size(); i++) {
+            state = impl.reduce(ramAccountingContext, state, states.get(i));
+        }
+        return impl.terminatePartial(ramAccountingContext, state);
     }
 
     protected Symbol normalize(String functionName, Object value, DataType type) {
@@ -97,12 +106,11 @@ public abstract class AggregationTest extends CrateUnitTest {
     }
 
     protected Symbol normalize(String functionName, Symbol... args) {
-        DataType[] argTypes = new DataType[args.length];
-        for (int i = 0; i < args.length; i++) {
-            argTypes[i] = args[i].valueType();
-        }
+        List<Symbol> arguments = Arrays.asList(args);
         AggregationFunction function =
-            (AggregationFunction) functions.get(new FunctionIdent(functionName, Arrays.asList(argTypes)));
-        return function.normalizeSymbol(new Function(function.info(), Arrays.asList(args)), new StmtCtx());
+            (AggregationFunction) functions.get(null, functionName, arguments, SearchPath.pathWithPGCatalogAndDoc());
+        return function.normalizeSymbol(
+            new Function(function.info(), arguments),
+            new CoordinatorTxnCtx(SessionContext.systemSessionContext()));
     }
 }

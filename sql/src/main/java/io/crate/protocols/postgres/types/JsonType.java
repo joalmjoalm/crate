@@ -22,15 +22,17 @@
 
 package io.crate.protocols.postgres.types;
 
-import com.google.common.base.Throwables;
+import io.netty.buffer.ByteBuf;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.xcontent.DeprecationHandler;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
-import org.jboss.netty.buffer.ChannelBuffer;
 
 import javax.annotation.Nonnull;
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 
 class JsonType extends PGType {
@@ -46,7 +48,13 @@ class JsonType extends PGType {
     }
 
     @Override
-    public int writeAsBinary(ChannelBuffer buffer, @Nonnull Object value) {
+    public int typArray() {
+        return PGArray.JSON_ARRAY.oid();
+    }
+
+
+    @Override
+    public int writeAsBinary(ByteBuf buffer, @Nonnull Object value) {
         byte[] bytes = encodeAsUTF8Text(value);
         buffer.writeInt(bytes.length);
         buffer.writeBytes(bytes);
@@ -57,8 +65,8 @@ class JsonType extends PGType {
     protected byte[] encodeAsUTF8Text(@Nonnull Object value) {
         try {
             XContentBuilder builder = JsonXContent.contentBuilder();
-            if (value.getClass().isArray()) {
-                Object[] values = ((Object[]) value);
+            if (value instanceof List) {
+                List values = ((List) value);
                 builder.startArray();
                 for (Object o : values) {
                     builder.value(o);
@@ -68,15 +76,14 @@ class JsonType extends PGType {
                 builder.map((Map) value);
             }
             builder.close();
-            BytesReference bytes = builder.bytes();
-            return bytes.toBytes();
+            return BytesReference.toBytes(BytesReference.bytes(builder));
         } catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
         }
     }
 
     @Override
-    public Object readBinaryValue(ChannelBuffer buffer, int valueLength) {
+    public Object readBinaryValue(ByteBuf buffer, int valueLength) {
         byte[] bytes = new byte[valueLength];
         buffer.readBytes(bytes);
         return decodeUTF8Text(bytes);
@@ -85,14 +92,15 @@ class JsonType extends PGType {
     @Override
     Object decodeUTF8Text(byte[] bytes) {
         try {
-            XContentParser parser = JsonXContent.jsonXContent.createParser(bytes);
+            XContentParser parser = JsonXContent.jsonXContent.createParser(
+                NamedXContentRegistry.EMPTY, DeprecationHandler.THROW_UNSUPPORTED_OPERATION, bytes);
             if (bytes.length > 1 && bytes[0] == '[') {
                 parser.nextToken();
                 return parser.list();
             }
             return parser.map();
         } catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
         }
     }
 }

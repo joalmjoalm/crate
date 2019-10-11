@@ -22,85 +22,86 @@
 
 package io.crate.rest.action;
 
-import io.crate.action.sql.BaseResultReceiver;
-import io.crate.analyze.symbol.Field;
-import io.crate.core.collections.Row;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
+import io.crate.action.sql.ResultReceiver;
+import io.crate.breaker.RowAccounting;
+import io.crate.data.Row;
+import io.crate.expression.symbol.Field;
 import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.rest.BytesRestResponse;
-import org.elasticsearch.rest.RestChannel;
-import org.elasticsearch.rest.RestStatus;
 
 import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
-class RestResultSetReceiver extends BaseResultReceiver {
+class RestResultSetReceiver implements ResultReceiver<XContentBuilder> {
 
-    private static final ESLogger LOGGER = Loggers.getLogger(RestResultSetReceiver.class);
-
-    private final RestChannel channel;
     private final List<Field> outputFields;
     private final ResultToXContentBuilder builder;
-    private long startTime;
+    private final long startTimeNs;
+    private final RowAccounting<Row> rowAccounting;
+    private final CompletableFuture<XContentBuilder> result = new CompletableFuture<>();
 
-    RestResultSetReceiver(RestChannel channel,
+    private long rowCount;
+
+    RestResultSetReceiver(XContentBuilder builder,
                           List<Field> outputFields,
-                          long startTime,
-                          boolean includeTypesOnResponse) {
-        this.channel = channel;
+                          long startTimeNs,
+                          RowAccounting<Row> rowAccounting,
+                          boolean includeTypesOnResponse) throws IOException {
         this.outputFields = outputFields;
-        this.startTime = startTime;
-        ResultToXContentBuilder tmpBuilder;
-        try {
-            tmpBuilder = ResultToXContentBuilder.builder(channel);
-            tmpBuilder.cols(outputFields);
-            if (includeTypesOnResponse) {
-                tmpBuilder.colTypes(outputFields);
-            }
-            tmpBuilder.startRows();
-        } catch (IOException e) {
-            tmpBuilder = null;
-            fail(e);
+        this.startTimeNs = startTimeNs;
+        this.rowAccounting = rowAccounting;
+        this.builder = ResultToXContentBuilder.builder(builder);
+        this.builder.cols(outputFields);
+        if (includeTypesOnResponse) {
+            this.builder.colTypes(outputFields);
         }
-        assert tmpBuilder != null;
-        builder = tmpBuilder;
+        this.builder.startRows();
     }
 
     @Override
     public void setNextRow(Row row) {
         try {
+            rowAccounting.accountForAndMaybeBreak(row);
             builder.addRow(row, outputFields.size());
+            rowCount++;
         } catch (IOException e) {
             fail(e);
         }
     }
 
     @Override
-    public void allFinished() {
+    public void batchFinished() {
+        fail(new IllegalStateException("Incremental result streaming not supported via HTTP"));
+    }
+
+    @Override
+    public void allFinished(boolean interrupted) {
         try {
-            channel.sendResponse(new BytesRestResponse(RestStatus.OK, finishBuilder()));
-            super.allFinished();
-        } catch (Throwable e) {
-            fail(e);
+            result.complete(finishBuilder());
+        } catch (IOException e) {
+            result.completeExceptionally(e);
+        } finally {
+            rowAccounting.close();
         }
     }
 
     @Override
     public void fail(@Nonnull Throwable t) {
-        try {
-            channel.sendResponse(new CrateThrowableRestResponse(channel, t));
-        } catch (Throwable e) {
-            LOGGER.error("failed to send failure response", e);
-        } finally {
-            super.fail(t);
-        }
+        result.completeExceptionally(t);
+        rowAccounting.close();
     }
 
     XContentBuilder finishBuilder() throws IOException {
-        return builder.finishRows()
-            .duration(startTime)
+        return builder
+            .finishRows()
+            .rowCount(rowCount)
+            .duration(startTimeNs)
             .build();
+    }
+
+    @Override
+    public CompletableFuture<XContentBuilder> completionFuture() {
+        return result;
     }
 }

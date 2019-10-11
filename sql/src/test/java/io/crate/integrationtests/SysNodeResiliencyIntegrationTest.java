@@ -22,24 +22,20 @@
 
 package io.crate.integrationtests;
 
-import com.google.common.collect.Sets;
-import io.crate.action.sql.SQLAction;
-import io.crate.action.sql.SQLRequest;
-import io.crate.testing.SQLTransportExecutor;
-import org.elasticsearch.client.Client;
-import org.elasticsearch.common.Strings;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.ESIntegTestCase;
-import org.elasticsearch.test.disruption.NetworkPartition;
-import org.elasticsearch.test.disruption.NetworkUnresponsivePartition;
+import org.elasticsearch.test.disruption.NetworkDisruption;
 import org.elasticsearch.test.transport.MockTransportService;
 import org.junit.Test;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
 
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
-@ESIntegTestCase.ClusterScope(minNumDataNodes = 2, transportClientRatio = 0)
+@ESIntegTestCase.ClusterScope(minNumDataNodes = 2)
 public class SysNodeResiliencyIntegrationTest extends SQLTransportIntegrationTest {
 
     @Override
@@ -49,38 +45,38 @@ public class SysNodeResiliencyIntegrationTest extends SQLTransportIntegrationTes
         return nodePlugins;
     }
 
-
     /**
      * Test that basic information from cluster state is used if a sys node
      * request is timing out
      */
     @Test
     public void testTimingOutNode() throws Exception {
-        final List<String> nodes = Arrays.asList(internalCluster().getNodeNames());
-        final String unluckyNode = randomFrom(nodes);
-        final Set<String> luckyNodes = new HashSet<>(nodes);
-        luckyNodes.remove(unluckyNode);
+        // wait until no master cluster state tasks are pending, otherwise this test may fail due to master task timeouts
+        waitNoPendingTasksOnAll();
 
-        NetworkPartition partition
-            = new NetworkUnresponsivePartition(luckyNodes, Sets.newHashSet(unluckyNode), getRandom());
+        String[] nodeNames = internalCluster().getNodeNames();
+        String n1 = nodeNames[0];
+        String n2 = nodeNames[1];
+
+        NetworkDisruption partition = new NetworkDisruption(
+            new NetworkDisruption.TwoPartitions(n1, n2), new NetworkDisruption.NetworkUnresponsive());
         setDisruptionScheme(partition);
         partition.startDisrupting();
+        try {
 
-        SQLRequest request = new SQLRequest("select version, hostname, id, name from sys.nodes where name = ?", new Object[]{unluckyNode});
-        Client client = internalCluster().client(randomFrom(luckyNodes.toArray(Strings.EMPTY_ARRAY)));
-        assert client != null;
-        response = client.execute(SQLAction.INSTANCE, request).actionGet(SQLTransportExecutor.REQUEST_TIMEOUT);
+            execute("select version, hostname, id, name from sys.nodes where name = ?",
+                new Object[]{n2},
+                createSessionOnNode(n1));
 
-        assertThat(response.rowCount(), is(1L));
-        assertThat(response.rows()[0][0], is(nullValue()));
-        assertThat(response.rows()[0][1], is(nullValue()));
-        assertThat(response.rows()[0][2], is(notNullValue()));
-        assertThat((String) response.rows()[0][3], is(unluckyNode));
-    }
-
-    @Test
-    public void testNoMatchingNode() throws Exception {
-        execute("select id, name, hostname from sys.nodes where id = 'does-not-exist'");
-        assertThat(response.rowCount(), is(0L));
+            assertThat(response.rowCount(), is(1L));
+            assertThat(response.rows()[0][0], is(nullValue()));
+            assertThat(response.rows()[0][1], is(nullValue()));
+            assertThat(response.rows()[0][2], is(notNullValue()));
+            assertThat(response.rows()[0][3], is(n2));
+        } finally {
+            partition.stopDisrupting();
+            internalCluster().clearDisruptionScheme(true);
+            waitNoPendingTasksOnAll();
+        }
     }
 }

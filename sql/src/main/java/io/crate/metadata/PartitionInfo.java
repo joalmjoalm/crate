@@ -22,26 +22,37 @@
 package io.crate.metadata;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.collect.ImmutableMap;
-import org.apache.lucene.util.BytesRef;
+import io.crate.metadata.table.StoredTable;
+import org.elasticsearch.Version;
+import org.elasticsearch.common.Nullable;
 
 import java.util.Map;
 
-public class PartitionInfo {
+public class PartitionInfo implements StoredTable {
+
     private final PartitionName name;
     private final int numberOfShards;
-    private final BytesRef numberOfReplicas;
+    private final String numberOfReplicas;
+    private final Version versionCreated;
+    private final Version versionUpgraded;
+    private final boolean closed;
     private final Map<String, Object> values;
-    private final ImmutableMap<String, Object> tableParameters;
+    private final Map<String, Object> tableParameters;
 
     public PartitionInfo(PartitionName name,
                          int numberOfShards,
-                         BytesRef numberOfReplicas,
+                         String numberOfReplicas,
+                         @Nullable Version versionCreated,
+                         @Nullable Version versionUpgraded,
+                         boolean closed,
                          Map<String, Object> values,
-                         ImmutableMap<String, Object> tableParameters) {
+                         Map<String, Object> tableParameters) {
         this.name = name;
         this.numberOfShards = numberOfShards;
         this.numberOfReplicas = numberOfReplicas;
+        this.versionCreated = versionCreated;
+        this.versionUpgraded = versionUpgraded;
+        this.closed = closed;
         this.values = values;
         this.tableParameters = tableParameters;
     }
@@ -54,8 +65,12 @@ public class PartitionInfo {
         return numberOfShards;
     }
 
-    public BytesRef numberOfReplicas() {
+    public String numberOfReplicas() {
         return numberOfReplicas;
+    }
+
+    public boolean isClosed() {
+        return closed;
     }
 
     public Map<String, Object> values() {
@@ -90,11 +105,26 @@ public class PartitionInfo {
             .add("name", name)
             .add("numberOfShards", numberOfShards)
             .add("numberOfReplicas", numberOfReplicas)
+            .add("versionCreated", versionCreated)
+            .add("versionUpgraded", versionUpgraded)
+            .add("closed", closed)
             .toString();
     }
 
-    public ImmutableMap<String, Object> tableParameters() {
+    public Map<String, Object> tableParameters() {
         return tableParameters;
+    }
+
+    @Override
+    @Nullable
+    public Version versionCreated() {
+        return versionCreated;
+    }
+
+    @Override
+    @Nullable
+    public Version versionUpgraded() {
+        return versionUpgraded;
     }
 }
 

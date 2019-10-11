@@ -22,39 +22,40 @@
 package org.elasticsearch.indices.recovery;
 
 import io.crate.blob.v2.BlobShard;
-import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
-import org.elasticsearch.common.util.concurrent.ConcurrentMapLong;
 import org.elasticsearch.index.shard.ShardId;
+
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 public class BlobRecoveryStatus {
 
-    private final RecoveryStatus indexRecoveryStatus;
-    private final ConcurrentMapLong<BlobRecoveryTransferStatus> onGoingTransfers = ConcurrentCollections.newConcurrentMapLong();
+    private final RecoveryTarget recoveryTarget;
+    private final ConcurrentMap<Long, BlobRecoveryTransferStatus> onGoingTransfers = new ConcurrentHashMap<>();
     final BlobShard blobShard;
 
 
-    public BlobRecoveryStatus(RecoveryStatus indexRecoveryStatus, BlobShard blobShard) {
-        this.indexRecoveryStatus = indexRecoveryStatus;
+    public BlobRecoveryStatus(RecoveryTarget recoveryTarget, BlobShard blobShard) {
+        this.recoveryTarget = recoveryTarget;
         this.blobShard = blobShard;
     }
 
     public long recoveryId() {
-        return indexRecoveryStatus.recoveryId();
+        return recoveryTarget.recoveryId();
     }
 
     public boolean canceled() {
-        return indexRecoveryStatus.CancellableThreads().isCancelled();
+        return recoveryTarget.cancellableThreads().isCancelled();
     }
 
     public void sentCanceledToSource() {
-        indexRecoveryStatus.CancellableThreads().checkForCancel();
+        recoveryTarget.cancellableThreads().checkForCancel();
     }
 
     public ShardId shardId() {
-        return indexRecoveryStatus.shardId();
+        return recoveryTarget.shardId();
     }
 
-    public ConcurrentMapLong<BlobRecoveryTransferStatus> onGoingTransfers() {
+    public ConcurrentMap<Long, BlobRecoveryTransferStatus> onGoingTransfers() {
         return onGoingTransfers;
     }
 }

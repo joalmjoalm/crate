@@ -21,77 +21,53 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Function;
-import com.google.common.base.Throwables;
+import io.crate.common.collections.Lists2;
 import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.doc.DocSysColumns;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.Base64;
-import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.UUIDs;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.IOException;
+import java.util.Base64;
 import java.util.List;
+import java.util.function.Function;
 
-import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.crate.common.collections.Lists2.getOnlyElement;
+
 
 public class Id {
 
-    private final static Function<List<BytesRef>, String> RANDOM_ID = new Function<List<BytesRef>, String>() {
-        @Nullable
-        @Override
-        public String apply(@Nullable List<BytesRef> input) {
-            return Strings.base64UUID();
-        }
+    private static final Function<List<String>, String> RANDOM_ID = ignored -> UUIDs.base64UUID();
+
+    private static final Function<List<String>, String> ONLY_ITEM_NULL_VALIDATION = keyValues -> {
+        return ensureNonNull(getOnlyElement(keyValues));
     };
 
-    private final static Function<List<BytesRef>, String> ONLY_ITEM_NULL_VALIDATION = new Function<List<BytesRef>, String>() {
-        @Nullable
-        @Override
-        public String apply(@Nullable List<BytesRef> input) {
-            assert input != null : "input must not be null";
-            return ensureNonNull(getOnlyElement(input)).utf8ToString();
-        }
-    };
+    private static final Function<List<String>, String> ONLY_ITEM = Lists2::getOnlyElement;
 
-    private final static Function<List<BytesRef>, String> ONLY_ITEM = new Function<List<BytesRef>, String>() {
-        @Nullable
-        @Override
-        public String apply(@Nullable List<BytesRef> input) {
-            assert input != null : "input must not be null";
-            BytesRef element = getOnlyElement(input);
-            if (element == null) {
-                return null;
-            }
-            return element.utf8ToString();
-        }
-    };
 
     /**
      * generates a function which can be used to generate an id and apply null validation.
      * <p>
-     * This variant doesn't handle the pk = _id case. Use {@link #compile(List, ColumnIdent)} if it should be handled
+     * This variant doesn't handle the pk = _id case.
      */
-    private static Function<List<BytesRef>, String> compileWithNullValidation(final int numPks,
-                                                                              final int clusteredByPosition) {
+    private static Function<List<String>, String> compileWithNullValidation(final int numPks,
+                                                                            final int clusteredByPosition) {
         switch (numPks) {
             case 0:
                 return RANDOM_ID;
             case 1:
                 return ONLY_ITEM_NULL_VALIDATION;
             default:
-                return new Function<List<BytesRef>, String>() {
-                    @Nullable
-                    @Override
-                    public String apply(@Nullable List<BytesRef> input) {
-                        assert input != null : "input must not be null";
-                        if (input.size() != numPks) {
-                            throw new IllegalArgumentException("Missing primary key values");
-                        }
-                        return encode(input, clusteredByPosition);
+                return keyValues -> {
+                    if (keyValues.size() != numPks) {
+                        throw new IllegalArgumentException("Missing primary key values");
                     }
+                    return encode(keyValues, clusteredByPosition);
                 };
         }
     }
@@ -99,9 +75,9 @@ public class Id {
     /**
      * generates a function which can be used to generate an id.
      * <p>
-     * This variant doesn't handle the pk = _id case. Use {@link #compile(List, ColumnIdent)} if it should be handled
+     * This variant doesn't handle the pk = _id case.
      */
-    public static Function<List<BytesRef>, String> compile(final int numPks, final int clusteredByPosition) {
+    public static Function<List<String>, String> compile(final int numPks, final int clusteredByPosition) {
         if (numPks == 1) {
             return ONLY_ITEM;
         }
@@ -111,7 +87,7 @@ public class Id {
     /**
      * returns a function which can be used to generate an id with null validation.
      */
-    public static Function<List<BytesRef>, String> compileWithNullValidation(final List<ColumnIdent> pkColumns, final ColumnIdent clusteredBy) {
+    public static Function<List<String>, String> compileWithNullValidation(final List<ColumnIdent> pkColumns, final ColumnIdent clusteredBy) {
         final int numPks = pkColumns.size();
         if (numPks == 1 && getOnlyElement(pkColumns).equals(DocSysColumns.ID)) {
             return RANDOM_ID;
@@ -119,51 +95,41 @@ public class Id {
         return compileWithNullValidation(numPks, pkColumns.indexOf(clusteredBy));
     }
 
-    /**
-     * returns a function which can be used to generate an id.
-     */
-    public static Function<List<BytesRef>, String> compile(final List<ColumnIdent> pkColumns, final ColumnIdent clusteredBy) {
-        final int numPks = pkColumns.size();
-        if (numPks == 1 && getOnlyElement(pkColumns).equals(DocSysColumns.ID)) {
-            return RANDOM_ID;
-        }
-        return compile(numPks, pkColumns.indexOf(clusteredBy));
-    }
 
     @Nonnull
-    private static BytesRef ensureNonNull(@Nullable BytesRef pkValue) throws IllegalArgumentException {
+    private static <T> T ensureNonNull(@Nullable T pkValue) throws IllegalArgumentException {
         if (pkValue == null) {
             throw new IllegalArgumentException("A primary key value must not be NULL");
         }
         return pkValue;
     }
 
-    private static String encode(List<BytesRef> values, int clusteredByPosition) {
+    private static String encode(List<String> values, int clusteredByPosition) {
         try (BytesStreamOutput out = new BytesStreamOutput(estimateSize(values))) {
             int size = values.size();
             out.writeVInt(size);
             if (clusteredByPosition >= 0) {
-                out.writeBytesRef(ensureNonNull(values.get(clusteredByPosition)));
+                out.writeBytesRef(new BytesRef(ensureNonNull(values.get(clusteredByPosition))));
             }
             for (int i = 0; i < size; i++) {
                 if (i != clusteredByPosition) {
-                    out.writeBytesRef(ensureNonNull(values.get(i)));
+                    out.writeBytesRef(new BytesRef(ensureNonNull(values.get(i))));
                 }
             }
-            return Base64.encodeBytes(out.bytes().toBytes());
+            return Base64.getEncoder().encodeToString(BytesReference.toBytes(out.bytes()));
         } catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw new RuntimeException(e);
         }
     }
 
     /**
      * estimates the size the bytesRef values will take if written onto a StreamOutput using the String streamer
      */
-    private static int estimateSize(Iterable<BytesRef> values) {
+    private static int estimateSize(Iterable<String> values) {
         int expectedEncodedSize = 0;
-        for (BytesRef value : values) {
+        for (String value : values) {
             // 5 bytes for the value of the length itself using vInt
-            expectedEncodedSize += 5 + (value != null ? value.length : 0);
+            expectedEncodedSize += 5 + (value != null ? value.length() : 0);
         }
         return expectedEncodedSize;
     }

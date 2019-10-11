@@ -23,7 +23,6 @@ package io.crate.breaker;
 
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.types.DataTypes;
-import org.apache.lucene.util.BytesRef;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.is;
@@ -31,19 +30,19 @@ import static org.hamcrest.Matchers.is;
 public class SizeEstimatorTest extends CrateUnitTest {
 
     @Test
-    public void testBytesRef() throws Exception {
+    public void testString() throws Exception {
         SizeEstimator sizeEstimator = SizeEstimatorFactory.create(DataTypes.STRING);
         assertThat(sizeEstimator.estimateSize(null), is(8L));
-        assertThat(sizeEstimator.estimateSize(new BytesRef("hello")), is(69L));
-        assertThat(sizeEstimator.estimateSizeDelta(new BytesRef("hello"), new BytesRef("hello world")), is(6L));
+        assertThat(sizeEstimator.estimateSize("hello"), is(37L));
+        assertThat(sizeEstimator.estimateSizeDelta("hello", "hello world"), is(6L));
     }
 
     @Test
     public void testConstant() throws Exception {
         SizeEstimator sizeEstimator = SizeEstimatorFactory.create(DataTypes.BYTE);
         assertThat(sizeEstimator.estimateSize(null), is(8L));
-        assertThat(sizeEstimator.estimateSize(new Byte("100")), is(16L));
-        assertThat(sizeEstimator.estimateSizeDelta(new Byte("100"), new Byte("42")), is(0L));
+        assertThat(sizeEstimator.estimateSize(Byte.valueOf("100")), is(16L));
+        assertThat(sizeEstimator.estimateSizeDelta(Byte.valueOf("100"), Byte.valueOf("42")), is(0L));
     }
 
     @Test
@@ -53,5 +52,4 @@ public class SizeEstimatorTest extends CrateUnitTest {
         assertThat(sizeEstimator.estimateSize(new Double[]{1.0d, 2.0d}), is(40L));
         assertThat(sizeEstimator.estimateSizeDelta(new Double[]{1.0d, 2.0d}, null), is(-32L));
     }
-
 }

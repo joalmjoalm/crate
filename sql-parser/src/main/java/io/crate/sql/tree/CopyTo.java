@@ -22,39 +22,36 @@
 package io.crate.sql.tree;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Optional;
-import com.google.common.collect.ImmutableList;
 
-import javax.annotation.Nullable;
 import java.util.List;
+import java.util.Optional;
 
 public class CopyTo extends Statement {
 
-
-    private final Table table;
+    private final Table<Expression> table;
     private final boolean directoryUri;
     private final Expression targetUri;
 
-    private final Optional<GenericProperties> genericProperties;
+    private final GenericProperties<Expression> genericProperties;
     private final List<Expression> columns;
     private final Optional<Expression> whereClause;
 
-    public CopyTo(Table table,
-                  @Nullable List<Expression> columns,
-                  @Nullable Expression whereClause,
+    public CopyTo(Table<Expression> table,
+                  List<Expression> columns,
+                  Optional<Expression> whereClause,
                   boolean directoryUri,
                   Expression targetUri,
-                  @Nullable GenericProperties genericProperties) {
+                  GenericProperties<Expression> genericProperties) {
 
         this.table = table;
         this.directoryUri = directoryUri;
         this.targetUri = targetUri;
-        this.genericProperties = Optional.fromNullable(genericProperties);
-        this.columns = MoreObjects.firstNonNull(columns, ImmutableList.<Expression>of());
-        this.whereClause = Optional.fromNullable(whereClause);
+        this.genericProperties = genericProperties;
+        this.columns = columns;
+        this.whereClause = whereClause;
     }
 
-    public Table table() {
+    public Table<Expression> table() {
         return table;
     }
 
@@ -70,8 +67,7 @@ public class CopyTo extends Statement {
         return columns;
     }
 
-
-    public Optional<GenericProperties> genericProperties() {
+    public GenericProperties<Expression> genericProperties() {
         return genericProperties;
     }
 

@@ -21,30 +21,76 @@
 
 package io.crate.analyze.expressions;
 
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.metadata.FunctionInfo;
-import io.crate.metadata.StmtCtx;
+import io.crate.sql.tree.ArrayComparisonExpression;
+import io.crate.sql.tree.DefaultTraversalVisitor;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.SubqueryExpression;
+import io.crate.sql.tree.Window;
 
-import java.util.List;
+import java.util.IdentityHashMap;
+import java.util.Map;
 
+/**
+ * State which is passed during translation in the {@link ExpressionAnalyzer}.
+ */
 public class ExpressionAnalysisContext {
 
-    private final StmtCtx stmtCtx;
+    private final ArrayChildVisitor arrayChildVisitor = new ArrayChildVisitor();
+    private final Map<SubqueryExpression, Object> arrayExpressionsChildren = new IdentityHashMap<>();
 
-    public boolean hasAggregates = false;
+    private boolean hasAggregates;
+    private boolean allowEagerNormalize = true;
 
-    public ExpressionAnalysisContext(StmtCtx stmtCtx) {
-        this.stmtCtx = stmtCtx;
+    private Map<String, Window> windows = Map.of();
+
+    void indicateAggregates() {
+        hasAggregates = true;
     }
 
-    public Function allocateFunction(FunctionInfo functionInfo, List<Symbol> arguments) {
-        Function newFunction = new Function(functionInfo, arguments);
-        hasAggregates = hasAggregates || functionInfo.type() == FunctionInfo.Type.AGGREGATE;
-        return newFunction;
+    public boolean hasAggregates() {
+        return hasAggregates;
     }
 
-    public StmtCtx statementContext() {
-        return stmtCtx;
+    public boolean isEagerNormalizationAllowed() {
+        return allowEagerNormalize;
+    }
+
+    public void allowEagerNormalize(boolean value) {
+        this.allowEagerNormalize = value;
+    }
+
+    public void windows(Map<String, Window> windows) {
+        this.windows = windows;
+    }
+
+    public Map<String, Window> windows() {
+        return windows;
+    }
+
+    /**
+     * Registers the given expression as the child of an Array Expression.
+     * Example of usage: Can be used by downstream operators to check if a SubqueryExpression is part of
+     * an {@link ArrayComparisonExpression}.
+     * @param arrayExpressionChild the expression to register
+     */
+    void registerArrayChild(Expression arrayExpressionChild) {
+        arrayExpressionChild.accept(arrayChildVisitor, null);
+    }
+
+    /**
+     * Checks if the given SubqueryExpression is part of an Array Expression.
+     * @return True if the given expression has previously been registered.
+     */
+    boolean isArrayChild(SubqueryExpression expression) {
+        return arrayExpressionsChildren.containsKey(expression);
+    }
+
+    private class ArrayChildVisitor extends DefaultTraversalVisitor<Void, Void> {
+
+        @Override
+        protected Void visitSubqueryExpression(SubqueryExpression node, Void context) {
+            arrayExpressionsChildren.put(node, null);
+            return null;
+        }
     }
 }

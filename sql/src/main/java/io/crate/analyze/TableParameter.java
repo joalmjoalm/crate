@@ -23,25 +23,26 @@ package io.crate.analyze;
 
 import org.elasticsearch.common.settings.Settings;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 public class TableParameter {
 
+    private final Settings.Builder settingsBuilder;
+    private final Settings.Builder mappingsBuilder;
 
-    private Settings.Builder settingsBuilder;
     private Settings settings;
-    private final Map<String, Object> mappings = new HashMap<>();
+    private Map<String, Object> mappings;
 
     public TableParameter() {
         settingsBuilder = Settings.builder();
+        mappingsBuilder = Settings.builder();
     }
 
     public TableParameter(Settings settings, List<String> settingsFilter) {
         this();
         for (String settingName : settingsFilter) {
-            Object setting = settings.get(settingName);
+            String setting = settings.get(settingName);
             if (setting != null) {
                 settingsBuilder().put(settingName, setting);
             }
@@ -59,8 +60,14 @@ public class TableParameter {
         return settings;
     }
 
-    public Map<String, Object> mappings() {
-        return mappings;
+    public Settings.Builder mappingsBuilder() {
+        return mappingsBuilder;
     }
 
+    public Map<String, Object> mappings() {
+        if (mappings == null) {
+            mappings = mappingsBuilder.build().getAsStructuredMap();
+        }
+        return mappings;
+    }
 }

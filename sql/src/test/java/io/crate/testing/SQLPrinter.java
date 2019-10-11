@@ -22,12 +22,13 @@
 
 package io.crate.testing;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.Ordering;
+import io.crate.analyze.HavingClause;
 import io.crate.analyze.OrderBy;
-import io.crate.analyze.QuerySpec;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.format.SymbolPrinter;
+import io.crate.analyze.QueryClause;
+import io.crate.analyze.relations.AnalyzedRelation;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.format.SymbolPrinter;
 
 import java.util.Collection;
 import java.util.HashSet;
@@ -37,8 +38,8 @@ public class SQLPrinter {
     private static final TestingSymbolPrinter TESTING_SYMBOL_PRINTER = new TestingSymbolPrinter();
 
     public static String print(Object o) {
-        if (o instanceof QuerySpec) {
-            return print((QuerySpec) o);
+        if (o instanceof AnalyzedRelation) {
+            return print((AnalyzedRelation) o);
         } else if (o instanceof OrderBy) {
             return print((OrderBy) o);
         } else if (o instanceof Symbol) {
@@ -49,6 +50,14 @@ public class SQLPrinter {
             return print((Collection<Symbol>) o);
         } else if (o == null) {
             return "null";
+        } else if (o instanceof QueryClause) {
+            if (((QueryClause) o).hasQuery()) {
+                return print(((QueryClause) o).query());
+            } else if (((QueryClause) o).noMatch()){
+                return "false";
+            } else {
+                return "true";
+            }
         }
         return o.toString();
     }
@@ -72,43 +81,46 @@ public class SQLPrinter {
         return sb.toString();
     }
 
-    public static String print(QuerySpec spec) {
+    public static String print(AnalyzedRelation relation) {
         StringBuilder sb = new StringBuilder();
 
         sb.append("SELECT ");
-        TESTING_SYMBOL_PRINTER.process(spec.outputs(), sb);
+        TESTING_SYMBOL_PRINTER.process(relation.outputs(), sb);
 
-        if (spec.where().hasQuery()) {
+        if (relation.where().hasQuery()) {
             sb.append(" WHERE ");
-            TESTING_SYMBOL_PRINTER.process(spec.where().query(), sb);
+            TESTING_SYMBOL_PRINTER.process(relation.where().query(), sb);
         }
-        if (spec.groupBy().isPresent()) {
+        if (!relation.groupBy().isEmpty()) {
             sb.append(" GROUP BY ");
-            TESTING_SYMBOL_PRINTER.process(spec.groupBy().get(), sb);
+            TESTING_SYMBOL_PRINTER.process(relation.groupBy(), sb);
         }
-        if (spec.having().isPresent()) {
+        HavingClause having = relation.having();
+        if (having != null) {
             sb.append(" HAVING ");
-            TESTING_SYMBOL_PRINTER.process(spec.having().get().query(), sb);
+            TESTING_SYMBOL_PRINTER.process(having.query(), sb);
         }
-        if (spec.orderBy().isPresent()) {
+        OrderBy orderBy = relation.orderBy();
+        if (orderBy != null) {
             sb.append(" ORDER BY ");
-            TESTING_SYMBOL_PRINTER.process(spec.orderBy().get(), sb);
+            TESTING_SYMBOL_PRINTER.process(orderBy, sb);
         }
-        Optional<Symbol> limit = spec.limit();
-        if (limit.isPresent()) {
+        Symbol limit = relation.limit();
+        if (limit != null) {
             sb.append(" LIMIT ");
-            sb.append(print(limit.get()));
+            sb.append(print(limit));
         }
-        Optional<Symbol> offset = spec.offset();
-        if (offset.isPresent()) {
+        Symbol offset = relation.offset();
+        if (offset != null) {
             sb.append(" OFFSET ");
-            sb.append(print(offset.get()));
+            sb.append(print(offset));
         }
         return sb.toString();
     }
 
+
     /**
-     * produces same results as with {@link SymbolPrinter#printFullQualified(Symbol)} but is
+     * produces same results as with {@link SymbolPrinter#printQualified(Symbol)} but is
      * able to format other symbols that {@link SymbolPrinter} is not able to.
      */
     private static class TestingSymbolPrinter {
@@ -125,7 +137,7 @@ public class SQLPrinter {
         }
 
         public void process(Symbol symbol, StringBuilder sb) {
-            sb.append(SymbolPrinter.INSTANCE.printFullQualified(symbol));
+            sb.append(SymbolPrinter.INSTANCE.printQualified(symbol));
         }
 
         public void process(OrderBy orderBy, StringBuilder sb) {
@@ -138,8 +150,8 @@ public class SQLPrinter {
                 if (orderBy.reverseFlags()[i]) {
                     sb.append(" DESC");
                 }
-                Boolean nullsFirst = orderBy.nullsFirst()[i];
-                if (nullsFirst != null) {
+                boolean nullsFirst = orderBy.nullsFirst()[i];
+                if (orderBy.reverseFlags()[i] != nullsFirst) {
                     sb.append(" NULLS");
                     if (nullsFirst) {
                         sb.append(" FIRST");

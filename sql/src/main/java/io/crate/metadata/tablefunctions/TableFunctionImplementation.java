@@ -22,18 +22,34 @@
 
 package io.crate.metadata.tablefunctions;
 
-import io.crate.core.collections.Bucket;
+import io.crate.data.Row;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.FunctionInfo;
+import io.crate.metadata.Scalar;
+import io.crate.metadata.TransactionContext;
 import io.crate.metadata.table.TableInfo;
-import io.crate.operation.Input;
-import io.crate.types.DataType;
-import org.elasticsearch.cluster.ClusterService;
 
-import java.util.Collection;
-import java.util.List;
+/**
+ * Interface which needs to be implemented by functions returning whole tables as result.
+ */
+public abstract class TableFunctionImplementation<T> extends Scalar<Iterable<Row>, T> {
 
-public interface TableFunctionImplementation {
+    @Override
+    public Symbol normalizeSymbol(Function function, TransactionContext txnCtx) {
+        // Never normalize table functions;
+        // The RelationAnalyzer expects a function symbol and can't deal with Literals
+        return function;
+    }
 
-    Bucket execute(Collection<? extends Input> arguments);
-
-    TableInfo createTableInfo(ClusterService clusterService, List<? extends DataType> argumentTypes);
+    /**
+     * Creates the metadata for the table that is generated upon execution of this function. This is the actual return
+     * type of the table function.
+     * <p>
+     * Note: The result type of the {@link FunctionInfo} that is returned by {@link #info()}
+     * is ignored for table functions.
+     *
+     * @return a table info object representing the actual return type of the function.
+     */
+    public abstract TableInfo createTableInfo();
 }

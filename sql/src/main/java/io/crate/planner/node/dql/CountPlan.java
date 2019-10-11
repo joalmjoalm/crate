@@ -21,55 +21,131 @@
 
 package io.crate.planner.node.dql;
 
-import io.crate.planner.PlanAndPlannedAnalyzedRelation;
-import io.crate.planner.PlanVisitor;
-import io.crate.planner.distribution.UpstreamPhase;
-import io.crate.planner.projection.Projection;
+import io.crate.execution.dsl.phases.CountPhase;
+import io.crate.execution.dsl.phases.MergePhase;
+import io.crate.execution.engine.pipeline.TopN;
+import io.crate.planner.ExecutionPlan;
+import io.crate.planner.ExecutionPlanVisitor;
+import io.crate.planner.PositionalOrderBy;
+import io.crate.planner.ResultDescription;
+import io.crate.planner.distribution.DistributionInfo;
+import io.crate.execution.dsl.projection.Projection;
+import io.crate.types.DataType;
 
-import java.util.UUID;
+import javax.annotation.Nullable;
+import java.util.Collection;
+import java.util.List;
+import java.util.Objects;
 
-public class CountPlan extends PlanAndPlannedAnalyzedRelation {
+public class CountPlan implements ExecutionPlan, ResultDescription {
 
-    private final CountPhase countNode;
-    private final MergePhase mergeNode;
-    private final UUID id;
+    private final CountPhase countPhase;
+    private final MergePhase mergePhase;
 
-    public CountPlan(CountPhase countNode, MergePhase mergeNode, UUID id) {
-        this.countNode = countNode;
-        this.mergeNode = mergeNode;
-        this.id = id;
+    private int unfinishedLimit = TopN.NO_LIMIT;
+    private int unfinishedOffset = 0;
+
+    @Nullable
+    private PositionalOrderBy unfinishedOrderBy = null;
+
+    public CountPlan(CountPhase countPhase, MergePhase mergePhase) {
+        this.countPhase = countPhase;
+        this.mergePhase = mergePhase;
     }
 
-    public CountPhase countNode() {
-        return countNode;
+    public CountPhase countPhase() {
+        return countPhase;
     }
 
-    public MergePhase mergeNode() {
-        return mergeNode;
+    public MergePhase mergePhase() {
+        return mergePhase;
     }
 
     @Override
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context) {
+    public <C, R> R accept(ExecutionPlanVisitor<C, R> visitor, C context) {
         return visitor.visitCountPlan(this, context);
     }
 
     @Override
-    public UUID jobId() {
-        return id;
-    }
-
-    @Override
     public void addProjection(Projection projection) {
-        mergeNode.addProjection(projection);
+        mergePhase.addProjection(projection);
     }
 
     @Override
-    public boolean resultIsDistributed() {
-        return false;
+    public void addProjection(Projection projection,
+                              int unfinishedLimit,
+                              int unfinishedOffset,
+                              @Nullable PositionalOrderBy unfinishedOrderBy) {
+        mergePhase.addProjection(projection);
+        this.unfinishedLimit = unfinishedLimit;
+        this.unfinishedOffset = unfinishedOffset;
+        this.unfinishedOrderBy = unfinishedOrderBy;
     }
 
     @Override
-    public UpstreamPhase resultPhase() {
-        return mergeNode;
+    public ResultDescription resultDescription() {
+        return this;
+    }
+
+    @Override
+    public void setDistributionInfo(DistributionInfo distributionInfo) {
+        mergePhase.distributionInfo(distributionInfo);
+    }
+
+    @Override
+    public Collection<String> nodeIds() {
+        return mergePhase.nodeIds();
+    }
+
+    @Nullable
+    @Override
+    public PositionalOrderBy orderBy() {
+        return unfinishedOrderBy;
+    }
+
+    @Override
+    public int limit() {
+        return unfinishedLimit;
+    }
+
+    @Override
+    public int maxRowsPerNode() {
+        return 1;
+    }
+
+    @Override
+    public int offset() {
+        return unfinishedOffset;
+    }
+
+    @Override
+    public int numOutputs() {
+        return mergePhase.outputTypes().size();
+    }
+
+    @Override
+    public List<DataType> streamOutputs() {
+        return mergePhase.outputTypes();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        CountPlan countPlan = (CountPlan) o;
+        return unfinishedLimit == countPlan.unfinishedLimit &&
+               unfinishedOffset == countPlan.unfinishedOffset &&
+               Objects.equals(countPhase, countPlan.countPhase) &&
+               Objects.equals(mergePhase, countPlan.mergePhase) &&
+               Objects.equals(unfinishedOrderBy, countPlan.unfinishedOrderBy);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(countPhase, mergePhase, unfinishedLimit, unfinishedOffset, unfinishedOrderBy);
     }
 }

@@ -24,44 +24,30 @@ package io.crate.analyze;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import io.crate.exceptions.PartitionAlreadyExistsException;
-import io.crate.exceptions.TableAlreadyExistsException;
-import io.crate.executor.transport.RepositoryService;
+import io.crate.exceptions.RelationAlreadyExists;
+import io.crate.execution.ddl.RepositoryService;
 import io.crate.metadata.PartitionName;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
 import io.crate.metadata.doc.DocTableInfo;
-import io.crate.metadata.settings.SettingsApplier;
-import io.crate.metadata.settings.SettingsAppliers;
-import io.crate.metadata.table.TableInfo;
+import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.RestoreSnapshot;
 import io.crate.sql.tree.Table;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
 import org.elasticsearch.common.settings.Settings;
 
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
-import static io.crate.analyze.SnapshotSettings.IGNORE_UNAVAILABLE;
-import static io.crate.analyze.SnapshotSettings.WAIT_FOR_COMPLETION;
+import static io.crate.analyze.SnapshotSettings.SETTINGS;
 
-@Singleton
-public class RestoreSnapshotAnalyzer {
-
-    private static final ImmutableMap<String, SettingsApplier> SETTINGS = ImmutableMap.<String, SettingsApplier>builder()
-        .put(IGNORE_UNAVAILABLE.name(), new SettingsAppliers.BooleanSettingsApplier(IGNORE_UNAVAILABLE))
-        .put(WAIT_FOR_COMPLETION.name(), new SettingsAppliers.BooleanSettingsApplier(WAIT_FOR_COMPLETION))
-        .build();
+class RestoreSnapshotAnalyzer {
 
     private final RepositoryService repositoryService;
     private final Schemas schemas;
 
-    @Inject
-    public RestoreSnapshotAnalyzer(RepositoryService repositoryService, Schemas schemas) {
+    RestoreSnapshotAnalyzer(RepositoryService repositoryService, Schemas schemas) {
         this.repositoryService = repositoryService;
         this.schemas = schemas;
     }
@@ -74,49 +60,44 @@ public class RestoreSnapshotAnalyzer {
         repositoryService.failIfRepositoryDoesNotExist(repositoryName);
 
         // validate and extract settings
-        Settings.Builder builder = GenericPropertiesConverter.settingsFromProperties(
-            node.properties(), analysis.parameterContext(), SETTINGS);
+        Settings settings = GenericPropertiesConverter.settingsFromProperties(
+            node.properties(), analysis.parameterContext().parameters(), SETTINGS).build();
 
         if (node.tableList().isPresent()) {
             List<Table> tableList = node.tableList().get();
-            Set<String> restoreIndices = new HashSet<>(tableList.size());
+            Set<RestoreSnapshotAnalyzedStatement.RestoreTableInfo> restoreTables = new HashSet<>(tableList.size());
             for (Table table : tableList) {
-                TableIdent tableIdent = TableIdent.of(table, analysis.sessionContext().defaultSchema());
-                boolean tableExists = schemas.tableExists(tableIdent);
+                RelationName relationName = RelationName.of(table.getName(),
+                    analysis.sessionContext().searchPath().currentSchema());
+
+                boolean tableExists = schemas.tableExists(relationName);
 
                 if (tableExists) {
                     if (table.partitionProperties().isEmpty()) {
-                        throw new TableAlreadyExistsException(tableIdent);
+                        throw new RelationAlreadyExists(relationName);
                     }
 
-                    TableInfo tableInfo = schemas.getTableInfo(tableIdent);
-                    if (!(tableInfo instanceof DocTableInfo)) {
-                        throw new IllegalArgumentException(
-                            String.format(Locale.ENGLISH, "Cannot restore snapshot of tables in schema '%s'", tableInfo.ident().schema()));
-                    }
-                    DocTableInfo docTableInfo = ((DocTableInfo) tableInfo);
+                    DocTableInfo docTableInfo = schemas.getTableInfo(relationName, Operation.RESTORE_SNAPSHOT);
                     PartitionName partitionName = PartitionPropertiesAnalyzer.toPartitionName(
-                        tableIdent,
+                        relationName,
                         docTableInfo,
                         table.partitionProperties(),
                         analysis.parameterContext().parameters());
                     if (docTableInfo.partitions().contains(partitionName)) {
                         throw new PartitionAlreadyExistsException(partitionName);
                     }
-                    restoreIndices.add(partitionName.asIndexName());
+                    restoreTables.add(new RestoreSnapshotAnalyzedStatement.RestoreTableInfo(relationName, partitionName));
                 } else {
                     if (table.partitionProperties().isEmpty()) {
-                        // add a partitions wildcard
-                        // to match all partitions if a partitioned table was meant
-                        restoreIndices.add(PartitionName.templateName(tableIdent.schema(), tableIdent.name()) + "*");
-                        // add index name
-                        restoreIndices.add(tableIdent.indexName());
+                        restoreTables.add(new RestoreSnapshotAnalyzedStatement.RestoreTableInfo(relationName, null));
                     } else {
-                        restoreIndices.add(PartitionPropertiesAnalyzer.toPartitionName(
-                            tableIdent,
+                        PartitionName partitionName = PartitionPropertiesAnalyzer.toPartitionName(
+                            relationName,
                             null,
                             table.partitionProperties(),
-                            analysis.parameterContext().parameters()).asIndexName());
+                            analysis.parameterContext().parameters());
+                        restoreTables.add(new RestoreSnapshotAnalyzedStatement.RestoreTableInfo(
+                            relationName, partitionName));
                     }
                 }
             }
@@ -124,10 +105,10 @@ public class RestoreSnapshotAnalyzer {
             return RestoreSnapshotAnalyzedStatement.forTables(
                 nameParts.get(1),
                 repositoryName,
-                builder.build(),
-                ImmutableList.copyOf(restoreIndices));
+                settings,
+                ImmutableList.copyOf(restoreTables));
         } else {
-            return RestoreSnapshotAnalyzedStatement.all(nameParts.get(1), repositoryName, builder.build());
+            return RestoreSnapshotAnalyzedStatement.all(nameParts.get(1), repositoryName, settings);
         }
     }
 }

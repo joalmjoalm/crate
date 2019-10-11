@@ -21,11 +21,12 @@
 
 package io.crate.analyze.validator;
 
-import io.crate.analyze.symbol.Field;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolVisitor;
-import io.crate.analyze.symbol.format.SymbolFormatter;
+import io.crate.expression.symbol.Field;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolVisitor;
+import io.crate.expression.symbol.WindowFunction;
+import io.crate.expression.symbol.format.SymbolFormatter;
 import io.crate.metadata.FunctionInfo;
 
 import javax.annotation.Nullable;
@@ -34,10 +35,10 @@ import java.util.List;
 
 public class HavingSymbolValidator {
 
-    private final static InnerValidator INNER_VALIDATOR = new InnerValidator();
+    private static final InnerValidator INNER_VALIDATOR = new InnerValidator();
 
     public static void validate(Symbol symbol, @Nullable List<Symbol> groupBySymbols) throws IllegalArgumentException {
-        INNER_VALIDATOR.process(symbol, new HavingContext(groupBySymbols));
+        symbol.accept(INNER_VALIDATOR, new HavingContext(groupBySymbols));
     }
 
     static class HavingContext {
@@ -47,8 +48,12 @@ public class HavingSymbolValidator {
 
         private boolean insideAggregation = false;
 
-        public HavingContext(@Nullable List<Symbol> groupBySymbols) {
+        HavingContext(@Nullable List<Symbol> groupBySymbols) {
             this.groupBySymbols = groupBySymbols;
+        }
+
+        boolean groupByContains(Symbol symbol) {
+            return groupBySymbols != null && groupBySymbols.contains(symbol);
         }
     }
 
@@ -56,8 +61,7 @@ public class HavingSymbolValidator {
 
         @Override
         public Void visitField(Field field, HavingContext context) {
-            if (!context.insideAggregation &&
-                (context.groupBySymbols == null || !context.groupBySymbols.contains(field))) {
+            if (!context.insideAggregation && !context.groupByContains(field)) {
                 throw new IllegalArgumentException(
                     SymbolFormatter.format("Cannot use column %s outside of an Aggregation in HAVING clause. " +
                                            "Only GROUP BY keys allowed here.", field));
@@ -66,15 +70,31 @@ public class HavingSymbolValidator {
         }
 
         @Override
-        public Void visitFunction(Function symbol, HavingContext context) {
-            if (symbol.info().type().equals(FunctionInfo.Type.AGGREGATE)) {
+        public Void visitFunction(Function function, HavingContext context) {
+            FunctionInfo.Type type = function.info().type();
+            if (type == FunctionInfo.Type.TABLE) {
+                throw new IllegalArgumentException("Table functions are not allowed in HAVING");
+            } else if (type == FunctionInfo.Type.AGGREGATE) {
                 context.insideAggregation = true;
+            } else {
+                // allow function if it is part of the grouping symbols
+                if (context.groupByContains(function)) {
+                    return null;
+                }
             }
-            for (Symbol argument : symbol.arguments()) {
-                process(argument, context);
+
+            for (Symbol argument : function.arguments()) {
+                argument.accept(this, context);
             }
-            context.insideAggregation = false;
+            if (type == FunctionInfo.Type.AGGREGATE) {
+                context.insideAggregation = false;
+            }
             return null;
+        }
+
+        @Override
+        public Void visitWindowFunction(WindowFunction symbol, HavingContext context) {
+            throw new IllegalArgumentException("Window functions are not allowed in HAVING");
         }
 
         @Override

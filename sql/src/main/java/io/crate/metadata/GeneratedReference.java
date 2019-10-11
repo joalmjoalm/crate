@@ -23,10 +23,10 @@
 package io.crate.metadata;
 
 import com.google.common.base.Objects;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolType;
-import io.crate.analyze.symbol.Symbols;
-import io.crate.metadata.table.ColumnPolicy;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolType;
+import io.crate.expression.symbol.Symbols;
+import io.crate.sql.tree.ColumnPolicy;
 import io.crate.types.DataType;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -37,36 +37,40 @@ import java.util.List;
 
 public class GeneratedReference extends Reference {
 
-    public static final SymbolFactory<GeneratedReference> FACTORY = new SymbolFactory<GeneratedReference>() {
-        @Override
-        public GeneratedReference newInstance() {
-            return new GeneratedReference();
-        }
-    };
+    private final String formattedGeneratedExpression;
 
-    private String formattedGeneratedExpression;
     private Symbol generatedExpression;
     private List<Reference> referencedReferences;
 
-    private GeneratedReference() {
+    public GeneratedReference(StreamInput in) throws IOException {
+        super(in);
+        formattedGeneratedExpression = in.readString();
+        generatedExpression = Symbols.fromStream(in);
+        int size = in.readVInt();
+        referencedReferences = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            referencedReferences.add(Reference.fromStream(in));
+        }
     }
 
-    public GeneratedReference(ReferenceIdent ident,
+    public GeneratedReference(Integer position,
+                              ReferenceIdent ident,
                               RowGranularity granularity,
                               DataType type,
                               ColumnPolicy columnPolicy,
                               IndexType indexType,
                               String formattedGeneratedExpression,
                               boolean nullable) {
-        super(ident, granularity, type, columnPolicy, indexType, nullable);
+        super(ident, granularity, type, columnPolicy, indexType, nullable, position, null);
         this.formattedGeneratedExpression = formattedGeneratedExpression;
     }
 
-    public GeneratedReference(ReferenceIdent ident,
+    public GeneratedReference(Integer position,
+                              ReferenceIdent ident,
                               RowGranularity granularity,
                               DataType type,
                               String formattedGeneratedExpression) {
-        super(ident, granularity, type);
+        super(ident, granularity, type, position, null);
         this.formattedGeneratedExpression = formattedGeneratedExpression;
     }
 
@@ -115,23 +119,8 @@ public class GeneratedReference extends Reference {
 
     @Override
     public String toString() {
-        return "GeneratedReference{" +
-               "formattedGeneratedExpression='" + formattedGeneratedExpression + '\'' +
-               ", generatedExpression=" + generatedExpression +
-               ", referencedReferences=" + referencedReferences +
-               '}';
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
-        formattedGeneratedExpression = in.readString();
-        generatedExpression = Symbols.fromStream(in);
-        int size = in.readVInt();
-        referencedReferences = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            referencedReferences.add(Reference.fromStream(in));
-        }
+        return "Generated{" + column() + " AS " + formattedGeneratedExpression
+               + ", type=" + valueType() + '}';
     }
 
     @Override

@@ -21,32 +21,33 @@
 
 package io.crate.integrationtests;
 
-import com.google.common.base.Predicate;
-import io.crate.action.sql.SQLAction;
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLRequest;
-import io.crate.action.sql.SQLResponse;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.TestingHelpers;
 import io.crate.testing.UseJdbc;
-import org.elasticsearch.client.Client;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Test;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.core.IsInstanceOf.instanceOf;
 
-@ESIntegTestCase.ClusterScope(minNumDataNodes = 2, transportClientRatio = 0)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(minNumDataNodes = 2)
 public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
 
     private void setUpSimple() throws IOException {
         setUpSimple(2);
     }
 
-    private void setUpSimple(int numShards) throws IOException {
+    private void setUpSimple(int numShards) {
         String stmt = String.format(Locale.ENGLISH, "create table t1 (" +
                                                     " id integer primary key," +
                                                     " string_field string," +
@@ -57,10 +58,11 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
                                                     " long_field long," +
                                                     " float_field float," +
                                                     " double_field double," +
-                                                    " timestamp_field timestamp," +
-                                                    " object_field object as (\"inner\" timestamp)," +
+                                                    " timestamp_field timestamp with time zone," +
+                                                    " object_field object as (\"inner\" timestamp with time zone)," +
                                                     " ip_field ip" +
-                                                    ") clustered by (id) into %d shards with(number_of_replicas=0)", numShards);
+                                                    ") clustered by (id) into %d shards " +
+                                                    "with (number_of_replicas=0, column_policy = 'dynamic')", numShards);
         execute(stmt);
         ensureYellow();
     }
@@ -69,18 +71,14 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
     public void testInsertAtNodeWithoutShard() throws Exception {
         setUpSimple(1);
 
-        Iterator<Client> iterator = clients().iterator();
-        Client client1 = iterator.next();
-        Client client2 = iterator.next();
+        execute("insert into t1 (id, string_field, timestamp_field, byte_field) values (?, ?, ?, ?)",
+                new Object[]{1, "With", "1970-01-01T00:00:00", 127},
+                createSessionOnNode(internalCluster().getNodeNames()[0]));
 
-        client1.execute(SQLAction.INSTANCE, new SQLRequest(
-            "insert into t1 (id, string_field, " +
-            "timestamp_field, byte_field) values (?, ?, ?, ?)", new Object[]{1, "With",
-            "1970-01-01T00:00:00", 127})).actionGet();
+        execute("insert into t1 (id, string_field, timestamp_field, byte_field) values (?, ?, ?, ?)",
+                new Object[]{2, "Without", "1970-01-01T01:00:00", Byte.MIN_VALUE},
+                createSessionOnNode(internalCluster().getNodeNames()[1]));
 
-        client2.execute(SQLAction.INSTANCE, new SQLRequest(
-            "insert into t1 (id, string_field, timestamp_field, byte_field) values (?, ?, ?, ?)",
-            new Object[]{2, "Without", "1970-01-01T01:00:00", Byte.MIN_VALUE})).actionGet();
         refresh();
         SQLResponse response = execute("select id, string_field, timestamp_field, byte_field from t1 order by id");
 
@@ -95,18 +93,24 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
         assertEquals((byte) -128, response.rows()[1][3]);
     }
 
-    public void setUpObjectTable() throws IOException {
+    public void setUpObjectTable() {
         execute("create table test12 (" +
-                " object_field object(dynamic) as (size byte, created timestamp)," +
-                " strict_field object(strict) as (path string, created timestamp)," +
+                " object_field object(dynamic) as (size byte, created timestamp with time zone)," +
+                " strict_field object(strict) as (path string, created timestamp with time zone)," +
                 " no_dynamic_field object(ignored) as (" +
                 "  path string, " +
-                "  dynamic_again object(dynamic) as (field timestamp)" +
+                "  dynamic_again object(dynamic) as (field timestamp with time zone)" +
                 " )" +
                 ") clustered into 2 shards with(number_of_replicas=0)");
         ensureYellow();
     }
 
+    /**
+     * Disabled JDBC usage cause of text mode JSON encoding which is not type safe on numeric types.
+     * E.g. byte values are always converted to integers,
+     * see {@link com.fasterxml.jackson.core.JsonGenerator#writeNumber(short)}.
+     */
+    @UseJdbc(0)
     @Test
     public void testParseInsertObject() throws Exception {
         setUpObjectTable();
@@ -138,13 +142,13 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> objectMap = (Map<String, Object>) response.rows()[0][0];
         assertEquals(1384819200000L, objectMap.get("created"));
-        assertEquals(127, objectMap.get("size"));
+        assertEquals((byte) 127, objectMap.get("size"));
 
         assertThat(response.rows()[0][1], instanceOf(Map.class));
         @SuppressWarnings("unchecked")
         Map<String, Object> strictMap = (Map<String, Object>) response.rows()[0][1];
         assertEquals("/dev/null", strictMap.get("path"));
-        assertEquals(0, strictMap.get("created"));
+        assertEquals(0L, strictMap.get("created"));
 
         assertThat(response.rows()[0][2], instanceOf(Map.class));
         @SuppressWarnings("unchecked")
@@ -197,7 +201,7 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
     @Test
     public void testInvalidWhereClause() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Cannot cast 129 to type byte");
+        expectedException.expectMessage("Cannot cast 129 to type char");
 
         setUpSimple();
         execute("delete from t1 where byte_field=129");
@@ -206,7 +210,7 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
     @Test
     public void testInvalidWhereInWhereClause() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Cannot cast 'a' to type byte");
+        expectedException.expectMessage("Cannot cast ['a'] to type char_array");
 
         setUpSimple();
         execute("update t1 set byte_field=0 where byte_field in ('a')");
@@ -264,6 +268,12 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
         assertEquals("127.0.0.1", response.rows()[0][11]);
     }
 
+    /**
+     * We must fix this test to run ALL statements via JDBC or not because object/map values are NOT preserving exact
+     * its elements numeric types (e.g. Long(0) becomes Integer(0)). This is caused by the usage of JSON for psql text
+     * serialization. See e.g. {@link org.codehaus.jackson.io.NumberOutput#outputLong(long, byte[], int)}.
+     */
+    @UseJdbc(0)
     @Test
     public void testGetRequestMapping() throws Exception {
         setUpSimple();
@@ -293,10 +303,14 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("t1", "o.a");
 
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Validation failed for o['a']: Invalid string");
+        expectedException.expectMessage("Validation failed for o['a']: Invalid text");
         execute("insert into t1 values ({a=['123', '456']})");
     }
 
+    /**
+     * Disable JDBC/PSQL as object values are streamed via JSON on the PSQL wire protocol which is not type safe.
+     */
+    @UseJdbc(0)
     @Test
     public void testInsertNewObjectColumn() throws Exception {
         setUpSimple();
@@ -316,9 +330,12 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> mapped = (Map<String, Object>) response.rows()[0][1];
         assertEquals("1970-01-01", mapped.get("a_date"));
-        assertEquals(127, mapped.get("an_int"));
         assertEquals(0x7fffffffffffffffL, mapped.get("a_long"));
         assertEquals(true, mapped.get("a_boolean"));
+
+        // The inner value will result in an Long type as we rely on ES mappers here and the dynamic ES parsing
+        // will define integers as longs (no concrete type was specified so use long to be safe)
+        assertEquals(127L, mapped.get("an_int"));
     }
 
     @Test
@@ -422,7 +439,8 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testDynamicEmptyArray() throws Exception {
-        execute("create table arr (id short primary key, tags array(string)) with (number_of_replicas=0)");
+        execute("create table arr (id short primary key, tags array(string)) " +
+                "with (number_of_replicas=0, column_policy = 'dynamic')");
         ensureYellow();
         execute("insert into arr (id, tags, new) values (1, ['wow', 'much', 'wow'], [])");
         refresh();
@@ -434,7 +452,8 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testDynamicNullArray() throws Exception {
-        execute("create table arr (id short primary key, tags array(string)) with (number_of_replicas=0)");
+        execute("create table arr (id short primary key, tags array(string)) " +
+                "with (number_of_replicas=0, column_policy = 'dynamic')");
         ensureYellow();
         execute("insert into arr (id, tags, new) values (2, ['wow', 'much', 'wow'], [null])");
         refresh();
@@ -446,22 +465,20 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testDynamicNullArrayAndDouble() throws Exception {
-        execute("create table arr (id short primary key, tags array(string)) with (number_of_replicas=0)");
+        execute("create table arr (id short primary key, tags array(string)) " +
+                "with (number_of_replicas=0, column_policy = 'dynamic')");
         ensureYellow();
         execute("insert into arr (id, tags, new) values (3, ['wow', 'much', 'wow'], ?)", new Object[]{new Double[]{null, 42.7}});
         refresh();
         waitNoPendingTasksOnAll();
-        awaitBusy(new Predicate<Object>() {
-            @Override
-            public boolean apply(Object input) {
-                SQLResponse res = execute("select column_name, data_type from information_schema.columns where table_name='arr'");
-                for (Object[] row : res.rows()) {
-                    if ("new".equals(row[0]) && "double_array".equals(row[1])) {
-                        return true;
-                    }
+        awaitBusy(() -> {
+            SQLResponse res = execute("select column_name, data_type from information_schema.columns where table_name='arr'");
+            for (Object[] row : res.rows()) {
+                if ("new".equals(row[0]) && "double_array".equals(row[1])) {
+                    return true;
                 }
-                return false;
             }
+            return false;
         });
     }
 
@@ -478,8 +495,8 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
         Object[] columns = TestingHelpers.getColumn(response.rows(), 0);
 //TODO: Re-enable once SQLResponse also includes the data types for the columns
 //        assertThat(response.columnTypes()[0], is((DataType)new ArrayType(new ArrayType(IntegerType.INSTANCE))));
-        assertThat((Integer) ((Object[]) ((Object[]) columns[0])[0])[0], is(10));
-        assertThat((Integer) ((Object[]) ((Object[]) columns[0])[0])[1], is(20));
+        assertThat(((List) ((List) columns[0]).get(0)).get(0), is(10));
+        assertThat(((List) ((List) columns[0]).get(0)).get(1), is(20));
     }
 
     @Test
@@ -497,8 +514,8 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
 //TODO: Re-enable once SQLResponse also includes the data types for the columns
 //        assertThat(response.columnTypes()[0],
 //                   is((DataType)new ArrayType(new ArrayType(new ArrayType(IntegerType.INSTANCE)))));
-        assertThat((Integer) ((Object[]) ((Object[]) ((Object[]) columns[0])[0])[0])[0], is(10));
-        assertThat((Integer) ((Object[]) ((Object[]) ((Object[]) columns[0])[0])[0])[1], is(20));
+        assertThat(((List) ((List) ((List) columns[0]).get(0)).get(0)).get(0), is(10));
+        assertThat(((List) ((List) ((List) columns[0]).get(0)).get(0)).get(1), is(20));
     }
 
     @Test
@@ -516,5 +533,42 @@ public class SQLTypeMappingTest extends SQLTransportIntegrationTest {
         SQLResponse response = execute("select categories[1]['subcategories']['id'] from assets");
         assertEquals(response.rowCount(), 1L);
         assertThat((Integer) response.rows()[0][0], is(10));
+    }
+
+    @Test
+    public void testInsertTimestamp() {
+        // This is a regression test that we allow timestamps that have more than 13 digits.
+        execute(
+            "create table ts_table (" +
+            "   ts timestamp with time zone" +
+            ") clustered into 2 shards with (number_of_replicas=0)");
+        ensureYellow();
+        // biggest Long that can be converted to Double without losing precision
+        // equivalent to 33658-09-27T01:46:39.999Z
+        long maxDateMillis = 999999999999999L;
+        // smallest Long that can be converted to Double without losing precision
+        // equivalent to -29719-04-05T22:13:20.001Z
+        long minDateMillis = -999999999999999L;
+
+        execute("insert into ts_table (ts) values (?)", new Object[]{ minDateMillis });
+        execute("insert into ts_table (ts) values (?)", new Object[]{ 0L });
+        execute("insert into ts_table (ts) values (?)", new Object[]{ maxDateMillis });
+        // TODO: select timestamps with correct sorting
+        refresh();
+        SQLResponse response = execute("select * from ts_table order by ts desc");
+        assertEquals(response.rowCount(), 3L);
+    }
+
+    @Test
+    public void testInsertTimestampPreferMillis() {
+        execute("create table ts_table (ts timestamp with time zone) " +
+                "clustered into 2 shards with (number_of_replicas=0)");
+        ensureYellow();
+        execute("insert into ts_table (ts) values (?)", new Object[]{ 1000L });
+        execute("insert into ts_table (ts) values (?)", new Object[]{ "2016" });
+        refresh();
+        SQLResponse response = execute("select ts from ts_table order by ts asc");
+        assertThat((Long) response.rows()[0][0], is(1000L));
+        assertThat((Long) response.rows()[1][0], is(2016L));
     }
 }

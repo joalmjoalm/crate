@@ -22,39 +22,53 @@
 
 package io.crate.analyze;
 
-import com.google.common.collect.ImmutableMap;
+import io.crate.analyze.expressions.ExpressionAnalysisContext;
+import io.crate.analyze.expressions.ExpressionAnalyzer;
+import io.crate.analyze.relations.FieldProvider;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
 import io.crate.metadata.Schemas;
-import io.crate.metadata.settings.SettingsApplier;
-import io.crate.metadata.settings.SettingsAppliers;
+import io.crate.metadata.table.Operation;
+import io.crate.metadata.table.TableInfo;
+import io.crate.sql.tree.Expression;
 import io.crate.sql.tree.OptimizeStatement;
-import org.elasticsearch.common.settings.Settings;
+import io.crate.sql.tree.ParameterExpression;
+import io.crate.sql.tree.Table;
 
-import java.util.Set;
+import java.util.HashMap;
+import java.util.function.Function;
 
-import static io.crate.analyze.OptimizeSettings.*;
-
-class OptimizeTableAnalyzer {
-
-    private static final ImmutableMap<String, SettingsApplier> SETTINGS = ImmutableMap.<String, SettingsApplier>builder()
-        .put(MAX_NUM_SEGMENTS.name(), new SettingsAppliers.IntSettingsApplier(MAX_NUM_SEGMENTS))
-        .put(ONLY_EXPUNGE_DELETES.name(), new SettingsAppliers.BooleanSettingsApplier(ONLY_EXPUNGE_DELETES))
-        .put(FLUSH.name(), new SettingsAppliers.BooleanSettingsApplier(FLUSH))
-        .build();
+public class OptimizeTableAnalyzer {
 
     private final Schemas schemas;
+    private final Functions functions;
 
-    OptimizeTableAnalyzer(Schemas schemas) {
+    OptimizeTableAnalyzer(Schemas schemas, Functions functions) {
         this.schemas = schemas;
+        this.functions = functions;
     }
 
-    public OptimizeTableAnalyzedStatement analyze(OptimizeStatement stmt, Analysis analysis) {
-        Set<String> indexNames = TableAnalyzer.getIndexNames(
-            stmt.tables(), schemas, analysis.parameterContext(), analysis.sessionContext().defaultSchema());
+    public AnalyzedOptimizeTable analyze(OptimizeStatement<Expression> statement,
+                                         Function<ParameterExpression, Symbol> convertParamFunction,
+                                         CoordinatorTxnCtx txnCtx) {
+        var exprAnalyzerWithFieldsAsString = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.FIELDS_AS_LITERAL, null);
 
-        // validate and extract settings
-        Settings.Builder builder = GenericPropertiesConverter.settingsFromProperties(
-            stmt.properties(), analysis.parameterContext(), SETTINGS);
-        Settings settings = builder.build();
-        return new OptimizeTableAnalyzedStatement(indexNames, settings);
+        var exprCtx = new ExpressionAnalysisContext();
+        OptimizeStatement<Symbol> analyzedStatement =
+            statement.map(x -> exprAnalyzerWithFieldsAsString.convert(x, exprCtx));
+
+        HashMap<Table<Symbol>, TableInfo> analyzedOptimizeTables = new HashMap<>();
+        for (Table<Symbol> table : analyzedStatement.tables()) {
+            TableInfo tableInfo = schemas.resolveTableInfo(
+                table.getName(),
+                Operation.OPTIMIZE,
+                txnCtx.sessionContext().user(),
+                txnCtx.sessionContext().searchPath()
+            );
+            analyzedOptimizeTables.put(table, tableInfo);
+        }
+        return new AnalyzedOptimizeTable(analyzedOptimizeTables, analyzedStatement.properties());
     }
 }

@@ -23,7 +23,7 @@ package io.crate.metadata;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import io.crate.analyze.symbol.SymbolType;
+import io.crate.expression.symbol.SymbolType;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -33,35 +33,26 @@ import java.io.IOException;
 
 public class GeoReference extends Reference {
 
-    public static final SymbolFactory<GeoReference> FACTORY = new SymbolFactory<GeoReference>() {
-        @Override
-        public GeoReference newInstance() {
-            return new GeoReference();
-        }
-    };
-
     private static final String DEFAULT_TREE = "geohash";
 
-    private String geoTree;
-    private
-    @Nullable
-    String precision;
-    private
-    @Nullable
-    Integer treeLevels;
-    private
-    @Nullable
-    Double distanceErrorPct;
+    private final String geoTree;
 
-    private GeoReference() {
-    }
+    @Nullable
+    private final String precision;
 
-    public GeoReference(ReferenceIdent ident,
+    @Nullable
+    private final Integer treeLevels;
+
+    @Nullable
+    private final Double distanceErrorPct;
+
+    public GeoReference(Integer position,
+                        ReferenceIdent ident,
                         @Nullable String tree,
                         @Nullable String precision,
                         @Nullable Integer treeLevels,
                         @Nullable Double distanceErrorPct) {
-        super(ident, RowGranularity.DOC, DataTypes.GEO_SHAPE);
+        super(ident, RowGranularity.DOC, DataTypes.GEO_SHAPE, position, null);
         this.geoTree = MoreObjects.firstNonNull(tree, DEFAULT_TREE);
         this.precision = precision;
         this.treeLevels = treeLevels;
@@ -119,9 +110,8 @@ public class GeoReference extends Reference {
                '}';
     }
 
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
+    public GeoReference(StreamInput in) throws IOException {
+        super(in);
         geoTree = in.readString();
         precision = in.readOptionalString();
         treeLevels = in.readBoolean() ? null : in.readVInt();

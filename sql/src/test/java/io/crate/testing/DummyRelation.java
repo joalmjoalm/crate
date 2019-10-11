@@ -22,15 +22,20 @@
 
 package io.crate.testing;
 
+import io.crate.analyze.HavingClause;
+import io.crate.analyze.OrderBy;
+import io.crate.analyze.WhereClause;
 import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.analyze.relations.AnalyzedRelationVisitor;
-import io.crate.analyze.symbol.Field;
+import io.crate.expression.symbol.Field;
+import io.crate.expression.symbol.InputColumn;
+import io.crate.expression.symbol.Symbol;
 import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.Path;
 import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.QualifiedName;
 import io.crate.types.DataTypes;
 
+import javax.annotation.Nullable;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -41,9 +46,7 @@ import java.util.Set;
 public class DummyRelation implements AnalyzedRelation {
 
     private final Set<ColumnIdent> columnReferences = new HashSet<>();
-
-    public DummyRelation() {
-    }
+    private QualifiedName name = new QualifiedName("dummy");
 
     public DummyRelation(String... referenceNames) {
         for (String referenceName : referenceNames) {
@@ -57,9 +60,9 @@ public class DummyRelation implements AnalyzedRelation {
     }
 
     @Override
-    public Field getField(Path path, Operation operation) throws UnsupportedOperationException {
+    public Field getField(ColumnIdent path, Operation operation) throws UnsupportedOperationException {
         if (columnReferences.contains(path)) {
-            return new Field(this, path, DataTypes.STRING);
+            return new Field(this, path, new InputColumn(0, DataTypes.STRING));
         }
         return null;
     }
@@ -71,11 +74,55 @@ public class DummyRelation implements AnalyzedRelation {
 
     @Override
     public QualifiedName getQualifiedName() {
-        throw new UnsupportedOperationException("method not supported");
+        return name;
     }
 
     @Override
-    public void setQualifiedName(QualifiedName qualifiedName) {
-        throw new UnsupportedOperationException("method not supported");
+    public List<Symbol> outputs() {
+        return null;
+    }
+
+    @Override
+    public WhereClause where() {
+        return null;
+    }
+
+    @Override
+    public List<Symbol> groupBy() {
+        return null;
+    }
+
+    @Nullable
+    @Override
+    public HavingClause having() {
+        return null;
+    }
+
+    @Nullable
+    @Override
+    public OrderBy orderBy() {
+        return null;
+    }
+
+    @Nullable
+    @Override
+    public Symbol limit() {
+        return null;
+    }
+
+    @Nullable
+    @Override
+    public Symbol offset() {
+        return null;
+    }
+
+    @Override
+    public boolean hasAggregates() {
+        return false;
+    }
+
+    @Override
+    public boolean isDistinct() {
+        return false;
     }
 }

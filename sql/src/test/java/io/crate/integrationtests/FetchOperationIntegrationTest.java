@@ -21,99 +21,61 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SessionContext;
-import io.crate.analyze.Analysis;
-import io.crate.analyze.Analyzer;
-import io.crate.analyze.ParameterContext;
-import io.crate.core.collections.Bucket;
-import io.crate.executor.transport.TransportExecutor;
-import io.crate.planner.Plan;
-import io.crate.planner.Planner;
+import io.crate.data.Row;
+import io.crate.execution.dsl.projection.FetchProjection;
+import io.crate.planner.Merge;
 import io.crate.planner.node.dql.QueryThenFetch;
-import io.crate.planner.projection.FetchProjection;
-import io.crate.sql.parser.SqlParser;
-import io.crate.testing.CollectingRowReceiver;
-import io.crate.testing.UseJdbc;
-import org.apache.lucene.util.BytesRef;
+import io.crate.planner.operators.LogicalPlan;
+import io.crate.planner.operators.SubQueryResults;
+import io.crate.testing.TestingRowConsumer;
 import org.elasticsearch.test.ESIntegTestCase;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
 
-import java.util.UUID;
+import java.util.List;
 
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.core.Is.is;
 
 @ESIntegTestCase.ClusterScope(numDataNodes = 2, numClientNodes = 0)
-@UseJdbc
 public class FetchOperationIntegrationTest extends SQLTransportIntegrationTest {
 
-    TransportExecutor executor;
-
-    @Before
-    public void transportSetUp() {
-        executor = internalCluster().getInstance(TransportExecutor.class);
-    }
-
-    @After
-    public void transportTearDown() {
-        executor = null;
-    }
-
     private void setUpCharacters() {
-        sqlExecutor.exec("create table characters (id int primary key, name string) " +
+        execute("create table characters (id int primary key, name string) " +
                          "clustered into 2 shards with(number_of_replicas=0)");
         sqlExecutor.ensureYellowOrGreen();
-        sqlExecutor.execBulk("insert into characters (id, name) values (?, ?)",
+        execute("insert into characters (id, name) values (?, ?)",
             new Object[][]{
                 new Object[]{1, "Arthur"},
                 new Object[]{2, "Ford"},
             }
         );
-        sqlExecutor.exec("refresh table characters");
-    }
-
-    private Plan analyzeAndPlan(String stmt) {
-        Analysis analysis = analyze(stmt);
-        Planner planner = internalCluster().getInstance(Planner.class);
-        return planner.plan(analysis, UUID.randomUUID(), 0, 0);
-    }
-
-    private Analysis analyze(String stmt) {
-        Analyzer analyzer = internalCluster().getInstance(Analyzer.class);
-        return analyzer.boundAnalyze(
-            SqlParser.createStatement(stmt),
-            SessionContext.SYSTEM_SESSION,
-            ParameterContext.EMPTY
-        );
+        execute("refresh table characters");
     }
 
     @SuppressWarnings("ConstantConditions")
     @Test
     public void testFetchProjection() throws Exception {
         setUpCharacters();
+        PlanForNode plan = plan("select id, name, substr(name, 2) from characters order by id");
+        QueryThenFetch qtf = (QueryThenFetch) ((LogicalPlan) plan.plan).build(
+            plan.plannerContext, null, -1, 0, null, null, Row.EMPTY, SubQueryResults.EMPTY);
+        assertThat(qtf.subPlan(), instanceOf(Merge.class));
+        Merge merge = (Merge) qtf.subPlan();
 
-        Plan plan = analyzeAndPlan("select id, name, substr(name, 2) from characters order by id");
-        assertThat(plan, instanceOf(QueryThenFetch.class));
-        QueryThenFetch qtf = (QueryThenFetch) plan;
+        assertThat(((FetchProjection) merge.mergePhase().projections().get(0)).nodeReaders(), notNullValue());
+        assertThat(((FetchProjection) merge.mergePhase().projections().get(0)).readerIndices(), notNullValue());
 
-        assertThat(((FetchProjection) qtf.localMerge().projections().get(1)).nodeReaders(), notNullValue());
-        assertThat(((FetchProjection) qtf.localMerge().projections().get(1)).readerIndices(), notNullValue());
+        TestingRowConsumer consumer = execute(plan);
 
-
-        CollectingRowReceiver rowReceiver = new CollectingRowReceiver();
-        executor.execute(plan, rowReceiver);
-
-        Bucket result = rowReceiver.result();
+        List<Object[]> result = consumer.getResult();
         assertThat(result.size(), is(2));
-        assertThat(rowReceiver.rows.get(0).length, is(3));
-        assertThat((Integer) rowReceiver.rows.get(0)[0], is(1));
-        assertThat((BytesRef) rowReceiver.rows.get(0)[1], is(new BytesRef("Arthur")));
-        assertThat((BytesRef) rowReceiver.rows.get(0)[2], is(new BytesRef("rthur")));
-        assertThat((Integer) rowReceiver.rows.get(1)[0], is(2));
-        assertThat((BytesRef) rowReceiver.rows.get(1)[1], is(new BytesRef("Ford")));
-        assertThat((BytesRef) rowReceiver.rows.get(1)[2], is(new BytesRef("ord")));
+        assertThat(result.get(0).length, is(3));
+        assertThat(result.get(0)[0], is(1));
+        assertThat(result.get(0)[1], is("Arthur"));
+        assertThat(result.get(0)[2], is("rthur"));
+        assertThat(result.get(1)[0], is(2));
+        assertThat(result.get(1)[1], is("Ford"));
+        assertThat(result.get(1)[2], is("ord"));
     }
 }

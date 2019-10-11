@@ -21,105 +21,157 @@
 
 package io.crate.metadata.doc;
 
-import com.google.common.base.Throwables;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.SettableFuture;
-import io.crate.analyze.AlterPartitionedTableParameterInfo;
-import io.crate.analyze.TableParameterInfo;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
-import io.crate.analyze.symbol.DynamicReference;
 import io.crate.exceptions.ColumnUnknownException;
-import io.crate.exceptions.UnavailableShardsException;
-import io.crate.metadata.*;
+import io.crate.expression.symbol.DynamicReference;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.GeneratedReference;
+import io.crate.metadata.IndexReference;
+import io.crate.metadata.PartitionName;
+import io.crate.metadata.Reference;
+import io.crate.metadata.ReferenceIdent;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
+import io.crate.metadata.RowGranularity;
 import io.crate.metadata.sys.TableColumn;
-import io.crate.metadata.table.ColumnPolicy;
 import io.crate.metadata.table.Operation;
 import io.crate.metadata.table.ShardedTable;
+import io.crate.metadata.table.StoredTable;
 import io.crate.metadata.table.TableInfo;
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.cluster.ClusterChangedEvent;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.sql.tree.ColumnPolicy;
+import org.elasticsearch.Version;
 import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.cluster.ClusterStateObserver;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
-import org.elasticsearch.cluster.routing.GroupShardsIterator;
-import org.elasticsearch.cluster.routing.ShardIterator;
-import org.elasticsearch.cluster.routing.ShardRouting;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
-import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.index.IndexNotFoundException;
-import org.elasticsearch.index.shard.ShardId;
 
 import javax.annotation.Nullable;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 
-public class DocTableInfo implements TableInfo, ShardedTable {
+/**
+ * Represents a user table.
+ * <p>
+ *     A user table either maps to 1 lucene index (if not partitioned)
+ *     Or to multiple indices (if partitioned, or an alias)
+ * </p>
+ *
+ * <p>
+ *     See the following table for examples how the indexName is encoded.
+ *     Functions to encode/decode are in {@link io.crate.metadata.IndexParts}
+ * </p>
+ *
+ * <table>
+ *     <tr>
+ *         <th>schema</th>
+ *         <th>tableName</th>
+ *         <th>indices</th>
+ *         <th>partitioned</th>
+ *         <th>templateName</th>
+ *     </tr>
+ *
+ *     <tr>
+ *         <td>doc</td>
+ *         <td>t1</td>
+ *         <td>[ t1 ]</td>
+ *         <td>NO</td>
+ *         <td></td>
+ *     </tr>
+ *     <tr>
+ *         <td>doc</td>
+ *         <td>t1p</td>
+ *         <td>[ .partitioned.t1p.&lt;ident&gt; ]</td>
+ *         <td>YES</td>
+ *         <td>.partitioned.t1p.</td>
+ *     </tr>
+ *     <tr>
+ *         <td>custom</td>
+ *         <td>t1</td>
+ *         <td>[ custom.t1 ]</td>
+ *         <td>NO</td>
+ *         <td></td>
+ *     </tr>
+ *     <tr>
+ *         <td>custom</td>
+ *         <td>t1p</td>
+ *         <td>[ custom..partitioned.t1p.&lt;ident&gt; ]</td>
+ *         <td>YES</td>
+ *         <td>custom..partitioned.t1p.</td>
+ *     </tr>
+ * </table>
+ *
+ */
+public class DocTableInfo implements TableInfo, ShardedTable, StoredTable {
 
-    private static final ESLogger logger = Loggers.getLogger(DocTableInfo.class);
-
-    private final TimeValue routingFetchTimeout;
-
-    private final List<Reference> columns;
+    private final Collection<Reference> columns;
     private final List<GeneratedReference> generatedColumns;
     private final List<Reference> partitionedByColumns;
+    private final List<Reference> defaultExpressionColumns;
+    private final Collection<ColumnIdent> notNullColumns;
     private final Map<ColumnIdent, IndexReference> indexColumns;
-    private final ImmutableMap<ColumnIdent, Reference> references;
-    private final ImmutableMap<ColumnIdent, String> analyzers;
-    private final TableIdent ident;
+    private final Map<ColumnIdent, Reference> references;
+    private final Map<ColumnIdent, String> analyzers;
+    private final RelationName ident;
     private final List<ColumnIdent> primaryKeys;
     private final ColumnIdent clusteredBy;
     private final String[] concreteIndices;
+    private final String[] concreteOpenIndices;
     private final List<ColumnIdent> partitionedBy;
     private final int numberOfShards;
-    private final BytesRef numberOfReplicas;
-    private final ImmutableMap<String, Object> tableParameters;
+    private final String numberOfReplicas;
+    private final Map<String, Object> tableParameters;
     private final TableColumn docColumn;
-    private final ExecutorService executorService;
-    private final ClusterService clusterService;
-    private final TableParameterInfo tableParameterInfo;
     private final Set<Operation> supportedOperations;
 
     private final List<PartitionName> partitions;
 
-    private final boolean isAlias;
     private final boolean hasAutoGeneratedPrimaryKey;
     private final boolean isPartitioned;
+    private final Version versionCreated;
+    private final Version versionUpgraded;
+
+    private final boolean closed;
 
     private final ColumnPolicy columnPolicy;
     private final IndexNameExpressionResolver indexNameExpressionResolver;
 
-    public DocTableInfo(TableIdent ident,
-                        List<Reference> columns,
+    public DocTableInfo(RelationName ident,
+                        Collection<Reference> columns,
                         List<Reference> partitionedByColumns,
                         List<GeneratedReference> generatedColumns,
-                        ImmutableMap<ColumnIdent, IndexReference> indexColumns,
-                        ImmutableMap<ColumnIdent, Reference> references,
-                        ImmutableMap<ColumnIdent, String> analyzers,
+                        Collection<ColumnIdent> notNullColumns,
+                        Map<ColumnIdent, IndexReference> indexColumns,
+                        Map<ColumnIdent, Reference> references,
+                        Map<ColumnIdent, String> analyzers,
                         List<ColumnIdent> primaryKeys,
                         ColumnIdent clusteredBy,
-                        boolean isAlias,
                         boolean hasAutoGeneratedPrimaryKey,
                         String[] concreteIndices,
-                        ClusterService clusterService,
+                        String[] concreteOpenIndices,
                         IndexNameExpressionResolver indexNameExpressionResolver,
                         int numberOfShards,
-                        BytesRef numberOfReplicas,
-                        ImmutableMap<String, Object> tableParameters,
+                        String numberOfReplicas,
+                        Map<String, Object> tableParameters,
                         List<ColumnIdent> partitionedBy,
                         List<PartitionName> partitions,
                         ColumnPolicy columnPolicy,
-                        Set<Operation> supportedOperations,
-                        ExecutorService executorService) {
+                        @Nullable Version versionCreated,
+                        @Nullable Version versionUpgraded,
+                        boolean closed,
+                        Set<Operation> supportedOperations) {
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         assert (partitionedBy.size() ==
                 partitionedByColumns.size()) : "partitionedBy and partitionedByColumns must have same amount of items in list";
-        this.clusterService = clusterService;
         this.columns = columns;
         this.partitionedByColumns = partitionedByColumns;
         this.generatedColumns = generatedColumns;
+        this.notNullColumns = notNullColumns;
         this.indexColumns = indexColumns;
         this.references = references;
         this.analyzers = analyzers;
@@ -127,25 +179,25 @@ public class DocTableInfo implements TableInfo, ShardedTable {
         this.primaryKeys = primaryKeys;
         this.clusteredBy = clusteredBy;
         this.concreteIndices = concreteIndices;
+        this.concreteOpenIndices = concreteOpenIndices;
         this.numberOfShards = numberOfShards;
         this.numberOfReplicas = numberOfReplicas;
         this.tableParameters = tableParameters;
-        this.executorService = executorService;
-        this.isAlias = isAlias;
         this.hasAutoGeneratedPrimaryKey = hasAutoGeneratedPrimaryKey;
         isPartitioned = !partitionedByColumns.isEmpty();
         this.partitionedBy = partitionedBy;
         this.partitions = partitions;
         this.columnPolicy = columnPolicy;
+        this.versionCreated = versionCreated;
+        this.versionUpgraded = versionUpgraded;
+        this.closed = closed;
         this.supportedOperations = supportedOperations;
-        if (isPartitioned) {
-            tableParameterInfo = new AlterPartitionedTableParameterInfo();
-        } else {
-            tableParameterInfo = new TableParameterInfo();
-        }
         // scale the fetchrouting timeout by n# of partitions
-        this.routingFetchTimeout = new TimeValue(5 * Math.max(1, this.partitions.size()), TimeUnit.SECONDS);
         this.docColumn = new TableColumn(DocSysColumns.DOC, references);
+        this.defaultExpressionColumns = references.values()
+            .stream()
+            .filter(r -> r.defaultExpression() != null)
+            .collect(Collectors.toList());
     }
 
     @Nullable
@@ -163,6 +215,10 @@ public class DocTableInfo implements TableInfo, ShardedTable {
         return columns;
     }
 
+    public List<Reference> defaultExpressionColumns() {
+        return defaultExpressionColumns;
+    }
+
     public List<GeneratedReference> generatedColumns() {
         return generatedColumns;
     }
@@ -173,135 +229,36 @@ public class DocTableInfo implements TableInfo, ShardedTable {
     }
 
     @Override
-    public TableIdent ident() {
+    public RelationName ident() {
         return ident;
     }
 
-    private void processShardRouting(Map<String, Map<String, List<Integer>>> locations, ShardRouting shardRouting) {
-        String node = shardRouting.currentNodeId();
-        Map<String, List<Integer>> nodeMap = locations.get(node);
-        if (nodeMap == null) {
-            nodeMap = new TreeMap<>();
-            locations.put(shardRouting.currentNodeId(), nodeMap);
-        }
-
-        List<Integer> shards = nodeMap.get(shardRouting.getIndex());
-        if (shards == null) {
-            shards = new ArrayList<>();
-            nodeMap.put(shardRouting.getIndex(), shards);
-        }
-        shards.add(shardRouting.id());
-    }
-
-    private GroupShardsIterator getShardIterators(WhereClause whereClause,
-                                                  @Nullable String preference,
-                                                  ClusterState clusterState) throws IndexNotFoundException {
-        String[] routingIndices = concreteIndices;
-        if (whereClause.partitions().size() > 0) {
-            routingIndices = whereClause.partitions().toArray(new String[whereClause.partitions().size()]);
-        }
-
-        Map<String, Set<String>> routingMap = null;
-        if (whereClause.clusteredBy().isPresent()) {
-            routingMap = indexNameExpressionResolver.resolveSearchRouting(
-                clusterState, whereClause.routingValues(), routingIndices);
-        }
-        return clusterService.operationRouting().searchShards(
-            clusterState,
-            routingIndices,
-            routingMap,
-            preference
-        );
-    }
-
-    @Nullable
-    private Routing getRouting(ClusterState state, WhereClause whereClause, String preference, final List<ShardId> missingShards) {
-        final Map<String, Map<String, List<Integer>>> locations = new TreeMap<>();
-        GroupShardsIterator shardIterators;
-        try {
-            shardIterators = getShardIterators(whereClause, preference, state);
-        } catch (IndexNotFoundException e) {
-            return new Routing(locations);
-        }
-
-        fillLocationsFromShardIterators(locations, shardIterators, missingShards);
-
-        if (missingShards.isEmpty()) {
-            return new Routing(locations);
-        } else {
-            return null;
-        }
-    }
-
     @Override
-    public Routing getRouting(final WhereClause whereClause, @Nullable final String preference) {
-        Routing routing = getRouting(clusterService.state(), whereClause, preference, new ArrayList<ShardId>(0));
-        if (routing != null) return routing;
-
-        ClusterStateObserver observer = new ClusterStateObserver(clusterService, routingFetchTimeout, logger);
-        final SettableFuture<Routing> routingSettableFuture = SettableFuture.create();
-        observer.waitForNextChange(
-            new FetchRoutingListener(routingSettableFuture, whereClause, preference),
-            new ClusterStateObserver.ChangePredicate() {
-
-                @Override
-                public boolean apply(ClusterState previousState, ClusterState.ClusterStateStatus previousStatus, ClusterState newState, ClusterState.ClusterStateStatus newStatus) {
-                    return validate(newState);
-                }
-
-                @Override
-                public boolean apply(ClusterChangedEvent changedEvent) {
-                    return validate(changedEvent.state());
-                }
-
-                private boolean validate(ClusterState state) {
-                    final Map<String, Map<String, List<Integer>>> locations = new TreeMap<>();
-
-                    GroupShardsIterator shardIterators;
-                    try {
-                        shardIterators = getShardIterators(whereClause, preference, state);
-                    } catch (IndexNotFoundException e) {
-                        return true;
-                    }
-
-                    final List<ShardId> missingShards = new ArrayList<>(0);
-                    fillLocationsFromShardIterators(locations, shardIterators, missingShards);
-
-                    return missingShards.isEmpty();
-                }
-
-            });
-
-        try {
-            return routingSettableFuture.get();
-        } catch (ExecutionException e) {
-            throw Throwables.propagate(e.getCause());
-        } catch (Exception e) {
-            throw Throwables.propagate(e);
+    public Routing getRouting(ClusterState state,
+                              RoutingProvider routingProvider,
+                              final WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
+        String[] indices;
+        if (whereClause.partitions().isEmpty()) {
+            indices = concreteOpenIndices;
+        } else {
+            indices = whereClause.partitions().toArray(new String[0]);
         }
-    }
-
-    private void fillLocationsFromShardIterators(Map<String, Map<String, List<Integer>>> locations,
-                                                 GroupShardsIterator shardIterators,
-                                                 List<ShardId> missingShards) {
-        ShardRouting shardRouting;
-        for (ShardIterator shardIterator : shardIterators) {
-            shardRouting = shardIterator.nextOrNull();
-            if (shardRouting != null) {
-                if (shardRouting.active()) {
-                    processShardRouting(locations, shardRouting);
-                } else {
-                    missingShards.add(shardIterator.shardId());
-                }
-            } else {
-                if (isPartitioned) {
-                    // if the table is partitioned maybe a index/shard just got newly created ...
-                    missingShards.add(shardIterator.shardId());
-                } else {
-                    throw new UnavailableShardsException(shardIterator.shardId());
-                }
+        Map<String, Set<String>> routingMap = null;
+        if (whereClause.clusteredBy().isEmpty() == false) {
+            Set<String> routing = whereClause.routingValues();
+            if (routing == null) {
+                routing = Collections.emptySet();
             }
+            routingMap = indexNameExpressionResolver.resolveSearchRouting(
+                state, routing, indices);
         }
+
+        if (routingMap == null) {
+            routingMap = Collections.emptyMap();
+        }
+        return routingProvider.forIndices(state, indices, routingMap, isPartitioned, shardSelection);
     }
 
     public List<ColumnIdent> primaryKey() {
@@ -314,7 +271,7 @@ public class DocTableInfo implements TableInfo, ShardedTable {
     }
 
     @Override
-    public BytesRef numberOfReplicas() {
+    public String numberOfReplicas() {
         return numberOfReplicas;
     }
 
@@ -327,15 +284,12 @@ public class DocTableInfo implements TableInfo, ShardedTable {
         return hasAutoGeneratedPrimaryKey;
     }
 
-    /**
-     * @return true if this <code>TableInfo</code> is referenced by an alias name, false otherwise
-     */
-    public boolean isAlias() {
-        return isAlias;
-    }
-
     public String[] concreteIndices() {
         return concreteIndices;
+    }
+
+    public String[] concreteOpenIndices() {
+        return concreteOpenIndices;
     }
 
     /**
@@ -402,11 +356,24 @@ public class DocTableInfo implements TableInfo, ShardedTable {
         return columnPolicy;
     }
 
-    public TableParameterInfo tableParameterInfo() {
-        return tableParameterInfo;
+    @Nullable
+    @Override
+    public Version versionCreated() {
+        return versionCreated;
     }
 
-    public ImmutableMap<String, Object> tableParameters() {
+    @Nullable
+    @Override
+    public Version versionUpgraded() {
+        return versionUpgraded;
+    }
+
+    @Override
+    public boolean isClosed() {
+        return closed;
+    }
+
+    public Map<String, Object> parameters() {
         return tableParameters;
     }
 
@@ -415,65 +382,20 @@ public class DocTableInfo implements TableInfo, ShardedTable {
         return supportedOperations;
     }
 
-    public String getAnalyzerForColumnIdent(ColumnIdent ident) {
-        return analyzers.get(ident);
+    @Override
+    public RelationType relationType() {
+        return RelationType.BASE_TABLE;
     }
 
-    private class FetchRoutingListener implements ClusterStateObserver.Listener {
-
-        private final SettableFuture<Routing> routingFuture;
-        private final WhereClause whereClause;
-        private final String preference;
-        Future<?> innerTaskFuture;
-
-        FetchRoutingListener(SettableFuture<Routing> routingFuture, WhereClause whereClause, String preference) {
-            this.routingFuture = routingFuture;
-            this.whereClause = whereClause;
-            this.preference = preference;
-        }
-
-        @Override
-        public void onNewClusterState(final ClusterState state) {
-            try {
-                innerTaskFuture = executorService.submit(new Runnable() {
-                    @Override
-                    public void run() {
-                        final List<ShardId> missingShards = new ArrayList<>(0);
-                        Routing routing = getRouting(state, whereClause, preference, missingShards);
-                        if (routing == null) {
-                            routingFuture.setException(new UnavailableShardsException(missingShards.get(0)));
-                        } else {
-                            routingFuture.set(routing);
-                        }
-                    }
-                });
-            } catch (RejectedExecutionException e) {
-                routingFuture.setException(e);
-            }
-        }
-
-        @Override
-        public void onClusterServiceClose() {
-            if (innerTaskFuture != null) {
-                innerTaskFuture.cancel(true);
-            }
-            routingFuture.setException(new IllegalStateException("ClusterService closed"));
-        }
-
-        @Override
-        public void onTimeout(TimeValue timeout) {
-            if (innerTaskFuture != null) {
-                innerTaskFuture.cancel(true);
-            }
-            routingFuture.setException(new IllegalStateException("Fetching table info routing timed out."));
-        }
+    public String getAnalyzerForColumnIdent(ColumnIdent ident) {
+        return analyzers.get(ident);
     }
 
     @Nullable
     public DynamicReference getDynamic(ColumnIdent ident, boolean forWrite) {
         boolean parentIsIgnored = false;
         ColumnPolicy parentPolicy = columnPolicy();
-        if (!ident.isColumn()) {
+        if (!ident.isTopLevel()) {
             // see if parent is strict object
             ColumnIdent parentIdent = ident.getParent();
             Reference parentInfo = null;
@@ -496,7 +418,7 @@ public class DocTableInfo implements TableInfo, ShardedTable {
                 if (!forWrite) return null;
                 break;
             case STRICT:
-                if (forWrite) throw new ColumnUnknownException(ident.sqlFqn());
+                if (forWrite) throw new ColumnUnknownException(ident.sqlFqn(), ident());
                 return null;
             case IGNORED:
                 parentIsIgnored = true;
@@ -513,5 +435,9 @@ public class DocTableInfo implements TableInfo, ShardedTable {
     @Override
     public String toString() {
         return ident.fqn();
+    }
+
+    public Collection<ColumnIdent> notNullColumns() {
+        return notNullColumns;
     }
 }

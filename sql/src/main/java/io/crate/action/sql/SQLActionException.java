@@ -21,12 +21,7 @@
 
 package io.crate.action.sql;
 
-import org.elasticsearch.ElasticsearchException;
-import org.elasticsearch.common.io.stream.NotSerializableExceptionWrapper;
-import org.elasticsearch.rest.RestStatus;
-
-import javax.annotation.Nullable;
-import java.util.List;
+import io.netty.handler.codec.http.HttpResponseStatus;
 
 /**
  * This exception must be the only one which is thrown by our <code>TransportSQLAction</code>,
@@ -38,16 +33,15 @@ import java.util.List;
  * dependencies of nested exceptions, so a client doesn't need to know about all classes
  * related to these nested exceptions.
  */
-public class SQLActionException extends ElasticsearchException {
+public class SQLActionException extends RuntimeException {
 
-    private static final String ERROR_CODE_KEY = "cr.ec";
+    private final HttpResponseStatus status;
+    private final int errorCode;
 
-    private final RestStatus status;
-
-    public SQLActionException(String message, int errorCode, RestStatus status) {
+    public SQLActionException(String message, int errorCode, HttpResponseStatus status) {
         super(message);
         this.status = status;
-        addHeader(ERROR_CODE_KEY, Integer.toString(errorCode));
+        this.errorCode = errorCode;
     }
 
     /**
@@ -59,46 +53,26 @@ public class SQLActionException extends ElasticsearchException {
      * @param status             the rest status
      * @param stackTraceElements the stacktrace as array
      */
-    public SQLActionException(String message, int errorCode, RestStatus status, StackTraceElement[] stackTraceElements) {
+    public SQLActionException(String message, int errorCode, HttpResponseStatus status, StackTraceElement[] stackTraceElements) {
         this(message, errorCode, status);
-        assert stackTraceElements != null;
+        assert stackTraceElements != null : "stackTraceElements must not be null";
         setStackTrace(stackTraceElements);
-    }
-
-    @Nullable
-    public static SQLActionException fromSerializationWrapper(NotSerializableExceptionWrapper wrapper) {
-        List<String> errorCodeHeader = wrapper.getHeader(ERROR_CODE_KEY);
-        if (errorCodeHeader != null && errorCodeHeader.size() == 1) {
-            int ec = Integer.parseInt(errorCodeHeader.get(0));
-
-            /**
-             * wrapper includes className of original exception which is: "s_q_l_action_exception: "
-             * see {@link ElasticsearchException#getExceptionName(Throwable)}
-             */
-            String message = wrapper.getMessage().substring(24);
-            return new SQLActionException(message, ec, wrapper.status(), wrapper.getStackTrace());
-        }
-        return null;
     }
 
     /**
      * Return the rest status code defined on construction
      */
-    public RestStatus status() {
+    public HttpResponseStatus status() {
         return status;
     }
-
 
     /**
      * Return the error code given defined on construction
      */
     public int errorCode() {
-        List<String> errorCodeHeader = getHeader(ERROR_CODE_KEY);
-        assert errorCodeHeader != null;
-        return Integer.parseInt(errorCodeHeader.get(0));
+        return errorCode;
     }
 
-    @Override
     public String getDetailedMessage() {
         return status + " " + errorCode() + " " + super.getMessage();
     }

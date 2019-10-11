@@ -21,16 +21,27 @@
 
 package io.crate.exceptions;
 
+import io.crate.metadata.RelationName;
+
+import java.util.Collections;
 import java.util.Locale;
 
-public class ColumnUnknownException extends ResourceUnknownException {
+public class ColumnUnknownException extends ResourceUnknownException implements TableScopeException {
 
-    public ColumnUnknownException(String columnName) {
+    private final RelationName relationName;
+
+    public ColumnUnknownException(String columnName, RelationName relationName) {
         super(String.format(Locale.ENGLISH, "Column %s unknown", columnName));
+        this.relationName = relationName;
     }
 
     @Override
     public int errorCode() {
         return 3;
+    }
+
+    @Override
+    public Iterable<RelationName> getTableIdents() {
+        return Collections.singletonList(relationName);
     }
 }

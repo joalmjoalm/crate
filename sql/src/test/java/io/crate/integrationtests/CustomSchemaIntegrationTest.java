@@ -22,23 +22,22 @@
 package io.crate.integrationtests;
 
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
-import org.elasticsearch.action.admin.indices.exists.indices.IndicesExistsRequest;
+import io.crate.testing.UseRandomizedSchema;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.is;
 
-@UseJdbc
 public class CustomSchemaIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
+    @UseRandomizedSchema(random = false)
     public void testInformationSchemaTablesReturnCorrectTablesIfCustomSchemaIsSimilarToTableName() throws Exception {
         // regression test.. this caused foobar to be detected as a table in the foo schema and caused a NPE
         execute("create table foobar (id int primary key) with (number_of_replicas = 0)");
         execute("create table foo.bar (id int primary key) with (number_of_replicas = 0)");
 
-        execute("select schema_name, table_name from information_schema.tables " +
-                "where table_name like 'foo%' or schema_name = 'foo' order by table_name");
+        execute("select table_schema, table_name from information_schema.tables " +
+                "where table_name like 'foo%' or table_schema = 'foo' order by table_name");
         assertThat(TestingHelpers.printedTable(response.rows()), is("" +
                                                                     "foo| bar\n" +
                                                                     "doc| foobar\n"));
@@ -101,20 +100,16 @@ public class CustomSchemaIntegrationTest extends SQLTransportIntegrationTest {
     public void testSelectFromDroppedTableWithMoreThanOneTableInSchema() throws Exception {
         execute("create table custom.foo (id integer)");
         execute("create table custom.bar (id integer)");
-        ensureYellow();
 
-        assertThat(client().admin().indices().exists(new IndicesExistsRequest("custom.foo")).actionGet().isExists(), is(true));
+        assertThat(internalCluster().clusterService().state().metaData().hasIndex("custom.foo"), is(true));
         execute("drop table custom.foo");
-        assertThat(client().admin().indices().exists(new IndicesExistsRequest("custom.foo")).actionGet().isExists(), is(false));
+        assertThat(internalCluster().clusterService().state().metaData().hasIndex("custom.foo"), is(false));
 
-        assertBusy(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    execute("select * from custom.foo");
-                    fail("should wait for cache invalidation");
-                } catch (Exception ignored) {
-                }
+        assertBusy(() -> {
+            try {
+                execute("select * from custom.foo");
+                fail("should wait for cache invalidation");
+            } catch (Exception ignored) {
             }
         });
     }

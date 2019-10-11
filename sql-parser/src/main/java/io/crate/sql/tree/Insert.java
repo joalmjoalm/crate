@@ -21,25 +21,21 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import com.google.common.collect.ImmutableList;
 
-import javax.annotation.Nullable;
+import java.util.Collections;
 import java.util.List;
 
-public abstract class Insert extends Statement {
+public abstract class Insert<T> extends Statement {
 
-    protected final Table table;
-
-    protected final List<Assignment> onDuplicateKeyAssignments;
+    protected final Table<T> table;
+    private final DuplicateKeyContext<T> duplicateKeyContext;
     protected final List<String> columns;
 
-
-    public Insert(Table table, @Nullable List<String> columns, @Nullable List<Assignment> onDuplicateKeyAssignments) {
+    Insert(Table<T> table, List<String> columns, DuplicateKeyContext<T> duplicateKeyContext) {
         this.table = table;
-        this.onDuplicateKeyAssignments = MoreObjects.firstNonNull(onDuplicateKeyAssignments, ImmutableList.<Assignment>of());
-        this.columns = MoreObjects.firstNonNull(columns, ImmutableList.<String>of());
+        this.columns = columns;
+        this.duplicateKeyContext = duplicateKeyContext;
     }
 
     public Table table() {
@@ -50,8 +46,8 @@ public abstract class Insert extends Statement {
         return columns;
     }
 
-    public List<Assignment> onDuplicateKeyAssignments() {
-        return onDuplicateKeyAssignments;
+    public DuplicateKeyContext<T> getDuplicateKeyContext() {
+        return duplicateKeyContext;
     }
 
     @Override
@@ -77,5 +73,46 @@ public abstract class Insert extends Statement {
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitInsert(this, context);
+    }
+
+
+    public static class DuplicateKeyContext<T> {
+
+        private static final DuplicateKeyContext<?> NONE =
+            new DuplicateKeyContext<>(Type.NONE, Collections.emptyList(), Collections.emptyList());
+
+        public static <T> DuplicateKeyContext<T> none() {
+            return (DuplicateKeyContext<T>) NONE;
+        }
+
+        public enum Type {
+            ON_CONFLICT_DO_UPDATE_SET,
+            ON_CONFLICT_DO_NOTHING,
+            NONE
+        }
+
+        private final Type type;
+        private final List<Assignment<T>> onDuplicateKeyAssignments;
+        private final List<String> constraintColumns;
+
+        public DuplicateKeyContext(Type type,
+                                   List<Assignment<T>> onDuplicateKeyAssignments,
+                                   List<String> constraintColumns) {
+            this.type = type;
+            this.onDuplicateKeyAssignments = onDuplicateKeyAssignments;
+            this.constraintColumns = constraintColumns;
+        }
+
+        public Type getType() {
+            return type;
+        }
+
+        public List<Assignment<T>> getAssignments() {
+            return onDuplicateKeyAssignments;
+        }
+
+        public List<String> getConstraintColumns() {
+            return constraintColumns;
+        }
     }
 }

@@ -27,13 +27,12 @@ import io.crate.types.DataType;
 import io.crate.types.StringType;
 import io.crate.types.TimestampType;
 import org.elasticsearch.Version;
-import org.elasticsearch.action.admin.cluster.repositories.delete.DeleteRepositoryResponse;
-import org.elasticsearch.action.admin.cluster.repositories.put.PutRepositoryResponse;
 import org.elasticsearch.action.admin.cluster.snapshots.create.CreateSnapshotResponse;
-import org.elasticsearch.action.admin.cluster.snapshots.delete.DeleteSnapshotResponse;
+import org.elasticsearch.action.support.master.AcknowledgedResponse;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.snapshots.SnapshotState;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.ClassRule;
@@ -46,10 +45,13 @@ import java.util.Iterator;
 import java.util.List;
 
 import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 
-@ESIntegTestCase.ClusterScope(transportClientRatio = 0)
-@UseJdbc(false) // missing column types
+@ESIntegTestCase.ClusterScope()
+@UseJdbc(0) // missing column types
 public class SysSnapshotsTest extends SQLTransportIntegrationTest {
 
     @ClassRule
@@ -63,7 +65,7 @@ public class SysSnapshotsTest extends SQLTransportIntegrationTest {
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        return Settings.settingsBuilder()
+        return Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
             .put("path.repo", TEMP_FOLDER.getRoot().getAbsolutePath())
             .build();
@@ -89,9 +91,9 @@ public class SysSnapshotsTest extends SQLTransportIntegrationTest {
     }
 
     private void createRepository(String name) {
-        PutRepositoryResponse putRepositoryResponse = client().admin().cluster().preparePutRepository(name)
+        AcknowledgedResponse putRepositoryResponse = client().admin().cluster().preparePutRepository(name)
             .setType("fs")
-            .setSettings(Settings.settingsBuilder()
+            .setSettings(Settings.builder()
                 .put("location", new File(TEMP_FOLDER.getRoot(), "backup").getAbsolutePath())
                 .put("chunk_size", "5k")
                 .put("compress", false)
@@ -100,7 +102,7 @@ public class SysSnapshotsTest extends SQLTransportIntegrationTest {
     }
 
     private void deleteRepository(String name) {
-        DeleteRepositoryResponse deleteRepositoryResponse = client().admin().cluster().prepareDeleteRepository(name).get();
+        AcknowledgedResponse deleteRepositoryResponse = client().admin().cluster().prepareDeleteRepository(name).get();
         assertThat(deleteRepositoryResponse.isAcknowledged(), equalTo(true));
     }
 
@@ -116,10 +118,11 @@ public class SysSnapshotsTest extends SQLTransportIntegrationTest {
         createSnapshot(snapshotName, tableName);
     }
 
-    private void createSnapshot(String snapshotName, String... tables) {
+    private void createSnapshot(String snapshotName, String table) {
+        String defaultSchema = sqlExecutor.getCurrentSchema();
         CreateSnapshotResponse createSnapshotResponse = client().admin().cluster()
             .prepareCreateSnapshot(REPOSITORY_NAME, snapshotName)
-            .setWaitForCompletion(true).setIndices(tables).get();
+            .setWaitForCompletion(true).setIndices(getFqn(table)).get();
         assertThat(createSnapshotResponse.getSnapshotInfo().successfulShards(), greaterThan(0));
         assertThat(createSnapshotResponse.getSnapshotInfo().successfulShards(), equalTo(createSnapshotResponse.getSnapshotInfo().totalShards()));
         snapshots.add(snapshotName);
@@ -127,34 +130,34 @@ public class SysSnapshotsTest extends SQLTransportIntegrationTest {
     }
 
     private void deleteSnapshot(String name) {
-        DeleteSnapshotResponse deleteSnapshotResponse = client().admin().cluster()
+        AcknowledgedResponse deleteSnapshotResponse = client().admin().cluster()
             .prepareDeleteSnapshot(REPOSITORY_NAME, name).get();
         assertThat(deleteSnapshotResponse.isAcknowledged(), equalTo(true));
     }
 
     @Test
-    public void testQueryAllColumns() throws Exception {
+    public void testQueryAllColumns() {
         execute("select * from sys.snapshots");
         assertThat(response.rowCount(), is(1L));
         assertThat(response.cols().length, is(7));
         assertThat(response.cols(), is(new String[]{"concrete_indices", "finished", "name", "repository", "started", "state", "version"}));
         assertThat(response.columnTypes(), is(
             new DataType[]{
-                new ArrayType(StringType.INSTANCE),
-                TimestampType.INSTANCE,
+                new ArrayType<>(StringType.INSTANCE),
+                TimestampType.INSTANCE_WITH_TZ,
                 StringType.INSTANCE,
                 StringType.INSTANCE,
-                TimestampType.INSTANCE,
+                TimestampType.INSTANCE_WITH_TZ,
                 StringType.INSTANCE,
                 StringType.INSTANCE
             }));
-        assertThat((String[]) response.rows()[0][0], arrayContaining("test_table"));
+        assertThat((List<Object>) response.rows()[0][0], Matchers.contains(getFqn("test_table")));
         assertThat((Long) response.rows()[0][1], lessThanOrEqualTo(finishedTime));
-        assertThat((String) response.rows()[0][2], is("test_snap_1"));
-        assertThat((String) response.rows()[0][3], is(REPOSITORY_NAME));
+        assertThat(response.rows()[0][2], is("test_snap_1"));
+        assertThat(response.rows()[0][3], is(REPOSITORY_NAME));
         assertThat((Long) response.rows()[0][4], greaterThanOrEqualTo(createdTime));
-        assertThat((String) response.rows()[0][5], is(SnapshotState.SUCCESS.name()));
-        assertThat((String) response.rows()[0][6], is(Version.CURRENT.toString()));
+        assertThat(response.rows()[0][5], is(SnapshotState.SUCCESS.name()));
+        assertThat(response.rows()[0][6], is(Version.CURRENT.toString()));
 
     }
 }

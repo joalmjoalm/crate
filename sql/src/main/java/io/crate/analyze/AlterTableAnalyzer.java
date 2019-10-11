@@ -21,85 +21,117 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.PartitionName;
+import io.crate.action.sql.SessionContext;
+import io.crate.analyze.expressions.ExpressionAnalysisContext;
+import io.crate.analyze.expressions.ExpressionAnalyzer;
+import io.crate.analyze.relations.FieldProvider;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.blob.BlobSchemaInfo;
+import io.crate.metadata.blob.BlobTableInfo;
+import io.crate.metadata.doc.DocTableInfo;
 import io.crate.metadata.table.Operation;
-import io.crate.sql.tree.*;
-import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
-import org.elasticsearch.common.settings.Settings;
+import io.crate.sql.tree.AlterBlobTable;
+import io.crate.sql.tree.AlterTable;
+import io.crate.sql.tree.AlterTableOpenClose;
+import io.crate.sql.tree.AlterTableRename;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.ParameterExpression;
+import io.crate.sql.tree.Table;
 
-@Singleton
-public class AlterTableAnalyzer extends DefaultTraversalVisitor<AlterTableAnalyzedStatement, Analysis> {
+import java.util.List;
+import java.util.function.Function;
 
-    private static final TablePropertiesAnalyzer TABLE_PROPERTIES_ANALYZER = new TablePropertiesAnalyzer();
+class AlterTableAnalyzer {
+
     private final Schemas schemas;
+    private final Functions functions;
 
-    @Inject
-    public AlterTableAnalyzer(Schemas schemas) {
+    AlterTableAnalyzer(Schemas schemas, Functions functions) {
         this.schemas = schemas;
+        this.functions = functions;
     }
 
-    @Override
-    public AlterTableAnalyzedStatement visitColumnDefinition(ColumnDefinition node, Analysis analysis) {
-        if (node.ident().startsWith("_")) {
-            throw new IllegalArgumentException("Column ident must not start with '_'");
-        }
+    AnalyzedAlterTable analyze(AlterTable<Expression> node,
+                               Function<ParameterExpression, Symbol> convertParamFunction,
+                               CoordinatorTxnCtx txnCtx) {
+        var exprAnalyzerWithFieldsAsString = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.FIELDS_AS_LITERAL, null);
+        var exprCtx = new ExpressionAnalysisContext();
 
-        return null;
+        AlterTable<Symbol> alterTable = node.map(x -> exprAnalyzerWithFieldsAsString.convert(x, exprCtx));
+
+        DocTableInfo docTableInfo = (DocTableInfo) schemas.resolveTableInfo(
+            alterTable.table().getName(),
+            Operation.ALTER_BLOCKS,
+            txnCtx.sessionContext().user(),
+            txnCtx.sessionContext().searchPath());
+
+        return new AnalyzedAlterTable(docTableInfo, alterTable);
     }
 
-    @Override
-    public AlterTableAnalyzedStatement visitAlterTable(AlterTable node, Analysis analysis) {
-        AlterTableAnalyzedStatement statement = new AlterTableAnalyzedStatement(schemas);
-        setTableAndPartitionName(node.table(), statement, analysis);
+    AnalyzedAlterBlobTable analyze(AlterBlobTable<Expression> node,
+                                   Function<ParameterExpression, Symbol> convertParamFunction,
+                                   CoordinatorTxnCtx txnCtx) {
+        RelationName relationName = RelationName.fromBlobTable(node.table());
 
-        TableParameterInfo tableParameterInfo = statement.table().tableParameterInfo();
-        if (statement.partitionName().isPresent()) {
-            assert tableParameterInfo instanceof AlterPartitionedTableParameterInfo;
-            assert !node.table().excludePartitions() : "Alter table ONLY not supported when using a partition";
-            tableParameterInfo = ((AlterPartitionedTableParameterInfo) tableParameterInfo).partitionTableSettingsInfo();
-        }
-        statement.excludePartitions(node.table().excludePartitions());
+        var exprAnalyzerWithFieldsAsString = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.FIELDS_AS_LITERAL, null);
+        var exprCtx = new ExpressionAnalysisContext();
 
-        if (node.genericProperties().isPresent()) {
-            TABLE_PROPERTIES_ANALYZER.analyze(
-                statement.tableParameter(), tableParameterInfo, node.genericProperties(),
-                analysis.parameterContext().parameters());
-        } else if (!node.resetProperties().isEmpty()) {
-            TABLE_PROPERTIES_ANALYZER.analyze(
-                statement.tableParameter(), tableParameterInfo, node.resetProperties());
-        }
+        AlterTable<Symbol> alterTable = node.map(x -> exprAnalyzerWithFieldsAsString.convert(x, exprCtx));
 
-        // Only check for permission if statement is not changing the metadata blocks, so don't block `re-enabling` these.
-        Settings tableSettings = statement.tableParameter().settings();
-        if (tableSettings.getAsMap().size() != 1 ||
-            (tableSettings.get(IndexMetaData.SETTING_BLOCKS_METADATA) == null &&
-             tableSettings.get(IndexMetaData.SETTING_READ_ONLY) == null)) {
+        assert BlobSchemaInfo.NAME.equals(relationName.schema()) : "schema name must be 'blob'";
+        BlobTableInfo tableInfo = schemas.getTableInfo(relationName);
 
-            Operation.blockedRaiseException(statement.table(), Operation.ALTER);
-        }
-
-        return statement;
+        return new AnalyzedAlterBlobTable(tableInfo, alterTable);
     }
 
-    private void setTableAndPartitionName(Table node, AlterTableAnalyzedStatement context, Analysis analysis) {
-        context.table(TableIdent.of(node, analysis.sessionContext().defaultSchema()));
-        if (!node.partitionProperties().isEmpty()) {
-            PartitionName partitionName = PartitionPropertiesAnalyzer.toPartitionName(
-                context.table(),
-                node.partitionProperties(),
-                analysis.parameterContext().parameters());
-            if (!context.table().partitions().contains(partitionName)) {
-                throw new IllegalArgumentException("Referenced partition does not exist.");
-            }
-            context.partitionName(partitionName);
+
+    AnalyzedAlterTableRename analyze(AlterTableRename<Expression> node, SessionContext sessionContext) {
+        if (!node.table().partitionProperties().isEmpty()) {
+            throw new UnsupportedOperationException("Renaming a single partition is not supported");
         }
+
+        // we do not support renaming to a different schema, thus the target table identifier must not include a schema
+        // this is an artificial limitation, technically it can be done
+        List<String> newIdentParts = node.newName().getParts();
+        if (newIdentParts.size() > 1) {
+            throw new IllegalArgumentException("Target table name must not include a schema");
+        }
+
+        RelationName relationName;
+        if (node.blob()) {
+            relationName = RelationName.fromBlobTable(node.table());
+        } else {
+            relationName = schemas.resolveRelation(node.table().getName(), sessionContext.searchPath());
+        }
+
+        DocTableInfo tableInfo = schemas.getTableInfo(relationName, Operation.ALTER_TABLE_RENAME);
+        RelationName newRelationName = new RelationName(relationName.schema(), newIdentParts.get(0));
+        newRelationName.ensureValidForRelationCreation();
+        return new AnalyzedAlterTableRename(tableInfo, newRelationName);
     }
 
-    public AnalyzedStatement analyze(Node node, Analysis analysis) {
-        return process(node, analysis);
+    public AnalyzedAlterTableOpenClose analyze(AlterTableOpenClose<Expression> node,
+                                               Function<ParameterExpression, Symbol> convertParamFunction,
+                                               CoordinatorTxnCtx txnCtx) {
+        var exprAnalyzerWithFieldsAsStrings = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.FIELDS_AS_LITERAL, null);
+        var exprCtx = new ExpressionAnalysisContext();
+
+        Table<Symbol> table = node.table().map(x -> exprAnalyzerWithFieldsAsStrings.convert(x, exprCtx));
+        RelationName relationName;
+        if (node.blob()) {
+            relationName = RelationName.fromBlobTable(table);
+        } else {
+            relationName = schemas.resolveRelation(table.getName(), txnCtx.sessionContext().searchPath());
+        }
+
+        DocTableInfo tableInfo = schemas.getTableInfo(relationName, Operation.ALTER_OPEN_CLOSE);
+        return new AnalyzedAlterTableOpenClose(tableInfo, table, node.openTable());
     }
 }

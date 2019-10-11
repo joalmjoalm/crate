@@ -21,24 +21,32 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
 import io.crate.metadata.doc.DocTableInfo;
+import org.elasticsearch.common.settings.Settings;
 
-public class AddColumnAnalyzedStatement extends AbstractDDLAnalyzedStatement {
+import java.util.Map;
 
-    private final Schemas schemas;
-    private DocTableInfo tableInfo;
-    private AnalyzedTableElements analyzedTableElements;
-    private boolean newPrimaryKeys = false;
-    private boolean hasNewGeneratedColumns = false;
+public class AddColumnAnalyzedStatement implements DDLStatement {
 
-    protected AddColumnAnalyzedStatement(Schemas schemas) {
-        this.schemas = schemas;
-    }
+    private final DocTableInfo tableInfo;
+    private final AnalyzedTableElements<Object> analyzedTableElements;
+    private final Settings settings;
+    private final Map<String, Object> mapping;
+    private final boolean newPrimaryKeys;
+    private final boolean hasNewGeneratedColumns;
 
-    public void table(TableIdent tableIdent) {
-        tableInfo = schemas.getWritableTable(tableIdent);
+    public AddColumnAnalyzedStatement(DocTableInfo tableInfo,
+                                      AnalyzedTableElements<Object> analyzedTableElements,
+                                      Settings settings,
+                                      Map<String, Object> mapping,
+                                      boolean newPrimaryKeys,
+                                      boolean hasNewGeneratedColumns) {
+        this.tableInfo = tableInfo;
+        this.analyzedTableElements = analyzedTableElements;
+        this.settings = settings;
+        this.mapping = mapping;
+        this.newPrimaryKeys = newPrimaryKeys;
+        this.hasNewGeneratedColumns = hasNewGeneratedColumns;
     }
 
     public DocTableInfo table() {
@@ -50,27 +58,23 @@ public class AddColumnAnalyzedStatement extends AbstractDDLAnalyzedStatement {
         return visitor.visitAddColumnStatement(this, context);
     }
 
-    public void analyzedTableElements(AnalyzedTableElements analyzedTableElements) {
-        this.analyzedTableElements = analyzedTableElements;
-    }
-
-    public AnalyzedTableElements analyzedTableElements() {
-        return this.analyzedTableElements;
-    }
-
-    public void newPrimaryKeys(boolean newPrimaryKeys) {
-        this.newPrimaryKeys = newPrimaryKeys;
+    public AnalyzedTableElements<Object> analyzedTableElements() {
+        return analyzedTableElements;
     }
 
     public boolean newPrimaryKeys() {
         return this.newPrimaryKeys;
     }
 
-    public void hasNewGeneratedColumns(boolean hasNewGeneratedColumns) {
-        this.hasNewGeneratedColumns = hasNewGeneratedColumns;
-    }
-
     public boolean hasNewGeneratedColumns() {
         return hasNewGeneratedColumns;
+    }
+
+    public Map<String, Object> mapping() {
+        return mapping;
+    }
+
+    public Settings settings() {
+        return settings;
     }
 }

@@ -22,46 +22,50 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.UseHashJoins;
+import io.crate.testing.UseRandomizedSchema;
 import org.junit.Test;
 
 import java.util.Locale;
 
+import static io.crate.testing.TestingHelpers.printedTable;
 import static org.hamcrest.core.Is.is;
+import static org.hamcrest.core.StringStartsWith.startsWith;
 
-
-@UseJdbc
+@UseRandomizedSchema(random = false)
 public class ShowIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testShowCrateSystemTable() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Table must be a doc table");
+        expectedException.expectMessage("The relation \"sys.shards\" doesn't support or allow SHOW CREATE " +
+                                        "operations, as it is read-only.");
         execute("show create table sys.shards");
     }
 
     @Test
     public void testShowCreateBlobTable() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Table must be a doc table");
+        expectedException.expectMessage("The relation \"blob.table_blob\" doesn't support or allow " +
+                                        "SHOW CREATE operations.");
         execute("create blob table table_blob");
         execute("show create table blob.table_blob");
     }
 
     @Test
-    public void testShowCrateTableSimple() throws Exception {
+    public void testShowCrateTableSimple() {
         String expected = "CREATE TABLE IF NOT EXISTS \"doc\".\"test\" (\n" +
                           "   \"col_bool\" BOOLEAN,\n" +
-                          "   \"col_byte\" BYTE,\n" +
-                          "   \"col_double\" DOUBLE,\n" +
-                          "   \"col_float\" FLOAT,\n" +
-                          "   \"col_geo\" GEO_POINT,\n" +
+                          "   \"col_byte\" CHAR,\n" +
+                          "   \"col_short\" SMALLINT,\n" +
                           "   \"col_int\" INTEGER,\n" +
-                          "   \"col_long\" LONG,\n" +
-                          "   \"col_short\" SHORT,\n" +
-                          "   \"col_str\" STRING,\n" +
-                          "   \"col_ts\" TIMESTAMP\n" +
+                          "   \"col_long\" BIGINT,\n" +
+                          "   \"col_float\" REAL,\n" +
+                          "   \"col_double\" DOUBLE PRECISION,\n" +
+                          "   \"col_str\" TEXT,\n" +
+                          "   \"col_ts\" TIMESTAMP WITHOUT TIME ZONE,\n" +
+                          "   \"col_ts_z\" TIMESTAMP WITH TIME ZONE,\n" +
+                          "   \"col_geo\" GEO_POINT\n" +
                           ")\n";
         execute("create table test (" +
                 " col_bool boolean," +
@@ -72,7 +76,8 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
                 " col_float float," +
                 " col_double double," +
                 " col_str string," +
-                " col_ts timestamp," +
+                " col_ts timestamp without time zone," +
+                " col_ts_z timestamp with time zone," +
                 " col_geo geo_point" +
                 ")");
         execute("show create table test");
@@ -92,17 +97,17 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
                 ")");
         execute("show create table test");
         assertRow("CREATE TABLE IF NOT EXISTS \"doc\".\"test\" (\n" +
-                  "   \"col_arr_obj_a\" ARRAY(OBJECT (DYNAMIC)),\n" +
-                  "   \"col_arr_obj_b\" ARRAY(OBJECT (STRICT) AS (\n" +
+                  "   \"col_arr_str\" ARRAY(TEXT),\n" +
+                  "   \"col_arr_obj_a\" ARRAY(OBJECT(DYNAMIC)),\n" +
+                  "   \"col_arr_obj_b\" ARRAY(OBJECT(STRICT) AS (\n" +
                   "      \"id\" INTEGER\n" +
                   "   )),\n" +
-                  "   \"col_arr_str\" ARRAY(STRING),\n" +
-                  "   \"col_obj_a\" OBJECT (DYNAMIC),\n" +
-                  "   \"col_obj_b\" OBJECT (DYNAMIC) AS (\n" +
+                  "   \"col_obj_a\" OBJECT(DYNAMIC),\n" +
+                  "   \"col_obj_b\" OBJECT(DYNAMIC) AS (\n" +
                   "      \"arr\" ARRAY(INTEGER),\n" +
-                  "      \"obj\" OBJECT (STRICT) AS (\n" +
+                  "      \"obj\" OBJECT(STRICT) AS (\n" +
                   "         \"id\" INTEGER,\n" +
-                  "         \"name\" STRING\n" +
+                  "         \"name\" TEXT\n" +
                   "      )\n" +
                   "   )\n" +
                   ")\n");
@@ -110,12 +115,12 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testShowCreateCustomSchemaTable() throws Exception {
+    public void testShowCreateCustomSchemaTable() {
         execute("create table my.test (id long, name string) clustered into 2 shards");
         execute("show create table my.test");
         String expected = "CREATE TABLE IF NOT EXISTS \"my\".\"test\" (\n" +
-                          "   \"id\" LONG,\n" +
-                          "   \"name\" STRING\n" +
+                          "   \"id\" BIGINT,\n" +
+                          "   \"name\" TEXT\n" +
                           ")\n" +
                           "CLUSTERED INTO 2 SHARDS\n" +
                           "WITH (";
@@ -136,16 +141,16 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
                 "clustered into 2 shards");
         execute("show create table test");
         assertRow("CREATE TABLE IF NOT EXISTS \"doc\".\"test\" (\n" +
-                  "   \"col_a\" STRING INDEX OFF,\n" +
-                  "   \"col_b\" STRING,\n" +
-                  "   \"col_c\" STRING INDEX USING FULLTEXT WITH (\n" +
+                  "   \"col_a\" TEXT INDEX OFF,\n" +
+                  "   \"col_b\" TEXT,\n" +
+                  "   \"col_c\" TEXT INDEX USING FULLTEXT WITH (\n" +
                   "      analyzer = 'standard'\n" +
                   "   ),\n" +
-                  "   \"col_d\" STRING INDEX USING FULLTEXT WITH (\n" +
+                  "   \"col_d\" TEXT INDEX USING FULLTEXT WITH (\n" +
                   "      analyzer = 'english'\n" +
                   "   ),\n" +
-                  "   \"col_e\" STRING,\n" +
-                  "   \"col_f\" STRING,\n" +
+                  "   \"col_e\" TEXT,\n" +
+                  "   \"col_f\" TEXT,\n" +
                   "   INDEX \"index_ft\" USING FULLTEXT (\"col_e\", \"col_f\") WITH (\n" +
                   "      analyzer = 'english'\n" +
                   "   )\n" +
@@ -155,17 +160,17 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testShowCreateTablePartitioned() throws Exception {
+    public void testShowCreateTablePartitioned() {
         execute("create table test (" +
                 " id long," +
-                " date timestamp" +
+                " date timestamp with time zone" +
                 ") " +
                 "clustered into 4 shards " +
                 "partitioned by (\"date\")");
         execute("show create table test");
         assertRow("CREATE TABLE IF NOT EXISTS \"doc\".\"test\" (\n" +
-                  "   \"date\" TIMESTAMP,\n" +
-                  "   \"id\" LONG\n" +
+                  "   \"id\" BIGINT,\n" +
+                  "   \"date\" TIMESTAMP WITH TIME ZONE\n" +
                   ")\n" +
                   "CLUSTERED INTO 4 SHARDS\n" +
                   "PARTITIONED BY (\"date\")\n" +
@@ -181,7 +186,7 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
         execute("show create table test_pk_single");
         assertRow("CREATE TABLE IF NOT EXISTS \"doc\".\"test_pk_single\" (\n" +
                   "   \"id\" INTEGER,\n" +
-                  "   \"name\" STRING,\n" +
+                  "   \"name\" TEXT,\n" +
                   "   PRIMARY KEY (\"id\")\n" +
                   ")\n" +
                   "CLUSTERED BY (\"id\") INTO 8 SHARDS\n" +
@@ -194,9 +199,9 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
                 ") clustered into 8 shards");
         execute("show create table test_pk_multi");
         assertRow("CREATE TABLE IF NOT EXISTS \"doc\".\"test_pk_multi\" (\n" +
-                  "   \"col_a\" STRING,\n" +
-                  "   \"col_z\" STRING,\n" +
                   "   \"id\" INTEGER,\n" +
+                  "   \"col_z\" TEXT,\n" +
+                  "   \"col_a\" TEXT,\n" +
                   "   PRIMARY KEY (\"col_z\", \"col_a\")\n" +
                   ")\n" +
                   "CLUSTERED INTO 8 SHARDS\n" +
@@ -204,7 +209,7 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testShowCreateTableWithGeneratedColumn() throws Exception {
+    public void testShowCreateTableWithGeneratedColumn() {
         execute("create table test_generated_column (" +
                 " day1 AS date_trunc('day', ts)," +
                 " day2 AS (date_trunc('day', ts)) INDEX OFF," +
@@ -213,23 +218,23 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
                 " col1 AS ts + 1," +
                 " col2 string GENERATED ALWAYS AS ts + 1," +
                 " col3 string GENERATED ALWAYS AS (ts + 1)," +
-                " name AS concat(user['name'], 'foo')," +
-                " ts timestamp," +
-                " user object AS (name string)" +
+                " name AS concat(\"user\"['name'], 'foo')," +
+                " ts timestamp with time zone," +
+                " \"user\" object AS (name string)" +
                 ")");
         execute("show create table test_generated_column");
         assertRow("CREATE TABLE IF NOT EXISTS \"doc\".\"test_generated_column\" (\n" +
-                  "   \"col1\" LONG GENERATED ALWAYS AS (\"ts\" + 1),\n" +
-                  "   \"col2\" STRING GENERATED ALWAYS AS CAST((\"ts\" + 1) AS string),\n" +
-                  "   \"col3\" STRING GENERATED ALWAYS AS CAST((\"ts\" + 1) AS string),\n" +
-                  "   \"day1\" TIMESTAMP GENERATED ALWAYS AS date_trunc('day', \"ts\"),\n" +
-                  "   \"day2\" TIMESTAMP GENERATED ALWAYS AS date_trunc('day', \"ts\") INDEX OFF,\n" +
-                  "   \"day3\" TIMESTAMP GENERATED ALWAYS AS date_trunc('day', \"ts\"),\n" +
-                  "   \"day4\" TIMESTAMP GENERATED ALWAYS AS date_trunc('day', \"ts\"),\n" +
-                  "   \"name\" STRING GENERATED ALWAYS AS concat(\"user\"['name'], 'foo'),\n" +
-                  "   \"ts\" TIMESTAMP,\n" +
-                  "   \"user\" OBJECT (DYNAMIC) AS (\n" +
-                  "      \"name\" STRING\n" +
+                  "   \"day1\" TIMESTAMP WITH TIME ZONE GENERATED ALWAYS AS date_trunc('day', \"ts\"),\n" +
+                  "   \"day2\" TIMESTAMP WITH TIME ZONE GENERATED ALWAYS AS date_trunc('day', \"ts\") INDEX OFF,\n" +
+                  "   \"day3\" TIMESTAMP WITH TIME ZONE GENERATED ALWAYS AS date_trunc('day', \"ts\"),\n" +
+                  "   \"day4\" TIMESTAMP WITH TIME ZONE GENERATED ALWAYS AS date_trunc('day', \"ts\"),\n" +
+                  "   \"col1\" BIGINT GENERATED ALWAYS AS CAST(\"ts\" AS bigint) + 1,\n" +
+                  "   \"col2\" TEXT GENERATED ALWAYS AS CAST((CAST(\"ts\" AS bigint) + 1) AS text),\n" +
+                  "   \"col3\" TEXT GENERATED ALWAYS AS CAST((CAST(\"ts\" AS bigint) + 1) AS text),\n" +
+                  "   \"name\" TEXT GENERATED ALWAYS AS concat(\"user\"['name'], 'foo'),\n" +
+                  "   \"ts\" TIMESTAMP WITH TIME ZONE,\n" +
+                  "   \"user\" OBJECT(DYNAMIC) AS (\n" +
+                  "      \"name\" TEXT\n" +
                   "   )\n" +
                   ")");
     }
@@ -241,7 +246,7 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
 
         execute("SHOW CREATE TABLE with_quote");
         assertRow("CREATE TABLE IF NOT EXISTS \"doc\".\"with_quote\" (\n" +
-                  "   \"\"\"\" STRING\n" +
+                  "   \"\"\"\" TEXT\n" +
                   ")\n" +
                   "CLUSTERED INTO 1 SHARDS");
 
@@ -250,9 +255,10 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
     private void assertRow(String expected) {
         assertEquals(1L, response.rowCount());
         try {
-            assertTrue(((String) response.rows()[0][0]).startsWith(expected));
+            assertThat(((String) response.rows()[0][0]), startsWith(expected));
         } catch (Throwable e) {
-            String msg = String.format(Locale.ENGLISH, "Row does not start with expected string:\n\nExpected: %s\nActual: %s\n", expected, response.rows()[0][0]);
+            String msg = String.format(Locale.ENGLISH, "Row does not start with expected string:%n%n" +
+                                                       "Expected: %s%nActual: %s%n", expected, response.rows()[0][0]);
             throw new AssertionError(msg);
         }
     }
@@ -262,12 +268,12 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
         execute("create table my_s1.my_table (id long) clustered into 1 shards with (number_of_replicas='0')");
         execute("create table my_s2.my_table (id long) clustered into 1 shards with (number_of_replicas='0')");
         execute("show schemas like 'my_%'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("my_s1\n" +
+        assertThat(printedTable(response.rows()), is("my_s1\n" +
                                                                     "my_s2\n"));
     }
 
     @Test
-    public void testShowColumns() throws Exception {
+    public void testShowColumns() {
         execute("create table my_table1 (" +
                 "column11 integer, " +
                 "column12 integer, " +
@@ -278,7 +284,7 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
         );
 
         execute("create table my_s1.my_table1 (" +
-                "col11 timestamp, " +
+                "col11 timestamp with time zone, " +
                 "col12 integer, " +
                 "col13 integer, " +
                 "col22 long, " +
@@ -286,34 +292,34 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
         );
 
         execute("show columns from my_table1");
-        assertThat(TestingHelpers.printedTable(response.rows()),
+        assertThat(printedTable(response.rows()),
             is("column11| integer\n" +
                "column12| integer\n" +
-               "column13| long\n" +
+               "column13| bigint\n" +
                "column21| integer\n" +
-               "column22| string\n" +
+               "column22| text\n" +
                "column31| integer\n"));
 
         execute("show columns in my_table1 like '%2'");
-        assertThat(TestingHelpers.printedTable(response.rows()),
+        assertThat(printedTable(response.rows()),
             is("column12| integer\n" +
-               "column22| string\n"));
+               "column22| text\n"));
 
         execute("show columns from my_table1 where column_name = 'column12'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("column12| integer\n"));
+        assertThat(printedTable(response.rows()), is("column12| integer\n"));
 
-        execute("show columns in my_table1 from my_s1 where data_type = 'long'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("col22| long\n"));
+        execute("show columns in my_table1 from my_s1 where data_type = 'bigint'");
+        assertThat(printedTable(response.rows()), is("col22| bigint\n"));
 
         execute("show columns in my_table1 from my_s1 like 'col1%'");
-        assertThat(TestingHelpers.printedTable(response.rows()),
-            is("col11| timestamp\n" +
+        assertThat(printedTable(response.rows()),
+            is("col11| timestamp with time zone\n" +
                "col12| integer\n" +
                "col13| integer\n"));
 
         execute("show columns from my_table1 in my_s1 like '%1'");
-        assertThat(TestingHelpers.printedTable(response.rows()),
-            is("col11| timestamp\n" +
+        assertThat(printedTable(response.rows()),
+            is("col11| timestamp with time zone\n" +
                "col31| integer\n"));
 
     }
@@ -326,42 +332,72 @@ public class ShowIntegrationTest extends SQLTransportIntegrationTest {
         execute("create table foo (id long, name string)");
 
         execute("show tables");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("foo\n" +
+        assertThat(printedTable(response.rows()), is("foo\n" +
                                                                     "test\n"));
 
         execute(String.format(Locale.ENGLISH, "show tables from %s", schemaName));
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute(String.format(Locale.ENGLISH, "show tables in %s", schemaName));
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute(String.format(Locale.ENGLISH, "show tables from %s like 'hello'", schemaName));
         assertEquals(0, response.rowCount());
 
         execute(String.format(Locale.ENGLISH, "show tables from %s like '%%'", schemaName));
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute("show tables like '%es%'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute("show tables like '%'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("foo\n" +
+        assertThat(printedTable(response.rows()), is("foo\n" +
                                                                     "test\n"));
 
         execute(String.format(Locale.ENGLISH, "show tables where table_name = '%s'", tableName));
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute("show tables where table_name like '%es%'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute(String.format(Locale.ENGLISH, "show tables from %s where table_name like '%%es%%'", schemaName));
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute(String.format(Locale.ENGLISH, "show tables in %s where table_name like '%%es%%'", schemaName));
-        assertThat(TestingHelpers.printedTable(response.rows()), is("test\n"));
+        assertThat(printedTable(response.rows()), is("test\n"));
 
         execute(String.format(Locale.ENGLISH, "show tables from %s where table_name = 'hello'", schemaName));
         assertEquals(0, response.rowCount());
     }
 
+    @Test
+    public void testShowSearchPath() {
+        execute("show search_path");
+        assertThat(printedTable(response.rows()), is("pg_catalog, doc\n"));
+    }
+
+    @UseHashJoins(1)
+    @Test
+    public void testShowEnableHashJoin() {
+        execute("show enable_hashjoin");
+        assertThat(printedTable(response.rows()), is("true\n"));
+    }
+
+    @Test
+    public void testShowUnknownSetting() {
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage("Unknown session setting name 'foo'.");
+        execute("show foo");
+    }
+
+    @UseHashJoins(1)
+    @Test
+    public void testShowAll() {
+        execute("show all");
+        assertThat(printedTable(response.rows()), is(
+            "search_path| pg_catalog, doc| Sets the schema search order.\n" +
+            "enable_hashjoin| true| Considers using the Hash Join instead of the Nested Loop Join implementation.\n" +
+            "max_index_keys| 32| Shows the maximum number of index keys.\n")
+        );
+    }
 }

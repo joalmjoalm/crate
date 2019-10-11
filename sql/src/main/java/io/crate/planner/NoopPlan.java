@@ -21,26 +21,34 @@
 
 package io.crate.planner;
 
-import java.util.UUID;
+import io.crate.data.InMemoryBatchIterator;
+import io.crate.data.Row;
+import io.crate.data.RowConsumer;
+import io.crate.planner.operators.SubQueryResults;
+
+import static io.crate.data.SentinelRow.SENTINEL;
 
 /**
  * A plan with an empty result
  */
-public class NoopPlan implements Plan {
+public final class NoopPlan implements Plan {
 
-    private final UUID id;
+    public static final Plan INSTANCE = new NoopPlan();
 
-    public NoopPlan(UUID id) {
-        this.id = id;
+    private NoopPlan(){
     }
 
     @Override
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context) {
-        return visitor.visitNoopPlan(this, context);
+    public StatementType type() {
+        return StatementType.UNDEFINED;
     }
 
     @Override
-    public UUID jobId() {
-        return id;
+    public void executeOrFail(DependencyCarrier dependencyCarrier,
+                              PlannerContext plannerContext,
+                              RowConsumer consumer,
+                              Row params,
+                              SubQueryResults subQueryResults) {
+        consumer.accept(InMemoryBatchIterator.empty(SENTINEL), null);
     }
 }

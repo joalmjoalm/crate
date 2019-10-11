@@ -22,54 +22,69 @@
 package io.crate.sql.tree;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Optional;
 
 import javax.annotation.Nullable;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Function;
 
-public class CreateBlobTable extends Statement {
+public class CreateBlobTable<T> extends Statement {
 
-    private final Table name;
-    private final Optional<ClusteredBy> clusteredBy;
-    private final Optional<GenericProperties> genericProperties;
+    private final Table<T> name;
+    @Nullable
+    private final ClusteredBy<T> clusteredBy;
+    private final GenericProperties<T> genericProperties;
 
-    public CreateBlobTable(Table name, @Nullable ClusteredBy clusteredBy, @Nullable GenericProperties properties) {
-        this.name = name;
-        this.clusteredBy = Optional.fromNullable(clusteredBy);
-        this.genericProperties = Optional.fromNullable(properties);
+    public CreateBlobTable(Table<T> name, Optional<ClusteredBy<T>> clusteredBy, GenericProperties<T> properties) {
+        this(name, clusteredBy.orElse(null), properties);
     }
 
-    public Table name() {
+    private CreateBlobTable(Table<T> name,
+                            @Nullable ClusteredBy<T> clusteredBy,
+                            GenericProperties<T> genericProperties) {
+        this.name = name;
+        this.clusteredBy = clusteredBy;
+        this.genericProperties = genericProperties;
+    }
+
+    public Table<T> name() {
         return name;
     }
 
-    public Optional<ClusteredBy> clusteredBy() {
+    @Nullable
+    public ClusteredBy<T> clusteredBy() {
         return clusteredBy;
     }
 
-    public Optional<GenericProperties> genericProperties() {
+    public GenericProperties<T> genericProperties() {
         return genericProperties;
+    }
+
+    public <U> CreateBlobTable<U> map(Function<? super T, ? extends U> mapper) {
+        return new CreateBlobTable<>(
+            name.map(mapper),
+            clusteredBy == null ? null : clusteredBy.map(mapper),
+            genericProperties.map(mapper)
+        );
     }
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-
-        CreateBlobTable that = (CreateBlobTable) o;
-
-        if (!clusteredBy.equals(that.clusteredBy)) return false;
-        if (!genericProperties.equals(that.genericProperties)) return false;
-        if (!name.equals(that.name)) return false;
-
-        return true;
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        CreateBlobTable<?> that = (CreateBlobTable<?>) o;
+        return name.equals(that.name) &&
+               Objects.equals(clusteredBy, that.clusteredBy) &&
+               genericProperties.equals(that.genericProperties);
     }
 
     @Override
     public int hashCode() {
-        int result = name.hashCode();
-        result = 31 * result + clusteredBy.hashCode();
-        result = 31 * result + genericProperties.hashCode();
-        return result;
+        return Objects.hash(name, clusteredBy, genericProperties);
     }
 
     @Override

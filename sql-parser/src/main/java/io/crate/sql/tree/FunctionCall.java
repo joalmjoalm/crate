@@ -21,35 +21,36 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.Objects;
-import com.google.common.base.Optional;
-
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 
-public class FunctionCall
-    extends Expression {
+public class FunctionCall extends Expression {
+
     private final QualifiedName name;
-    private final Optional<Window> window;
     private final boolean distinct;
     private final List<Expression> arguments;
+    private final Optional<Window> window;
+    private final Optional<Expression> filter;
 
     public FunctionCall(QualifiedName name, List<Expression> arguments) {
-        this(name, null, false, arguments);
+        this(name, false, arguments, Optional.empty(), Optional.empty());
     }
 
-    public FunctionCall(QualifiedName name, Window window, boolean distinct, List<Expression> arguments) {
+    public FunctionCall(QualifiedName name,
+                        boolean distinct,
+                        List<Expression> arguments,
+                        Optional<Window> window,
+                        Optional<Expression> filter) {
         this.name = name;
-        this.window = Optional.fromNullable(window);
         this.distinct = distinct;
         this.arguments = arguments;
+        this.window = window;
+        this.filter = filter;
     }
 
     public QualifiedName getName() {
         return name;
-    }
-
-    public Optional<Window> getWindow() {
-        return window;
     }
 
     public boolean isDistinct() {
@@ -60,28 +61,37 @@ public class FunctionCall
         return arguments;
     }
 
+    public Optional<Window> getWindow() {
+        return window;
+    }
+
+    public Optional<Expression> filter() {
+        return filter;
+    }
+
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitFunctionCall(this, context);
     }
 
     @Override
-    public boolean equals(Object obj) {
-        if (this == obj) {
+    public boolean equals(Object o) {
+        if (this == o) {
             return true;
         }
-        if ((obj == null) || (getClass() != obj.getClass())) {
+        if (o == null || getClass() != o.getClass()) {
             return false;
         }
-        FunctionCall o = (FunctionCall) obj;
-        return Objects.equal(name, o.name) &&
-               Objects.equal(window, o.window) &&
-               Objects.equal(distinct, o.distinct) &&
-               Objects.equal(arguments, o.arguments);
+        FunctionCall that = (FunctionCall) o;
+        return distinct == that.distinct &&
+               Objects.equals(name, that.name) &&
+               Objects.equals(arguments, that.arguments) &&
+               Objects.equals(window, that.window) &&
+               Objects.equals(filter, that.filter);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(name, distinct, window, arguments);
+        return Objects.hash(name, distinct, arguments, window, filter);
     }
 }

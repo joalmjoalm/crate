@@ -21,33 +21,45 @@
 
 package io.crate.analyze;
 
-import io.crate.analyze.repositories.RepositoryParamValidator;
+import io.crate.analyze.expressions.ExpressionAnalysisContext;
+import io.crate.analyze.expressions.ExpressionAnalyzer;
+import io.crate.analyze.relations.FieldProvider;
 import io.crate.exceptions.RepositoryAlreadyExistsException;
-import io.crate.executor.transport.RepositoryService;
+import io.crate.execution.ddl.RepositoryService;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
 import io.crate.sql.tree.CreateRepository;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
-import org.elasticsearch.common.settings.Settings;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.GenericProperties;
+import io.crate.sql.tree.ParameterExpression;
 
-@Singleton
-public class CreateRepositoryAnalyzer {
+import java.util.function.Function;
 
-    private final RepositoryParamValidator repositoryParamValidator;
+class CreateRepositoryAnalyzer {
+
     private final RepositoryService repositoryService;
+    private final Functions functions;
 
-    @Inject
-    public CreateRepositoryAnalyzer(RepositoryService repositoryService, RepositoryParamValidator repositoryParamValidator) {
+    CreateRepositoryAnalyzer(RepositoryService repositoryService, Functions functions) {
         this.repositoryService = repositoryService;
-        this.repositoryParamValidator = repositoryParamValidator;
+        this.functions = functions;
     }
 
-    public CreateRepositoryAnalyzedStatement analyze(CreateRepository node, ParameterContext parameterContext) {
-        String repositoryName = node.repository();
+    public AnalyzedCreateRepository analyze(CreateRepository<Expression> createRepository,
+                                            Function<ParameterExpression, Symbol> convertParamFunction,
+                                            CoordinatorTxnCtx txnCtx) {
+        String repositoryName = createRepository.repository();
         if (repositoryService.getRepository(repositoryName) != null) {
             throw new RepositoryAlreadyExistsException(repositoryName);
         }
-        Settings settings = repositoryParamValidator.convertAndValidate(
-            node.type(), node.properties(), parameterContext);
-        return new CreateRepositoryAnalyzedStatement(repositoryName, node.type(), settings);
+
+        var exprAnalyzerWithFieldsAsString = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.FIELDS_AS_LITERAL, null);
+        var exprCtx = new ExpressionAnalysisContext();
+        GenericProperties<Symbol> genericProperties = createRepository.properties()
+            .map(p -> exprAnalyzerWithFieldsAsString.convert(p, exprCtx));
+
+        return new AnalyzedCreateRepository(repositoryName, createRepository.type(), genericProperties);
     }
 }

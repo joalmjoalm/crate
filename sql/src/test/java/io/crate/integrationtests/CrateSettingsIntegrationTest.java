@@ -1,19 +1,19 @@
 package io.crate.integrationtests;
 
-
-import io.crate.action.sql.SQLResponse;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.SQLResponse;
 import org.junit.Test;
 
 import java.util.Locale;
 
-@UseJdbc
 public class CrateSettingsIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testAllSettingsAreSelectable() throws Exception {
-        SQLResponse res = execute("select schema_name, table_name, column_name from information_schema.columns where column_name like 'settings%'");
+        SQLResponse res = execute("select table_schema, table_name, column_name " +
+                                  "from information_schema.columns " +
+                                  "where column_name like 'settings%'");
         for (Object[] row : res.rows()) {
+            logger.info("Selecting `{}` from `{}.{}`", row[2], row[0], row[1]);
             execute(String.format(Locale.ENGLISH, "select %s from %s.%s ", row[2], row[0], row[1]));
         }
     }

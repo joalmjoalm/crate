@@ -21,19 +21,26 @@
 
 package io.crate.integrationtests;
 
-import io.crate.core.collections.CollectionBucket;
-import io.crate.exceptions.Exceptions;
-import io.crate.operation.projectors.sorting.OrderingByPosition;
+import com.carrotsearch.hppc.ObjectObjectHashMap;
+import io.crate.breaker.CrateCircuitBreakerService;
+import io.crate.data.CollectionBucket;
+import io.crate.exceptions.SQLExceptions;
+import io.crate.execution.engine.join.RamBlockSizeCalculator;
+import io.crate.execution.engine.sort.OrderingByPosition;
+import io.crate.metadata.RelationName;
+import io.crate.planner.TableStats;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.UseHashJoins;
+import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.index.IndexNotFoundException;
+import org.elasticsearch.indices.breaker.BreakerSettings;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.Random;
 
 import static io.crate.testing.TestingHelpers.printRows;
 import static io.crate.testing.TestingHelpers.printedTable;
@@ -42,7 +49,6 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.core.Is.is;
 
 @ESIntegTestCase.ClusterScope(minNumDataNodes = 2)
-@UseJdbc
 public class JoinIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -105,11 +111,14 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testJoinOnEmptyPartitionedTables() throws Exception {
+    public void testJoinOnEmptyPartitionedTablesWithAndWithoutJoinCondition() throws Exception {
         execute("create table foo (id long) partitioned by (id)");
         execute("create table bar (id long) partitioned by (id)");
         ensureYellow();
         execute("select * from foo f, bar b where f.id = b.id");
+        assertThat(printedTable(response.rows()), is(""));
+
+        execute("select * from foo f, bar b");
         assertThat(printedTable(response.rows()), is(""));
     }
 
@@ -137,7 +146,7 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
         execute("refresh table t1, t2");
 
         execute("select round(t1.price * t2.price) as total_price from t1, t2 order by total_price");
-        assertThat(printedTable(response.rows()), is("424\n574\n"));
+        assertThat(printedTable(response.rows()), is("425\n574\n"));
     }
 
     @Test
@@ -183,7 +192,7 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
 
         List<Object[]> rows = Arrays.asList(response.rows());
         Collections.sort(rows, OrderingByPosition.arrayOrdering(
-            new int[]{0, 1}, new boolean[]{false, false}, new Boolean[]{null, null}).reverse());
+            new int[]{0, 1}, new boolean[]{false, false}, new boolean[]{false, false}));
         assertThat(printRows(rows), is(
             "blue| large\n" +
             "blue| small\n" +
@@ -230,18 +239,18 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
     public void testJoinOnSysTables() throws Exception {
         execute("select column_policy, column_name from information_schema.tables, information_schema.columns " +
                 "where " +
-                "tables.schema_name = 'sys' " +
+                "tables.table_schema = 'sys' " +
                 "and tables.table_name = 'shards' " +
-                "and tables.schema_name = columns.schema_name " +
+                "and tables.table_schema = columns.table_schema " +
                 "and tables.table_name = columns.table_name " +
                 "order by columns.column_name " +
                 "limit 4");
         assertThat(response.rowCount(), is(4L));
         assertThat(printedTable(response.rows()),
-            is("strict| id\n" +
-               "strict| num_docs\n" +
-               "strict| orphan_partition\n" +
-               "strict| partition_ident\n"));
+            is("strict| blob_path\n" +
+               "strict| id\n" +
+               "strict| min_lucene_version\n" +
+               "strict| node\n"));
     }
 
     @Test
@@ -267,7 +276,7 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
 
         List<Object[]> rows = Arrays.asList(response.rows());
         Collections.sort(rows, OrderingByPosition.arrayOrdering(
-            new int[]{0, 1}, new boolean[]{false, true}, new Boolean[]{null, null}).reverse());
+            new int[]{0, 1}, new boolean[]{false, true}, new boolean[]{false, true}));
 
         assertThat(printedTable(new CollectionBucket(rows)),
             is("" +
@@ -280,6 +289,17 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
                "2| 2| t\n" +
                "2| 1| t\n" +
                "2| 0| t\n"));
+    }
+
+    @Test
+    public void testJoinUsingSubscriptInQuerySpec() {
+        execute("create table t1 (id int, a object as (b int))");
+        execute("create table t2 (id int)");
+        execute("insert into t1 (id, a) values (1, {b=1})");
+        execute("insert into t2 (id) values (1)");
+        refresh();
+        execute("select t.id, tt.id from t1 as t, t2 as tt where tt.id = t.a['b']");
+        assertThat(printedTable(response.rows()), is("1| 1\n"));
     }
 
     @Test
@@ -326,9 +346,9 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
         execute("select * from t as t1, t as t2");
         assertThat(response.rowCount(), is(4L));
         assertThat(Arrays.asList(response.rows()), containsInAnyOrder(new Object[]{1, 1},
-                                                                      new Object[]{1, 2},
-                                                                      new Object[]{2, 1},
-                                                                      new Object[]{2, 2}));
+            new Object[]{1, 2},
+            new Object[]{2, 1},
+            new Object[]{2, 2}));
     }
 
     @Test
@@ -361,7 +381,7 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testFilteredSelfJoinWithFilterOnBothRelations() {
-        execute("create table test(id long primary key, num long, txt string) with (number_of_replicas=1)");
+        execute("create table test(id long primary key, num long, txt string) with (number_of_replicas=0)");
         ensureYellow();
         execute("insert into test(id, num, txt) values(1, 1, '1111'), (2, 2, '2222'), (3, 1, '2222'), (4, 2, '2222')");
         execute("refresh table test");
@@ -458,8 +478,8 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testJoinWithFilterAndJoinCriteriaNotInOutputs() throws Exception {
-        execute("create table t_left (id long primary key, temp float, ref_id int) clustered into 2 shards with (number_of_replicas = 1)");
-        execute("create table t_right (id int primary key, name string) clustered into 2 shards with (number_of_replicas = 1)");
+        execute("create table t_left (id long primary key, temp float, ref_id int) clustered into 2 shards with (number_of_replicas = 0)");
+        execute("create table t_right (id int primary key, name string) clustered into 2 shards with (number_of_replicas = 0)");
         ensureYellow();
         execute("insert into t_left (id, temp, ref_id) values (1, 23.2, 1), (2, 20.8, 1), (3, 19.7, 1), (4, -0.5, 2), (5, -1.2, 2), (6, 0.2, 2)");
         execute("refresh table t_left");
@@ -573,10 +593,30 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testJoinOnInformationSchema() throws Exception {
-        execute("create table t (id int, name string) with (number_of_replicas = 1)");
+    public void testSimpleOrderByNonUniqueValues() throws Exception {
+        execute("create table t1 (a integer)");
+        execute("create table t2 (x integer)");
         ensureYellow();
-        execute("insert into t (id, name) values (1, 'Marvin')");
+        execute("insert into t1 (a) values (1), (1), (2), (2)");
+        execute("insert into t2 (x) values (1), (2)");
+        execute("refresh table t1, t2");
+        execute("select a, x from t1, t2 order by a, x");
+        assertThat(TestingHelpers.printedTable(response.rows()),
+            is("1| 1\n" +
+               "1| 1\n" +
+               "1| 2\n" +
+               "1| 2\n" +
+               "2| 1\n" +
+               "2| 1\n" +
+               "2| 2\n" +
+               "2| 2\n"));
+    }
+
+    @Test
+    public void testJoinOnInformationSchema() throws Exception {
+        execute("create table t (id string, name string)");
+        ensureYellow();
+        execute("insert into t (id, name) values ('0-1', 'Marvin')");
         execute("refresh table t");
         execute("select * from t inner join information_schema.tables on t.id = tables.number_of_replicas");
         assertThat(response.rowCount(), is(1L));
@@ -596,9 +636,377 @@ public class JoinIntegrationTest extends SQLTransportIntegrationTest {
 
         expectedException.expect(IndexNotFoundException.class);
         try {
-            execute(plan).resultFuture().get(1, TimeUnit.SECONDS);
+            execute(plan).getResult();
         } catch (Throwable t) {
-            throw Exceptions.unwrap(t);
+            throw SQLExceptions.unwrap(t);
         }
+    }
+
+    @Test
+    public void testAggOnJoin() throws Exception {
+        execute("create table t1 (x int)");
+        ensureYellow();
+        execute("insert into t1 (x) values (1), (2)");
+        execute("refresh table t1");
+
+        execute("select sum(t1.x) from t1, t1 as t2");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("6\n"));
+    }
+
+    @Test
+    public void testAggOnJoinWithScalarAfterAggregation() throws Exception {
+        execute("select sum(t1.col1) * 2 from unnest([1, 2]) t1, unnest([3, 4]) t2");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("12\n"));
+    }
+
+    @Test
+    public void testAggOnJoinWithHaving() throws Exception {
+        execute("select sum(t1.col1) from unnest([1, 2]) t1, unnest([3, 4]) t2 having sum(t1.col1) > 8");
+        assertThat(response.rowCount(), is(0L));
+    }
+
+    @Test
+    public void testAggOnJoinWithLimit() throws Exception {
+        execute("select " +
+                "   sum(t1.col1) " +
+                "from unnest([1, 2]) t1, unnest([3, 4]) t2 " +
+                "limit 0");
+        assertThat(response.rowCount(), is(0L));
+    }
+
+    @Test
+    public void testLimitIsAppliedPostJoin() throws Exception {
+        execute("select " +
+                "   sum(t1.col1) " +
+                "from unnest([1, 1]) t1, unnest([1, 1]) t2 " +
+                "limit 1");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("4\n"));
+    }
+
+    @Test
+    public void testJoinOnAggWithOrderBy() throws Exception {
+        execute("select sum(t1.col1) from unnest([1, 1]) t1, unnest([1, 1]) t2 order by 1");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("4\n"));
+    }
+
+    @Test
+    public void testFailureOfJoinDownstream() throws Exception {
+        // provoke an exception when the NL emits a row, must bubble up and NL must stop
+        expectedException.expectMessage("Cannot cast ");
+        execute("select cast(R.col2 || ' ' || L.col2 as integer)" +
+                "   from " +
+                "       unnest(['hello', 'world'], [1, 2]) L " +
+                "   inner join " +
+                "       unnest(['world', 'hello'], [1, 2]) R " +
+                "   on l.col1 = r.col1 " +
+                "where r.col1 > 1");
+    }
+
+    @Test
+    public void testGlobalAggregateMultiTableJoin() throws Exception {
+        execute("create table t1 (id int primary key, t2 int, val double)");
+        execute("create table t2 (id int primary key, t3 int)");
+        execute("create table t3 (id int primary key)");
+        ensureYellow();
+
+        execute("insert into t3 (id) values (1), (2)");
+        execute("insert into t2 (id, t3) values (1, 1), (2, 1), (3, 2), (3, 4)");
+        execute("insert into t1 (id, t2, val) values (1, 1, 0.12), (2, 2, 1.23), (3, 3, 2.34), (4, 4, 3.45)");
+
+        refresh();
+        execute("select sum(t1.val), avg(t2.id), min(t3.id) from t1 inner join t2 on t1.t2 = t2.id inner join t3 on t2.t3 = t3.id");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("3.69| 2.0| 1\n"));
+    }
+
+    @Test
+    public void testJoinWithWhereOnPartitionColumnThatDoesNotMatch() throws Exception {
+        execute("create table t (id int, p int) clustered into 1 shards partitioned by (p)");
+        execute("insert into t (id, p) values (1, 1), (2, 2)");
+        ensureYellow();
+
+        // regression test:
+        // whereClause with query on partitioned column becomes a noMatch after normalization on collector
+        // which leads to using RowsBatchIterator.empty() which always had a columnSize of 0
+        execute("select * from t as t1 inner join t as t2 on t1.id = t2.id where t2.p = 2");
+    }
+
+    @Test
+    public void testJoinOnSimpleVirtualTables() throws Exception {
+        execute("select * from " +
+                "   (select col1 as x from unnest([1, 2, 3])) t1, " +
+                "   (select max(col1) as y from unnest([4])) t2 " +
+                "order by t1.x");
+        assertThat(printedTable(response.rows()),
+            is("1| 4\n" +
+               "2| 4\n" +
+               "3| 4\n"));
+    }
+
+    @Test
+    public void testJoinOnComplexVirtualTable() throws Exception {
+        execute("create table t1 (x int)");
+        ensureYellow();
+        execute("insert into t1 (x) values (1), (2), (3), (4)");
+        execute("refresh table t1");
+
+        execute("select * from " +
+                "   (select x from " +
+                "       (select x from t1 order by x asc limit 4) tt1 " +
+                "   order by tt1.x desc limit 2 " +
+                "   ) ttt1, " +
+                "   (select col1 as y from unnest([10])) tt2 ");
+        assertThat(printedTable(response.rows()),
+            is("4| 10\n" +
+               "3| 10\n"));
+
+        execute("select * from " +
+                "   (select x from " +
+                "       (select x from t1 order by x asc limit 4) tt1 " +
+                "   order by tt1.x desc limit 2 " +
+                "   ) ttt1, " +
+                "   (select max(y) as y from " +
+                "       (select min(col1) as y from unnest([10])) tt2 " +
+                "   ) ttt2 ");
+        assertThat(printedTable(response.rows()),
+            is("4| 10\n" +
+               "3| 10\n"));
+    }
+
+    @Test
+    public void testJoinOnVirtualTableWithQTF() throws Exception {
+        execute("create table customers (" +
+                "id long," +
+                "name string," +
+                "country string," +
+                "company_id long" +
+                ")");
+        ensureYellow();
+        execute("insert into customers (id, name, country, company_id) values(1, 'Marios', 'Greece', 1) ");
+        execute("refresh table customers");
+
+        execute("create table orders (" +
+                "id long," +
+                "customer_id long," +
+                "price float" +
+                ")");
+        ensureYellow();
+        execute("insert into orders(id, customer_id, price) values (1,1,20.0), (2,1,10.0), (3,1,30.0), (4,1,40.0), (5,1,50.0)");
+        execute("refresh table orders");
+
+        String stmt = "SELECT t1.company_id, t1.country, t1.id, t1.name, t2.customer_id, t2.id, t2.price FROM" +
+                      "  customers t1, " +
+                      "  (SELECT * FROM (SELECT * from orders order by price desc limit 4) t ORDER BY price limit 3) t2 " +
+                      "WHERE t2.customer_id = t1.id " +
+                      "order by price limit 3 offset 1";
+
+        execute(stmt);
+        assertThat(printedTable(response.rows()),
+            is("1| Greece| 1| Marios| 1| 3| 30.0\n" +
+               "1| Greece| 1| Marios| 1| 4| 40.0\n"));
+    }
+
+    @Test
+    public void testJoinOnVirtualTableWithSingleRowSubselect() throws Exception {
+        execute("SELECT\n" +
+                "        (select min(t1.x) from\n" +
+                "            (select col1 as x from unnest([1, 2, 3])) t1,\n" +
+                "            (select * from unnest([1, 2, 3])) t2\n" +
+                "        ) as min_col1,\n" +
+                "        *\n" +
+                "    FROM\n" +
+                "        unnest([1]) tt1," +
+                "        unnest([2]) tt2");
+        assertThat(printedTable(response.rows()), is("1| 1| 2\n"));
+    }
+
+    @Test
+    @UseHashJoins(1)
+    public void testInnerEquiJoinUsingHashJoin() {
+        execute("create table t1 (a integer)");
+        execute("create table t2 (x integer)");
+        ensureYellow();
+        execute("insert into t1 (a) values (0), (0), (1), (2), (4)");
+        execute("insert into t2 (x) values (1), (3), (3), (4), (4)");
+        execute("refresh table t1, t2");
+
+        configureQueryCircuitBreakerForCluster(20L, 1.0d);
+        CircuitBreaker queryCircuitBreaker = internalCluster().getInstance(CrateCircuitBreakerService.class).getBreaker(CrateCircuitBreakerService.QUERY);
+        randomiseAndConfigureJoinBlockSize("t1", 5L, queryCircuitBreaker);
+        randomiseAndConfigureJoinBlockSize("t2", 5L, queryCircuitBreaker);
+
+        try {
+            execute("select a, x from t1 join t2 on t1.a + 1 = t2.x order by a, x");
+            assertThat(TestingHelpers.printedTable(response.rows()),
+                is("0| 1\n" +
+                   "0| 1\n" +
+                   "2| 3\n" +
+                   "2| 3\n"));
+        } finally {
+            configureQueryCircuitBreakerForCluster(queryCircuitBreaker.getLimit(), queryCircuitBreaker.getOverhead());
+            Iterable<TableStats> tableStatsOnAllNodes = internalCluster().getInstances(TableStats.class);
+            resetTableStats();
+        }
+    }
+
+    private void resetTableStats() {
+        for (TableStats tableStats : internalCluster().getInstances(TableStats.class)) {
+            tableStats.updateTableStats(new ObjectObjectHashMap<>());
+        }
+    }
+
+    @Test
+    public void testJoinWithLargerRightBranch() throws Exception {
+        execute("create table t1 (a integer)");
+        execute("create table t2 (x integer)");
+        ensureYellow();
+        execute("insert into t1 (a) values (0), (1), (1), (2)");
+        execute("insert into t2 (x) values (1), (3), (4), (4), (5), (6)");
+        execute("refresh table t1, t2");
+
+        Iterable<TableStats> tableStatsOnAllNodes = internalCluster().getInstances(TableStats.class);
+        for (TableStats tableStats : tableStatsOnAllNodes) {
+            ObjectObjectHashMap<RelationName, TableStats.Stats> newStats = new ObjectObjectHashMap<>();
+            newStats.put(new RelationName(sqlExecutor.getCurrentSchema(), "t1"), new TableStats.Stats(4L, 16L));
+            newStats.put(new RelationName(sqlExecutor.getCurrentSchema(), "t2"), new TableStats.Stats(6L, 24L));
+            tableStats.updateTableStats(newStats);
+        }
+
+        execute("select a, x from t1 join t2 on t1.a + 1 = t2.x + 1 order by a, x");
+        assertThat(TestingHelpers.printedTable(response.rows()),
+            is("1| 1\n" +
+               "1| 1\n"));
+    }
+
+    /**
+     * some implementations will apply the branch reordering optimisation, whilst others might not.
+     * either way, all join implementations should yield the same results
+     */
+    @Test
+    public void testJoinBranchReorderingOnMultipleTables() throws Exception {
+        execute("create table t1 (a integer)");
+        execute("create table t2 (x integer)");
+        execute("create table t3 (y integer)");
+        ensureYellow();
+        execute("insert into t1 (a) values (0), (1)");
+        execute("insert into t2 (x) values (0), (1), (2)");
+        execute("insert into t3 (y) values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)");
+        execute("refresh table t1, t2, t3");
+
+        Iterable<TableStats> tableStatsOnAllNodes = internalCluster().getInstances(TableStats.class);
+        for (TableStats tableStats : tableStatsOnAllNodes) {
+            ObjectObjectHashMap<RelationName, TableStats.Stats> newStats = new ObjectObjectHashMap<>();
+            newStats.put(new RelationName(sqlExecutor.getCurrentSchema(), "t1"), new TableStats.Stats(2L, 8L));
+            newStats.put(new RelationName(sqlExecutor.getCurrentSchema(), "t2"), new TableStats.Stats(3L, 12L));
+            newStats.put(new RelationName(sqlExecutor.getCurrentSchema(), "t3"), new TableStats.Stats(10L, 40L));
+            tableStats.updateTableStats(newStats);
+        }
+
+        execute("select a, x, y from t1 join t2 on t1.a = t2.x join t3 on t3.y = t2.x where t1.a < t2.x + 1 " +
+                "and t2.x < t3.y + 1 order by a, x, y");
+        assertThat(TestingHelpers.printedTable(response.rows()),
+            is("0| 0| 0\n" +
+               "1| 1| 1\n"));
+    }
+
+    @Test
+    public void testBlockHashJoinWithBlockLoadingAndGroupByOnRightSide() {
+        execute("create table t1 (x integer)");
+        execute("insert into t1 (x) values (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)");
+        execute("refresh table t1");
+
+        configureQueryCircuitBreakerForCluster(40L, 1.0d);
+        CircuitBreaker queryCircuitBreaker = internalCluster().getInstance(CrateCircuitBreakerService.class).getBreaker(CrateCircuitBreakerService.QUERY);
+        randomiseAndConfigureJoinBlockSize("t1", 10L, queryCircuitBreaker);
+
+        try {
+            execute("select x from t1 left_rel JOIN (select x x2, count(x) from t1 group by x2) right_rel " +
+                    "ON left_rel.x = right_rel.x2 order by left_rel.x");
+
+            assertThat(TestingHelpers.printedTable(response.rows()),
+                is("0\n" +
+                   "1\n" +
+                   "2\n" +
+                   "3\n" +
+                   "4\n" +
+                   "5\n" +
+                   "6\n" +
+                   "7\n" +
+                   "8\n" +
+                   "9\n"));
+        } finally {
+            configureQueryCircuitBreakerForCluster(queryCircuitBreaker.getLimit(), queryCircuitBreaker.getOverhead());
+            resetTableStats();
+        }
+    }
+
+    private void configureQueryCircuitBreakerForCluster(long availableMemory, double overhead) {
+        for (CrateCircuitBreakerService circuitBreakerService : internalCluster().getInstances(CrateCircuitBreakerService.class)) {
+            circuitBreakerService.registerBreaker(
+                new BreakerSettings(CrateCircuitBreakerService.QUERY, availableMemory, overhead, CircuitBreaker.Type.MEMORY));
+        }
+    }
+
+    private void randomiseAndConfigureJoinBlockSize(String relationName, long rowsCount, CircuitBreaker circuitBreaker) {
+        long availableMemory = circuitBreaker.getLimit() - circuitBreaker.getUsed();
+        // We're randomising the table size we configure in the stats in a way such that the number of rows that fit
+        // in memory is sometimes less than the row count of the table (ie. multiple blocks are created) and sometimes
+        // the entire table fits in memory (ie. one block is used)
+        long tableSizeInBytes = new Random().nextInt(3 * (int) availableMemory);
+        long rowSizeBytes = tableSizeInBytes / rowsCount;
+
+        for (TableStats tableStats : internalCluster().getInstances(TableStats.class)) {
+            ObjectObjectHashMap<RelationName, TableStats.Stats> newStats = new ObjectObjectHashMap<>();
+            newStats.put(new RelationName(sqlExecutor.getCurrentSchema(), relationName), new TableStats.Stats(rowsCount, tableSizeInBytes));
+            tableStats.updateTableStats(newStats);
+        }
+
+        RamBlockSizeCalculator ramBlockSizeCalculator = new RamBlockSizeCalculator(500_000, circuitBreaker, rowSizeBytes, rowsCount);
+        logger.info("\n\tThe block size for relation {}, total size {} bytes, with row count {} and row size {} bytes, " +
+                    "if it would be used in a block join algorithm, would be {}",
+            relationName, tableSizeInBytes, rowsCount, rowSizeBytes, ramBlockSizeCalculator.getAsInt());
+    }
+
+    @Test
+    public void testInnerJoinWithPushDownOptimizations() {
+        execute("CREATE TABLE t1 (id INTEGER)");
+        execute("CREATE TABLE t2 (id INTEGER, name STRING, id_t1 INTEGER)");
+
+        execute("INSERT INTO t1 (id) VALUES (1), (2)");
+        execute("INSERT INTO t2 (id, name, id_t1) VALUES (1, 'A', 1), (2, 'B', 2), (3, 'C', 2)");
+        execute("REFRESH TABLE t1, t2");
+
+        assertThat(printedTable(execute(
+            "SELECT t1.id, t2.id FROM t2 INNER JOIN t1 ON t1.id = t2.id_t1 ORDER BY lower(t2.name)").rows()),
+            is("1| 1\n" +
+               "2| 2\n" +
+               "2| 3\n")
+        );
+
+        assertThat(printedTable(execute(
+            "SELECT t1.id, t2.id, t2.name FROM t2 INNER JOIN t1 ON t1.id = t2.id_t1 ORDER BY lower(t2.name)").rows()),
+            is("1| 1| A\n" +
+               "2| 2| B\n" +
+               "2| 3| C\n"));
+
+        assertThat(printedTable(execute(
+            "SELECT t1.id, t2.id, lower(t2.name) FROM t2 INNER JOIN t1 ON t1.id = t2.id_t1 ORDER BY lower(t2.name)").rows()),
+            is("1| 1| a\n" +
+               "2| 2| b\n" +
+               "2| 3| c\n")
+        );
+    }
+
+    @Test
+    public void testInnerJoinOnPreSortedRightRelation() {
+        execute("CREATE TABLE t1 (x int) with (number_of_replicas = 0)");
+        execute("insert into t1 (x) values (1) ");
+        execute("refresh table t1");
+        // regression test; the repeat requirement wasn't set correctly for the right side
+        assertThat(
+            printedTable(execute(
+                "select * from (select * from t1 order by x) t1 " +
+                "join (select * from t1 order by x) t2 on t1.x=t2.x").rows()),
+            is("1| 1\n")
+        );
     }
 }

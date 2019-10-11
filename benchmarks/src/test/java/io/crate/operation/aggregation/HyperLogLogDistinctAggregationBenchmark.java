@@ -1,0 +1,111 @@
+/*
+ * Licensed to Crate under one or more contributor license agreements.
+ * See the NOTICE file distributed with this work for additional
+ * information regarding copyright ownership.  Crate licenses this file
+ * to you under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.  You may
+ * obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ *
+ * However, if you have executed another commercial license agreement
+ * with Crate these terms will supersede the license and you may use the
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
+ */
+
+package io.crate.operation.aggregation;
+
+import io.crate.breaker.RamAccountingContext;
+import io.crate.data.Input;
+import io.crate.data.Row;
+import io.crate.data.Row1;
+import io.crate.execution.engine.aggregation.AggregateCollector;
+import io.crate.execution.engine.aggregation.AggregationFunction;
+import io.crate.execution.engine.collect.InputCollectExpression;
+import io.crate.expression.symbol.AggregateMode;
+import io.crate.expression.symbol.Literal;
+import io.crate.metadata.FunctionIdent;
+import io.crate.metadata.Functions;
+import io.crate.module.EnterpriseFunctionsModule;
+import io.crate.types.DataTypes;
+import org.elasticsearch.Version;
+import org.elasticsearch.common.breaker.NoopCircuitBreaker;
+import org.elasticsearch.common.inject.ModulesBuilder;
+import org.elasticsearch.common.util.BigArrays;
+import org.elasticsearch.search.aggregations.metrics.cardinality.HyperLogLogPlusPlus;
+import org.openjdk.jmh.annotations.Benchmark;
+import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.Mode;
+import org.openjdk.jmh.annotations.OutputTimeUnit;
+import org.openjdk.jmh.annotations.Scope;
+import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.annotations.State;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+@BenchmarkMode(Mode.AverageTime)
+@OutputTimeUnit(TimeUnit.MICROSECONDS)
+@State(Scope.Benchmark)
+public class HyperLogLogDistinctAggregationBenchmark {
+
+    private final RamAccountingContext RAM_ACCOUNTING_CONTEXT =
+        new RamAccountingContext("dummy", new NoopCircuitBreaker("dummy"));
+    private final List<Row> rows = IntStream.range(0, 10_000).mapToObj(i -> new Row1(String.valueOf(i))).collect(Collectors.toList());
+    private final HyperLogLogDistinctAggregation.Murmur3Hash murmur3Hash =
+        HyperLogLogDistinctAggregation.Murmur3Hash.getForType(DataTypes.STRING);
+
+    private HyperLogLogPlusPlus hyperLogLogPlusPlus;
+    private AggregateCollector collector;
+
+    @Setup
+    public void setUp() throws Exception {
+        hyperLogLogPlusPlus = new HyperLogLogPlusPlus(HyperLogLogPlusPlus.DEFAULT_PRECISION, BigArrays.NON_RECYCLING_INSTANCE, 1);
+        InputCollectExpression inExpr0 = new InputCollectExpression(0);
+        Functions functions = new ModulesBuilder()
+            .add(new EnterpriseFunctionsModule())
+            .createInjector().getInstance(Functions.class);
+        HyperLogLogDistinctAggregation hllAggregation = ((HyperLogLogDistinctAggregation) functions.getQualified(
+            new FunctionIdent(HyperLogLogDistinctAggregation.NAME, Collections.singletonList(DataTypes.STRING))));
+        collector = new AggregateCollector(
+            Collections.singletonList(inExpr0),
+            RAM_ACCOUNTING_CONTEXT,
+            AggregateMode.ITER_FINAL,
+            new AggregationFunction[] { hllAggregation },
+            Version.CURRENT,
+            new Input[][] { {inExpr0 } },
+            new Input[] { Literal.BOOLEAN_TRUE }
+        );
+    }
+
+    @Benchmark
+    public long benchmarkHLLPlusPlus() throws Exception {
+        for (int i = 0; i < rows.size(); i++) {
+            hyperLogLogPlusPlus.collect(0, murmur3Hash.hash(rows.get(i).get(0)));
+        }
+        return hyperLogLogPlusPlus.cardinality(0);
+    }
+
+    @Benchmark
+    public Iterable<Row> benchmarkHLLAggregation() throws Exception {
+        Object[] state = collector.supplier().get();
+        BiConsumer<Object[], Row> accumulator = collector.accumulator();
+        Function<Object[], Iterable<Row>> finisher = collector.finisher();
+        for (int i = 0; i < rows.size(); i++) {
+            accumulator.accept(state, rows.get(i));
+        }
+        return finisher.apply(state);
+    }
+}

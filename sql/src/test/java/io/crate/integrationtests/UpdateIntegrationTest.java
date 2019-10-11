@@ -22,8 +22,7 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLBulkResponse;
-import io.crate.analyze.UpdateAnalyzer;
+import io.crate.exceptions.VersioninigValidationException;
 import io.crate.testing.TestingHelpers;
 import io.crate.testing.UseJdbc;
 import org.elasticsearch.common.collect.MapBuilder;
@@ -37,9 +36,10 @@ import static com.carrotsearch.randomizedtesting.RandomizedTest.$;
 import static com.carrotsearch.randomizedtesting.RandomizedTest.$$;
 import static com.google.common.collect.Maps.newHashMap;
 import static io.crate.testing.TestingHelpers.mapToSortedString;
+import static io.crate.testing.TestingHelpers.printedTable;
 import static org.hamcrest.core.Is.is;
+import static org.hamcrest.core.IsNot.not;
 
-@UseJdbc
 public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
 
     private Setup setup = new Setup(sqlExecutor);
@@ -47,8 +47,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdate() throws Exception {
         execute("create table test (message string) clustered into 2 shards");
-        ensureYellow();
-
         execute("insert into test values('hello'),('again'),('hello'),('hello')");
         assertEquals(4, response.rowCount());
         refresh();
@@ -66,7 +64,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateByPrimaryKeyUnknownDocument() {
         execute("create table test (id int primary key, message string)");
-        ensureYellow();
         execute("update test set message='b' where id = 1");
         assertEquals(0, response.rowCount());
     }
@@ -74,27 +71,70 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateNotNullColumn() {
         execute("create table test (id int primary key, message string not null)");
-        ensureYellow();
         execute("insert into test (id, message) values(1, 'Ford'),(2, 'Arthur')");
         assertEquals(2, response.rowCount());
         refresh();
 
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("SQLParseException: Cannot insert null value for column message");
+        expectedException.expectMessage("\"message\" must not be null");
         execute("update test set message=null where id=1");
-        assertEquals(0, response.rowCount());
+    }
+
+    @Test
+    public void testUpdateWithNotNull1LevelNestedColumn() {
+        execute("create table test (" +
+                "stuff object(dynamic) AS (" +
+                "  level1 string not null" +
+                ") not null)");
+        execute("insert into test (stuff) values('{\"level1\":\"value\"}')");
+        assertEquals(1, response.rowCount());
+        refresh();
+
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage("\"stuff['level1']\" must not be null");
+        execute("update test set stuff['level1']=null");
+    }
+
+    @Test
+    public void testUpdateWithNotNull2LevelsNestedColumn() {
+        execute("create table test (" +
+                "stuff object(dynamic) AS (" +
+                "  level1 object(dynamic) AS (" +
+                "    level2 string not null" +
+                "  ) not null" +
+                ") not null)");
+        execute("insert into test (stuff) values('{\"level1\":{\"level2\":\"value\"}}')");
+        assertEquals(1, response.rowCount());
+        refresh();
+
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage("\"stuff['level1']['level2']\" must not be null");
+        execute("update test set stuff['level1']['level2']=null");
+    }
+
+    @Test
+    public void testUpdateNullDynamicColumn() {
+        /*
+         * Regression test
+         * validating dynamically generated columns with NULL values led to NPE
+         */
+        execute("create table test (id int primary key) with (column_policy = 'dynamic')");
+        execute("insert into test (id) values (1)");
+        refresh();
+
+        execute("update test set dynamic_col=null");
+        refresh();
+        assertEquals(1, response.rowCount());
     }
 
     @Test
     public void testUpdateWithExpression() throws Exception {
         execute("create table test (id integer, other_id long, name string)");
-        ensureYellow();
-
         execute("insert into test (id, other_id, name) values(1, 10, 'Ford'),(2, 20, 'Arthur')");
         assertEquals(2, response.rowCount());
         refresh();
 
-        execute("update test set id=(id+10)*other_id");
+        execute("update test set id=(id+10)*cast(other_id as integer)");
 
         assertEquals(2, response.rowCount());
         refresh();
@@ -114,8 +154,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
         // test that expression in update assignment always refer to existing values, not updated ones
 
         execute("create table test (dividend integer, divisor integer, quotient integer)");
-        ensureYellow();
-
         execute("insert into test (dividend, divisor, quotient) values(10, 2, 5)");
         assertEquals(1, response.rowCount());
         refresh();
@@ -131,8 +169,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateByPrimaryKeyWithExpression() throws Exception {
         execute("create table test (id integer primary key, other_id long)");
-        ensureYellow();
-
         execute("insert into test (id, other_id) values(1, 10),(2, 20)");
         assertEquals(2, response.rowCount());
         refresh();
@@ -151,7 +187,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateMultipleDocuments() throws Exception {
         execute("create table test (message string)");
-        ensureYellow();
         execute("insert into test values('hello'),('again'),('hello')");
         assertEquals(3, response.rowCount());
         refresh();
@@ -170,8 +205,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testTwoColumnUpdate() throws Exception {
         execute("create table test (col1 string, col2 string)");
-        ensureYellow();
-
         execute("insert into test values('hello', 'hallo'), ('again', 'nochmal')");
         assertEquals(2, response.rowCount());
         refresh();
@@ -194,8 +227,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
                 "  coolness float, " +
                 "  details array(object)" +
                 ")");
-        ensureYellow();
-
         execute("insert into test values(1.1, ?),(2.2, ?)", new Object[]{new Object[0],
             new Object[]{
                 new HashMap<String, Object>(),
@@ -221,8 +252,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateNestedObjectWithoutDetailedSchema() throws Exception {
         execute("create table test (coolness object)");
-        ensureYellow();
-
         Map<String, Object> map = new HashMap<>();
         map.put("x", "1");
         map.put("y", 2);
@@ -241,14 +270,17 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
         execute("select coolness['x'], coolness['y'] from test");
         assertEquals(1, response.rowCount());
         assertEquals("3", response.rows()[0][0]);
+        // integer values for unknown columns will be result in a long type for range safety
         assertEquals(2L, response.rows()[0][1]);
     }
 
     @Test
-    public void testUpdateWithFunctionWhereArgumentIsInIntegerRangeInsteadOfLong() throws Exception {
-        execute("create table t (ts timestamp, day int) with (number_of_replicas = 0)");
-        ensureYellow();
-
+    public void testUpdateWithFunctionWhereArgumentIsInIntegerRangeInsteadOfLong() {
+        execute(
+            "create table t (" +
+            "   ts timestamp with time zone," +
+            "   day int" +
+            ") with (number_of_replicas = 0)");
         execute("insert into t (ts, day) values (0, 1)");
         execute("refresh table t");
 
@@ -257,13 +289,16 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testInsertIntoWithOnDuplicateKeyWithFunctionWhereArgumentIsInIntegerRangeInsteadOfLong() throws Exception {
-        execute("create table t (id int primary key, ts timestamp, day int) with (number_of_replicas = 0)");
-        ensureYellow();
+    public void testInsertIntoWithOnConflictKeyWithFunctionWhereArgumentIsInIntegerRangeInsteadOfLong() {
+        execute(
+            "create table t (" +
+            "   id int primary key," +
+            "   ts timestamp with time zone, day int" +
+            ") with (number_of_replicas = 0)");
         execute("insert into t (id, ts, day) values (1, 0, 0)");
         execute("refresh table t");
         execute("insert into t (id, ts, day) (select id, ts, day from t) " +
-                "on duplicate key update day = extract(day from ts)");
+                "on conflict (id) do update set day = extract(day from ts)");
         assertThat(response.rowCount(), is(1L));
     }
 
@@ -274,8 +309,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
                 "a object as (x string, y int)," +
                 "firstcol int, othercol int" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
-
         Map<String, Object> map = new HashMap<>();
         map.put("x", "1");
         map.put("y", 2);
@@ -313,8 +346,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateNestedObjectDeleteWithArgs() throws Exception {
         execute("create table test (a object as (x object as (y int, z int))) with (number_of_replicas=0)");
-        ensureYellow();
-
         Map<String, Object> map = newHashMap();
         Map<String, Object> nestedMap = newHashMap();
         nestedMap.put("y", 2);
@@ -340,8 +371,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateNestedObjectDeleteWithoutArgs() throws Exception {
         execute("create table test (a object as (x object as (y int, z int))) with (number_of_replicas=0)");
-        ensureYellow();
-
         Map<String, Object> map = newHashMap();
         Map<String, Object> nestedMap = newHashMap();
         nestedMap.put("y", 2);
@@ -365,23 +394,8 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testUpdateWithNestedObjectArrayIdxAccess() throws Exception {
-        execute("create table test (coolness array(float)) with (number_of_replicas=0)");
-        ensureYellow();
-        execute("insert into test values (?)", new Object[]{new Object[]{2.2, 2.3, 2.4}});
-        assertEquals(1, response.rowCount());
-        refresh();
-
-        expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Array index must be in range 1 to 2147483648");
-
-        execute("update test set coolness[0] = 3.3");
-    }
-
-    @Test
     public void testUpdateNestedObjectWithDetailedSchema() throws Exception {
         execute("create table test (coolness object as (x string, y string))");
-        ensureYellow();
         Map<String, Object> map = new HashMap<>();
         map.put("x", "1");
         map.put("y", "2");
@@ -402,11 +416,13 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
         assertEquals("x=3, y=2", mapToSortedString((Map<String, Object>) response.rows()[0][0]));
     }
 
+    /**
+     * Disable JDBC/PSQL as object values are streamed via JSON on the PSQL wire protocol which is not type safe.
+     */
+    @UseJdbc(0)
     @Test
     public void testUpdateResetNestedObject() throws Exception {
         execute("create table test (coolness object)");
-        ensureYellow();
-
         Map<String, Object> map = new HashMap<>();
         map.put("x", "1");
         map.put("y", 2);
@@ -418,7 +434,7 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
 
         // update with different map
         Map<String, Object> new_map = new HashMap<>();
-        new_map.put("z", 1);
+        new_map.put("z", 1L);
 
         execute("update test set coolness = ?", new Object[]{new_map});
         assertEquals(1, response.rowCount());
@@ -443,9 +459,7 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateResetNestedObjectUsingUpdateRequest() throws Exception {
         execute("create table test (id string, data object(ignored))");
-        ensureYellow();
-
-        Map<String, Object> data = new HashMap<String, Object>() {{
+        Map<String, Object> data = new HashMap<>() {{
             put("foo", "bar");
             put("days", new ArrayList<String>() {{
                 add("Mon");
@@ -473,12 +487,14 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
         assertEquals(new_data, response.rows()[0][0]);
     }
 
+    /**
+     * Disable JDBC/PSQL as object values are streamed via JSON on the PSQL wire protocol which is not type safe.
+     */
+    @UseJdbc(0)
     @Test
     public void testUpdateResetNestedNestedObject() throws Exception {
         execute("create table test (coolness object)");
-        ensureYellow();
-
-        Map<String, Object> map = new HashMap<String, Object>() {{
+        Map<String, Object> map = new HashMap<>() {{
             put("x", "1");
             put("y", new HashMap<String, Object>() {{
                 put("z", 3);
@@ -490,7 +506,7 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
         refresh();
 
         Map<String, Object> new_map = new HashMap<>();
-        new_map.put("a", 1);
+        new_map.put("a", 1L);
 
         execute("update test set coolness['y'] = ?", new Object[]{new_map});
         assertEquals(1, response.rowCount());
@@ -525,7 +541,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     public void testUpdateByIdWithMultiplePrimaryKeyAndClusteredBy() throws Exception {
         execute("create table quotes (id integer primary key, author string primary key, " +
                 "quote string) clustered by(author) with (number_of_replicas=0)");
-        ensureYellow();
         execute("insert into quotes (id, author, quote) values(?, ?, ?)",
             new Object[]{1, "Ford", "I'd far rather be happy than right any day."});
         assertEquals(1L, response.rowCount());
@@ -543,7 +558,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     public void testUpdateByQueryWithMultiplePrimaryKeyAndClusteredBy() throws Exception {
         execute("create table quotes (id integer primary key, author string primary key, " +
                 "quote string) clustered by(author) with (number_of_replicas=0)");
-        ensureYellow();
         execute("insert into quotes (id, author, quote) values(?, ?, ?)",
             new Object[]{1, "Ford", "I'd far rather be happy than right any day."});
         assertEquals(1L, response.rowCount());
@@ -562,7 +576,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testUpdateVersionHandling() throws Exception {
         execute("create table test (id int primary key, c int) with (number_of_replicas=0, refresh_interval=0)");
-        ensureYellow();
         execute("insert into test (id, c) values (1, 1)");
         execute("refresh table test");
         execute("select _version, c from test");
@@ -585,10 +598,25 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    public void testMultiUpdateWithSequenceConflict() {
+        execute("create table test (id int primary key, c int)");
+        execute("insert into test (id, c) values (1, 1), (2, 1)");
+        refresh();
+
+        execute("select id, _seq_no, _primary_term from test order by id");
+
+        // 2nd will result in conflict, but 1st one was successful and must be replicated
+        long wrongSeqNoForSecondRow = (long) response.rows()[1][1] - 1;
+        execute(
+            "update test set c = 3 where (id = ? and _seq_no = ? and _primary_term = ?) or (id = ? and _seq_no = ? and _primary_term = ?)",
+            new Object[]{response.rows()[0][0], response.rows()[0][1], response.rows()[0][2],
+                response.rows()[1][0], wrongSeqNoForSecondRow, response.rows()[1][2]});
+        assertThat(response.rowCount(), is(1L));
+    }
+
+    @Test
     public void testMultiUpdateWithVersionAndConflict() throws Exception {
-        execute("create table test (id int primary key, c int) " +
-                "with (number_of_replicas=1)");
-        ensureYellow();
+        execute("create table test (id int primary key, c int)");
         execute("insert into test (id, c) values (1, 1), (2, 1)");
         refresh();
 
@@ -608,25 +636,24 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testUpdateVersionOrOperator() throws Exception {
-        expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage(UpdateAnalyzer.VERSION_SEARCH_EX_MSG);
-
         execute("create table test (id int primary key, c int) with (number_of_replicas=0, refresh_interval=0)");
-        ensureGreen();
         execute("insert into test (id, c) values (1, 1)");
         execute("refresh table test");
+
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
         execute("update test set c = 4 where _version = 2 or _version=1");
     }
 
     @Test
     public void testUpdateVersionInOperator() throws Exception {
-        expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage(UpdateAnalyzer.VERSION_SEARCH_EX_MSG);
-
         execute("create table test (id int primary key, c int) with (number_of_replicas=0, refresh_interval=0)");
         ensureGreen();
         execute("insert into test (id, c) values (1, 1)");
         execute("refresh table test");
+
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
         execute("update test set c = 4 where _version in (1,2)");
     }
 
@@ -635,26 +662,21 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     public void testUpdateRetryOnVersionConflict() throws Exception {
         // issue a bulk update request updating the same document to force a version conflict
         execute("create table test (a string, b int) with (number_of_replicas=0)");
-        ensureYellow();
         execute("insert into test (a, b) values ('foo', 1)");
         assertThat(response.rowCount(), is(1L));
         refresh();
 
-        SQLBulkResponse bulkResp = execute("update test set a = ? where b = ?",
+        long[] rowCounts = execute("update test set a = ? where b = ?",
             new Object[][]{
                 new Object[]{"bar", 1},
                 new Object[]{"baz", 1},
                 new Object[]{"foobar", 1}});
-        assertThat(bulkResp.results().length, is(3));
-        // all statements must succeed and return 1 affected row
-        for (SQLBulkResponse.Result result : bulkResp.results()) {
-            assertThat(result.rowCount(), is(1L));
-        }
+        assertThat(rowCounts, is(new long[] { 1L, 1L, 1L }));
         refresh();
 
         // document was changed 4 times (including initial creation), so version must be 4
         execute("select _version from test where b = 1");
-        assertThat((Long) response.rows()[0][0], is(4L));
+        assertThat(response.rows()[0][0], is(4L));
     }
 
     @Test
@@ -664,7 +686,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
                 "  type byte primary key, " +
                 "  value string" +
                 ") partitioned by (type) with (number_of_replicas=0)");
-        ensureYellow();
         execute("insert into party (id, type, value) values (?, ?, ?)", new Object[][]{
             {1, 2, "foo"},
             {2, 3, "bar"},
@@ -688,42 +709,35 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testBulkUpdateWithOnlyOneBulkArgIsProducingRowCountResult() throws Exception {
         execute("create table t (name string) with (number_of_replicas = 0)");
-        ensureYellow();
-        // regression test, used to throw a ClassCastException because the ExecutionPhasesTask created a
+        // regression test, used to throw a ClassCastException because the JobLauncher created a
         // QueryResult instead of RowCountResult
-        SQLBulkResponse bulkResponse = execute("update t set name = 'Trillian' where name = ?", $$($("Arthur")));
-        assertThat(bulkResponse.results().length, is(1));
+        long[] rowCounts  = execute("update t set name = 'Trillian' where name = ?", $$($("Arthur")));
+        assertThat(rowCounts.length, is(1));
     }
 
     @Test
     public void testBulkUpdateWithPKAndMultipleHits() throws Exception {
         execute("create table t (id integer primary key, name string) with (number_of_replicas = 0)");
-        ensureYellow();
-
         execute("insert into t values (?, ?)", $$($(1, "foo"), $(2, "bar"), $(3, "hoschi"), $(4, "crate")));
         refresh();
 
-        SQLBulkResponse bulkResponse = execute("update t set name = 'updated' where id = ? or id = ?", $$($(1, 2), $(3, 4)));
-        assertThat(bulkResponse.results().length, is(2));
-        for (SQLBulkResponse.Result result : bulkResponse.results()) {
-            assertThat(result.rowCount(), is(2L));
-        }
+        long[] rowCounts = execute("update t set name = 'updated' where id = ? or id = ?", $$($(1, 2), $(3, 4)));
+        assertThat(rowCounts, is(new long[] { 2L, 2L }));
     }
 
     @Test
-    public void testUpdateWithGeneratedColumn() throws Exception {
+    public void testUpdateWithGeneratedColumn() {
         execute("create table generated_column (" +
                 " id int primary key," +
-                " ts timestamp," +
+                " ts timestamp with time zone," +
                 " day as date_trunc('day', ts)," +
-                " user object as (name string)," +
-                " name as concat(user['name'], 'bar')" +
+                " \"user\" object as (name string)," +
+                " name as concat(\"user\"['name'], 'bar')" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
-        execute("insert into generated_column (id, ts, user) values (?, ?, ?)", new Object[]{
+        execute("insert into generated_column (id, ts, \"user\") values (?, ?, ?)", new Object[]{
             1, "2015-11-18T11:11:00", MapBuilder.newMapBuilder().put("name", "foo").map()});
         refresh();
-        execute("update generated_column set ts = ?, user = ? where id = ?", new Object[]{
+        execute("update generated_column set ts = ?, \"user\" = ? where id = ?", new Object[]{
             "2015-11-19T17:06:00", MapBuilder.newMapBuilder().put("name", "zoo").map(), 1});
         refresh();
         execute("select day, name from generated_column");
@@ -732,15 +746,29 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testUpdateSetInvalidGeneratedColumnOnly() throws Exception {
+    public void testGeneratedColumnWithoutRefsToOtherColumnsComputedOnUpdate() {
+        execute("create table generated_column (" +
+                " \"inserted\" TIMESTAMP WITH TIME ZONE GENERATED ALWAYS AS current_timestamp(3), " +
+                " \"message\" STRING" +
+                ")");
+        execute("insert into generated_column (message) values (?)", new Object[]{"str"});
+        refresh();
+        execute("select inserted from generated_column");
+        long ts = (long) response.rows()[0][0];
+        execute("update generated_column set message = ?", new Object[]{"test"});
+        refresh();
+        execute("select inserted from generated_column");
+        assertThat(response.rows()[0][0], not(ts));
+    }
+
+    @Test
+    public void testUpdateSetInvalidGeneratedColumnOnly() {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Given value 1745 for generated column does not match defined generated expression value 1970");
+        expectedException.expectMessage("Given value 1745 for generated column gen_col does not match calculation extract(year from ts) = 1970");
         execute("create table computed (" +
-                " ts timestamp," +
+                " ts timestamp with time zone," +
                 " gen_col as extract(year from ts)" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
-
         execute("insert into computed (ts) values (1)");
         refresh();
         execute("update computed set gen_col=1745");
@@ -750,16 +778,15 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     public void testUpdateNotNullSourceGeneratedColumn() {
         execute("create table generated_column (" +
                 " id int primary key," +
-                " ts timestamp," +
+                " ts timestamp with time zone," +
                 " gen_col as extract(year from ts) not null" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
         execute("insert into generated_column (id, ts) values (1, '2015-11-18T11:11:00')");
         assertEquals(1, response.rowCount());
         refresh();
 
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("SQLParseException: Cannot insert null value for column gen_col");
+        expectedException.expectMessage("\"gen_col\" must not be null");
         execute("update generated_column set ts=null where id=1");
     }
 
@@ -767,16 +794,15 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
     public void testUpdateNotNullTargetGeneratedColumn() {
         execute("create table generated_column (" +
                 " id int primary key," +
-                " ts timestamp," +
+                " ts timestamp with time zone," +
                 " gen_col as extract(year from ts) not null" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
         execute("insert into generated_column (id, ts) values (1, '2015-11-18T11:11:00')");
         assertEquals(1, response.rowCount());
         refresh();
 
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("SQLParseException: Cannot insert null value for column gen_col");
+        expectedException.expectMessage("\"gen_col\" must not be null");
         execute("update generated_column set gen_col=null where id=1");
     }
 
@@ -787,8 +813,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
                 " surname string," +
                 " name as concat(surname, ', ', firstname)" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
-
         execute("insert into computed (firstname, surname) values ('Douglas', 'Adams')");
         refresh();
         execute("update computed set firstname = 'Ford'");
@@ -804,8 +828,6 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
                 " b int," +
                 " c as (b + 1)" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
-
         execute("insert into computed (a, b) values (1, 2)");
         refresh();
         execute("update computed set a = c + 1");
@@ -820,13 +842,54 @@ public class UpdateIntegrationTest extends SQLTransportIntegrationTest {
                 " a int," +
                 " b as (a + 1)" +
                 ") with (number_of_replicas=0)");
-        ensureYellow();
-
         execute("insert into computed (a) values (1)");
         refresh();
         execute("update computed set a = b + 1");
         refresh();
         execute("select a from computed");
         assertThat((Integer) response.rows()[0][0], is(3));
+    }
+
+    @Test
+    public void testFailingUpdateBulkOperation() throws Exception {
+        execute("create table t (x string) clustered into 1 shards with (number_of_replicas = 0)");
+        execute("insert into t (x) values ('1')");
+        execute("refresh table t");
+
+        // invalid regex causes failure in prepare phase, causing a failure row-count in each individual response
+        Object[][] bulkArgs = new Object[][] {
+            new Object[] { 1, "+123" },
+            new Object[] { 2, "+123" },
+        };
+        long[] rowCounts = execute("update t set x = ? where x ~* ?", bulkArgs);
+        assertThat(rowCounts, is(new long[] { -2L, -2L }));
+    }
+
+    @Test
+    public void testUpdateByQueryWithSubQuery() throws Exception {
+        execute("create table t1 (x int)");
+        execute("insert into t1 (x) values (1), (2)");
+        execute("refresh table t1");
+        execute("update t1 set x = (select 3) where x = (select 1)");
+        assertThat(response.rowCount(), is(1L));
+
+        execute("refresh table t1");
+        execute("select x from t1 order by x asc");
+        assertThat(printedTable(response.rows()), is("2\n" +
+                                                     "3\n"));
+    }
+
+    @Test
+    public void testUpdateByIdWithSubQuery() throws Exception {
+        execute("create table t1 (id int primary key, name string)");
+        execute("insert into t1 (id, name) values (1, 'Arthur'), (2, 'Trillian')");
+        execute("refresh table t1");
+        execute("update t1 set name = (select 'Slartibartfast') where id = (select 1)");
+        assertThat(response.rowCount(), is(1L));
+
+        execute("refresh table t1");
+        execute("select id, name from t1 order by id asc");
+        assertThat(printedTable(response.rows()), is("1| Slartibartfast\n" +
+                                                     "2| Trillian\n"));
     }
 }

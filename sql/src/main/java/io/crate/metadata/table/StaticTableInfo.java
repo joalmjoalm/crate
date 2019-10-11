@@ -24,23 +24,31 @@ package io.crate.metadata.table;
 
 import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.Reference;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.RelationName;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import static io.crate.common.collections.Lists2.map;
 
-public abstract class StaticTableInfo implements TableInfo {
+public abstract class StaticTableInfo<T> implements TableInfo {
 
-    private final TableIdent ident;
+    private final RelationName ident;
     private final List<ColumnIdent> primaryKey;
     private final Collection<Reference> columns;
-    protected final Map<ColumnIdent, Reference> columnMap;
+    private final Map<ColumnIdent, Reference> columnMap;
 
     /**
      * @param columns top level columns. If null the values of columnMap are used.
      *                Can/should be specified if columnMap contains nested columns.
      */
-    public StaticTableInfo(TableIdent ident,
+    public StaticTableInfo(RelationName ident,
                            Map<ColumnIdent, Reference> columnMap,
                            @Nullable Collection<Reference> columns,
                            List<ColumnIdent> primaryKey) {
@@ -50,8 +58,12 @@ public abstract class StaticTableInfo implements TableInfo {
         this.primaryKey = primaryKey;
     }
 
-    public StaticTableInfo(TableIdent ident, ColumnRegistrar columnRegistrar, List<ColumnIdent> primaryKey) {
+    public StaticTableInfo(RelationName ident, ColumnRegistrar<T> columnRegistrar, List<ColumnIdent> primaryKey) {
         this(ident, columnRegistrar.infos(), columnRegistrar.columns(), primaryKey);
+    }
+
+    public StaticTableInfo(RelationName ident, ColumnRegistrar<T> columnRegistrar, String... primaryKey) {
+        this(ident, columnRegistrar.infos(), columnRegistrar.columns(), map(Arrays.asList(primaryKey), ColumnIdent::new));
     }
 
     @Nullable
@@ -66,7 +78,7 @@ public abstract class StaticTableInfo implements TableInfo {
     }
 
     @Override
-    public TableIdent ident() {
+    public RelationName ident() {
         return ident;
     }
 
@@ -76,7 +88,7 @@ public abstract class StaticTableInfo implements TableInfo {
     }
 
     @Override
-    public Map<String, Object> tableParameters() {
+    public Map<String, Object> parameters() {
         return Collections.emptyMap();
     }
 
@@ -85,6 +97,7 @@ public abstract class StaticTableInfo implements TableInfo {
         return ident.fqn();
     }
 
+    @Nonnull
     @Override
     public Iterator<Reference> iterator() {
         return columnMap.values().iterator();
@@ -92,6 +105,11 @@ public abstract class StaticTableInfo implements TableInfo {
 
     @Override
     public Set<Operation> supportedOperations() {
-        return Operation.READ_ONLY;
+        return Operation.SYS_READ_ONLY;
+    }
+
+    @Override
+    public RelationType relationType() {
+        return RelationType.BASE_TABLE;
     }
 }

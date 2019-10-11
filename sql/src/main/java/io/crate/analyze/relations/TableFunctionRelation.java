@@ -22,32 +22,38 @@
 
 package io.crate.analyze.relations;
 
-import io.crate.analyze.symbol.Field;
-import io.crate.analyze.symbol.Symbol;
 import io.crate.exceptions.ColumnUnknownException;
-import io.crate.metadata.Path;
+import io.crate.expression.symbol.Field;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.table.Operation;
 import io.crate.metadata.table.TableInfo;
+import io.crate.metadata.tablefunctions.TableFunctionImplementation;
+import io.crate.sql.tree.QualifiedName;
 
-import java.util.List;
+import java.util.function.Consumer;
 
 public class TableFunctionRelation extends TableRelation {
 
-    private final String name;
-    private final List<? extends Symbol> arguments;
+    private final TableFunctionImplementation functionImplementation;
+    private final Function function;
 
-    public TableFunctionRelation(TableInfo tableInfo, String name, List<? extends Symbol> arguments) {
-        super(tableInfo);
-        this.name = name;
-        this.arguments = arguments;
+    public TableFunctionRelation(TableInfo tableInfo,
+                                 TableFunctionImplementation functionImplementation,
+                                 Function function,
+                                 QualifiedName qualifiedName) {
+        super(tableInfo, qualifiedName);
+        this.functionImplementation = functionImplementation;
+        this.function = function;
     }
 
-    public String functionName() {
-        return name;
+    public Function function() {
+        return function;
     }
 
-    public List<? extends Symbol> arguments() {
-        return arguments;
+    public TableFunctionImplementation functionImplementation() {
+        return functionImplementation;
     }
 
     @Override
@@ -56,10 +62,17 @@ public class TableFunctionRelation extends TableRelation {
     }
 
     @Override
-    public Field getField(Path path, Operation operation) throws UnsupportedOperationException, ColumnUnknownException {
+    public Field getField(ColumnIdent path, Operation operation) throws UnsupportedOperationException, ColumnUnknownException {
         if (operation == Operation.READ) {
             return getField(path);
         }
         throw new UnsupportedOperationException("Table functions don't support write operations");
+    }
+
+    @Override
+    public void visitSymbols(Consumer<? super Symbol> consumer) {
+        for (Symbol argument : function.arguments()) {
+            consumer.accept(argument);
+        }
     }
 }

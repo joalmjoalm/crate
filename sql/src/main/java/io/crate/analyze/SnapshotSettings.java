@@ -22,11 +22,22 @@
 
 package io.crate.analyze;
 
-import io.crate.metadata.settings.BoolSetting;
 
-public class SnapshotSettings {
+import org.elasticsearch.common.settings.Setting;
 
-    public static final BoolSetting IGNORE_UNAVAILABLE = new BoolSetting("ignore_unavailable", false, false);
+import java.util.Map;
 
-    public static final BoolSetting WAIT_FOR_COMPLETION = new BoolSetting("wait_for_completion", false, false);
+public final class SnapshotSettings {
+
+    public static final Setting<Boolean> IGNORE_UNAVAILABLE = Setting.boolSetting("ignore_unavailable", false);
+
+    public static final Setting<Boolean> WAIT_FOR_COMPLETION = Setting.boolSetting("wait_for_completion", false);
+
+    public static final Map<String, Setting<?>> SETTINGS = Map.of(
+        IGNORE_UNAVAILABLE.getKey(), IGNORE_UNAVAILABLE,
+        WAIT_FOR_COMPLETION.getKey(), WAIT_FOR_COMPLETION
+    );
+
+    private SnapshotSettings() {
+    }
 }

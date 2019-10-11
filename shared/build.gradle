@@ -1,0 +1,9 @@
+apply from: "$rootDir/gradle/javaModule.gradle"
+
+archivesBaseName = 'crate-shared'
+
+dependencies {
+    implementation "com.google.code.findbugs:jsr305:${versions.jsr305}"
+    testImplementation "junit:junit:${versions.junit}"
+    testImplementation "org.hamcrest:hamcrest:${versions.hamcrest}"
+}

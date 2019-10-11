@@ -22,19 +22,18 @@
 
 package io.crate.analyze.copy;
 
-import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 
 import javax.annotation.Nullable;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 public class NodeFilters implements Predicate<DiscoveryNode> {
 
     public static final String NAME = "node_filters";
-    private final Predicate<DiscoveryNode> innerPredicate;
+    private final java.util.function.Predicate<DiscoveryNode> innerPredicate;
 
     public static NodeFilters fromMap(Map map) {
         String name = stringOrIllegalArgument(map, "name");
@@ -57,32 +56,31 @@ public class NodeFilters implements Predicate<DiscoveryNode> {
 
     NodeFilters(@Nullable String name, @Nullable String id) {
         if (name == null && id == null) {
-            innerPredicate = Predicates.alwaysTrue();
+            innerPredicate = discoveryNode -> true;
         } else {
             Predicate<DiscoveryNode> namesPredicate =
-                name == null ? Predicates.<DiscoveryNode>alwaysTrue() : new NamesPredicate(name);
+                name == null ? discoveryNode -> true : new NamesPredicate(name);
             Predicate<DiscoveryNode> idsPredicate =
-                id == null ? Predicates.<DiscoveryNode>alwaysTrue() : new IdsPredicate(id);
-            innerPredicate = Predicates.and(namesPredicate, idsPredicate);
+                id == null ? discoveryNode -> true : new IdsPredicate(id);
+            innerPredicate = namesPredicate.and(idsPredicate);
         }
     }
 
     @Override
-    public boolean apply(@Nullable DiscoveryNode input) {
-        return innerPredicate.apply(input);
+    public boolean test(@Nullable DiscoveryNode discoveryNode) {
+        return innerPredicate.test(discoveryNode);
     }
-
 
     private static class NamesPredicate implements Predicate<DiscoveryNode> {
         private final Pattern name;
 
-        public NamesPredicate(String name) {
+        private NamesPredicate(String name) {
             this.name = Pattern.compile(name);
         }
 
         @Override
-        public boolean apply(@Nullable DiscoveryNode input) {
-            return input != null && name.matcher(input.getName()).matches();
+        public boolean test(@Nullable DiscoveryNode discoveryNode) {
+            return discoveryNode != null && name.matcher(discoveryNode.getName()).matches();
         }
     }
 
@@ -90,13 +88,13 @@ public class NodeFilters implements Predicate<DiscoveryNode> {
 
         private final Pattern id;
 
-        public IdsPredicate(String id) {
+        private IdsPredicate(String id) {
             this.id = Pattern.compile(id);
         }
 
         @Override
-        public boolean apply(@Nullable DiscoveryNode input) {
-            return input != null && id.matcher(input.getId()).matches();
+        public boolean test(@Nullable DiscoveryNode discoveryNode) {
+            return discoveryNode != null && id.matcher(discoveryNode.getId()).matches();
         }
     }
 }

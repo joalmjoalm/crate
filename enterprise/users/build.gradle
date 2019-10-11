@@ -1,0 +1,37 @@
+apply from: "$rootDir/enterprise/enterpriseModule.gradle"
+
+archivesBaseName = 'users'
+group = 'io.crate'
+description = 'User Management for CrateDB'
+
+dependencies {
+    implementation project(':sql')
+    implementation project(':http')
+    implementation project(':es:es-transport')
+    implementation "io.netty:netty-codec-http:${versions.netty4}"
+    testImplementation project(':integration-testing')
+    testImplementation project(':enterprise:ssl-impl')
+    testImplementation project(path: ':sql', configuration: 'testOutput')
+    testImplementation project(path: ':dex', configuration: 'testOutput')
+    testImplementation "org.hamcrest:hamcrest:${versions.hamcrest}"
+    testImplementation("io.crate:crate-jdbc:${versions.crate_jdbc}") {
+        exclude group: 'net.java.dev.jna', module: 'jna'
+        exclude group: 'commons-logging', module: 'commons-logging'
+        exclude group: 'org.slf4j', module: 'jcl-over-slf4j'
+    }
+}
+
+task writePropertiesFile {
+    doLast {
+        copy {
+            from "src/main/resources/"
+            into "${buildDir}/resources"
+            include "plugin-descriptor.properties"
+            expand(version: project.version,
+                    esVersion: versions.internalES,
+                    jmvCompatibility: project.targetCompatibility,
+                    name: project.name)
+        }
+    }
+}
+jar.dependsOn('writePropertiesFile')

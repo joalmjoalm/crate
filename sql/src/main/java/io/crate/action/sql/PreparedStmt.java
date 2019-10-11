@@ -22,8 +22,9 @@
 
 package io.crate.action.sql;
 
+import com.google.common.base.Preconditions;
+import io.crate.analyze.AnalyzedStatement;
 import io.crate.analyze.ParamTypeHints;
-import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.sql.tree.Statement;
 import io.crate.types.DataType;
 
@@ -32,35 +33,74 @@ import java.util.List;
 
 public class PreparedStmt {
 
-    private final Statement statement;
-    private final String query;
+    private final Statement parsedStatement;
+    private final String rawStatement;
     private final ParamTypeHints paramTypes;
-    private AnalyzedRelation relation;
 
-    public PreparedStmt(Statement statement, String query, List<DataType> paramTypes) {
-        this.statement = statement;
-        this.query = query;
+    @Nullable
+    private DataType[] describedParameterTypes;
+
+    @Nullable
+    private AnalyzedStatement unboundStatement = null;
+    private boolean relationInitialized = false;
+
+    PreparedStmt(Statement parsedStatement, String query, List<DataType> paramTypes) {
+        this.parsedStatement = parsedStatement;
+        this.rawStatement = query;
         this.paramTypes = new ParamTypeHints(paramTypes);
     }
 
-    public Statement statement() {
-        return statement;
+    /**
+     * Sets the parameters sent back from a ParameterDescription message.
+     * @param describedParameters The parameters in sorted order.
+     */
+    void setDescribedParameters(DataType[] describedParameters) {
+        this.describedParameterTypes = describedParameters;
     }
 
-    public ParamTypeHints paramTypes() {
+    public Statement parsedStatement() {
+        return parsedStatement;
+    }
+
+    ParamTypeHints paramTypes() {
         return paramTypes;
     }
 
-    public String query() {
-        return query;
+    /**
+     * Gets the list of effective parameter types which might be a combination
+     * of the {@link ParamTypeHints} and the types determined during ParameterDescription.
+     * @param idx type at index (zero-based).
+     */
+    DataType getEffectiveParameterType(int idx) {
+        if (describedParameterTypes == null) {
+            return paramTypes.getType(idx);
+        }
+        Preconditions.checkState(idx < describedParameterTypes.length,
+            "Requested parameter index exceeds the number of parameters: " + idx);
+        return describedParameterTypes[idx];
+    }
+
+    public String rawStatement() {
+        return rawStatement;
+    }
+
+    boolean isRelationInitialized() {
+        return relationInitialized;
     }
 
     @Nullable
-    public AnalyzedRelation relation() {
-        return relation;
+    public AnalyzedStatement unboundStatement() {
+        return unboundStatement;
     }
 
-    public void relation(AnalyzedRelation relation) {
-        this.relation = relation;
+    /**
+     * Set the unbound analyzed statement (or null if unbound analysis is not supported)
+     *
+     * This must not be set to a bound statement because a `preparedStmt` instance can be re-used
+     * for multiple `bind` messages (so there would be different parameters)
+     */
+    public void unboundStatement(@Nullable AnalyzedStatement unboundStatement) {
+        relationInitialized = true;
+        this.unboundStatement = unboundStatement;
     }
 }

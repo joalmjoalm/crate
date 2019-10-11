@@ -21,56 +21,52 @@
 
 package io.crate.metadata.sys;
 
-import com.google.common.collect.ImmutableList;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
+import io.crate.expression.reference.sys.snapshot.SysSnapshot;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
 import io.crate.metadata.table.ColumnRegistrar;
 import io.crate.metadata.table.StaticTableInfo;
-import io.crate.types.ArrayType;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.common.collect.ImmutableOpenMap;
+import org.elasticsearch.cluster.ClusterState;
 
-import javax.annotation.Nullable;
-import java.util.Iterator;
-import java.util.Locale;
-import java.util.Random;
+import java.util.Map;
 
-public class SysSnapshotsTableInfo extends StaticTableInfo {
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.STRING;
+import static io.crate.types.DataTypes.STRING_ARRAY;
+import static io.crate.types.DataTypes.TIMESTAMPZ;
 
-    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "snapshots");
-    private final ClusterService clusterService;
+public class SysSnapshotsTableInfo extends StaticTableInfo<SysSnapshot> {
+
+    public static final RelationName IDENT = new RelationName(SysSchemaInfo.NAME, "snapshots");
+    private static final RowGranularity GRANULARITY = RowGranularity.DOC;
 
     public static class Columns {
         public static final ColumnIdent NAME = new ColumnIdent("name");
-        public static final ColumnIdent REPOSITORY = new ColumnIdent("repository");
-        public static final ColumnIdent CONCRETE_INDICES = new ColumnIdent("concrete_indices");
-        public static final ColumnIdent STARTED = new ColumnIdent("started");
-        public static final ColumnIdent FINISHED = new ColumnIdent("finished");
-        public static final ColumnIdent VERSION = new ColumnIdent("version");
-        public static final ColumnIdent STATE = new ColumnIdent("state");
     }
 
-    private static final ImmutableList<ColumnIdent> PRIMARY_KEY = ImmutableList.of(Columns.NAME, Columns.REPOSITORY);
-    private static final RowGranularity GRANULARITY = RowGranularity.DOC;
+    static Map<ColumnIdent, RowCollectExpressionFactory<SysSnapshot>> expressions() {
+        return columnRegistrar().expressions();
+    }
 
-    private Random random = new Random();
+    private static ColumnRegistrar<SysSnapshot> columnRegistrar() {
+        return new ColumnRegistrar<SysSnapshot>(IDENT, GRANULARITY)
+          .register("name", STRING, () -> forFunction(SysSnapshot::name))
+          .register("repository", STRING, () -> forFunction(SysSnapshot::repository))
+          .register("concrete_indices", STRING_ARRAY, () -> forFunction(SysSnapshot::concreteIndices))
+          .register("started", TIMESTAMPZ, () -> forFunction(SysSnapshot::started))
+          .register("finished", TIMESTAMPZ, () -> forFunction(SysSnapshot::finished))
+          .register("version", STRING, () -> forFunction(SysSnapshot::version))
+          .register("state", STRING, () -> forFunction(SysSnapshot::state));
+    }
 
-    public SysSnapshotsTableInfo(ClusterService clusterService) {
-        super(IDENT, new ColumnRegistrar(IDENT, GRANULARITY)
-                .register(Columns.NAME, DataTypes.STRING)
-                .register(Columns.REPOSITORY, DataTypes.STRING)
-                .register(Columns.CONCRETE_INDICES, new ArrayType(DataTypes.STRING))
-                .register(Columns.STARTED, DataTypes.TIMESTAMP)
-                .register(Columns.FINISHED, DataTypes.TIMESTAMP)
-                .register(Columns.VERSION, DataTypes.STRING)
-                .register(Columns.STATE, DataTypes.STRING),
-            PRIMARY_KEY);
-        this.clusterService = clusterService;
+    SysSnapshotsTableInfo() {
+        super(IDENT, columnRegistrar(), "name","repository");
     }
 
     @Override
@@ -79,29 +75,18 @@ public class SysSnapshotsTableInfo extends StaticTableInfo {
     }
 
     @Override
-    public TableIdent ident() {
+    public RelationName ident() {
         return IDENT;
     }
 
     @Override
-    public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
+    public Routing getRouting(ClusterState clusterState,
+                              RoutingProvider routingProvider,
+                              WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
         // route to random master or data node,
         // because RepositoriesService (and so snapshots info) is only available there
-        return Routing.forTableOnSingleNode(IDENT, randomMasterOrDataNode().id());
-    }
-
-    private DiscoveryNode randomMasterOrDataNode() {
-        ImmutableOpenMap<String, DiscoveryNode> masterAndDataNodes = clusterService.state().nodes().masterAndDataNodes();
-        int randomIdx = random.nextInt(masterAndDataNodes.size());
-        Iterator<DiscoveryNode> it = masterAndDataNodes.valuesIt();
-        int currIdx = 0;
-        while (it.hasNext()) {
-            if (currIdx == randomIdx) {
-                return it.next();
-            }
-            currIdx++;
-        }
-        throw new AssertionError(String.format(Locale.ENGLISH,
-            "Cannot find a master or data node with given random index %d", randomIdx));
+        return routingProvider.forRandomMasterOrDataNode(IDENT, clusterState.getNodes());
     }
 }

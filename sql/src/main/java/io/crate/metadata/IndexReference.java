@@ -24,8 +24,8 @@ package io.crate.metadata;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
-import io.crate.analyze.symbol.SymbolType;
-import io.crate.metadata.table.ColumnPolicy;
+import io.crate.expression.symbol.SymbolType;
+import io.crate.sql.tree.ColumnPolicy;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -39,18 +39,12 @@ import java.util.List;
 
 public class IndexReference extends Reference {
 
-    public static final SymbolFactory<IndexReference> FACTORY = new SymbolFactory<IndexReference>() {
-        @Override
-        public IndexReference newInstance() {
-            return new IndexReference();
-        }
-    };
-
     public static class Builder {
         private final ReferenceIdent ident;
         private IndexType indexType = IndexType.ANALYZED;
         private List<Reference> columns = new ArrayList<>();
         private String analyzer = null;
+        private Integer position = null;
 
         public Builder(ReferenceIdent ident) {
             Preconditions.checkNotNull(ident, "ident is null");
@@ -72,23 +66,36 @@ public class IndexReference extends Reference {
             return this;
         }
 
+        public Builder position(int position) {
+            this.position = position;
+            return this;
+        }
+
         public IndexReference build() {
-            return new IndexReference(ident, indexType, columns, analyzer);
+            return new IndexReference(position, ident, indexType, columns, analyzer);
         }
     }
 
     @Nullable
-    private String analyzer;
-    private List<Reference> columns;
+    private final String analyzer;
+    private final List<Reference> columns;
 
-    private IndexReference() {
+    public IndexReference(StreamInput in) throws IOException {
+        super(in);
+        analyzer = in.readOptionalString();
+        int size = in.readVInt();
+        columns = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            columns.add(Reference.fromStream(in));
+        }
     }
 
-    public IndexReference(ReferenceIdent ident,
+    public IndexReference(Integer position,
+                          ReferenceIdent ident,
                           IndexType indexType,
                           List<Reference> columns,
                           @Nullable String analyzer) {
-        super(ident, RowGranularity.DOC, DataTypes.STRING, ColumnPolicy.DYNAMIC, indexType, false);
+        super(ident, RowGranularity.DOC, DataTypes.STRING, ColumnPolicy.DYNAMIC, indexType, false, true, position, null);
         this.columns = MoreObjects.firstNonNull(columns, Collections.<Reference>emptyList());
         this.analyzer = analyzer;
     }
@@ -128,17 +135,6 @@ public class IndexReference extends Reference {
                "analyzer='" + analyzer + '\'' +
                ", columns=" + columns +
                '}';
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
-        analyzer = in.readOptionalString();
-        int size = in.readVInt();
-        columns = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            columns.add(Reference.fromStream(in));
-        }
     }
 
     @Override

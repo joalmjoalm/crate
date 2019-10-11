@@ -22,20 +22,21 @@
 
 package io.crate.analyze;
 
-import io.crate.core.collections.Row;
-import io.crate.core.collections.RowN;
-import io.crate.core.collections.Rows;
+import io.crate.data.Row;
+import io.crate.data.RowN;
+import io.crate.data.Rows;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.types.ArrayType;
 import io.crate.types.DataTypes;
-import org.apache.lucene.util.BytesRef;
+import io.crate.types.ObjectType;
 import org.junit.Test;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 
 import static com.carrotsearch.randomizedtesting.RandomizedTest.$;
-import static io.crate.testing.TestingHelpers.isLiteral;
+import static io.crate.testing.SymbolMatchers.isLiteral;
 import static org.hamcrest.Matchers.is;
 
 
@@ -69,13 +70,13 @@ public class ParameterContextTest extends CrateUnitTest {
         assertThat(ctx.getAsSymbol(1), isLiteral(1));
         assertThat(ctx.getAsSymbol(2), isLiteral("foo"));
         assertThat(ctx.getAsSymbol(3), isLiteral(null, DataTypes.UNDEFINED));
-        assertThat(ctx.getAsSymbol(4), isLiteral(new BytesRef[]{null}, new ArrayType(DataTypes.UNDEFINED)));
+        assertThat(ctx.getAsSymbol(4), isLiteral(Collections.singletonList(null), new ArrayType<>(DataTypes.UNDEFINED)));
         ctx.setBulkIdx(1);
         assertThat(ctx.getAsSymbol(0), isLiteral(false));
         assertThat(ctx.getAsSymbol(1), isLiteral(2));
         assertThat(ctx.getAsSymbol(2), isLiteral("bar"));
-        assertThat(ctx.getAsSymbol(3), isLiteral(new Object[0], new ArrayType(DataTypes.UNDEFINED)));
-        assertThat(ctx.getAsSymbol(4), isLiteral(new BytesRef[]{new BytesRef("foo"), new BytesRef("bar")}, new ArrayType(DataTypes.STRING)));
+        assertThat(ctx.getAsSymbol(3), isLiteral(List.of(), new ArrayType<>(DataTypes.UNDEFINED)));
+        assertThat(ctx.getAsSymbol(4), isLiteral(List.of("foo", "bar"), new ArrayType<>(DataTypes.STRING)));
     }
 
     @Test
@@ -105,9 +106,9 @@ public class ParameterContextTest extends CrateUnitTest {
         };
         ParameterContext ctx = new ParameterContext(Row.EMPTY, Rows.of(bulkArgs));
         ctx.setBulkIdx(0);
-        assertThat(ctx.getAsSymbol(0), isLiteral(obj1, DataTypes.OBJECT));
+        assertThat(ctx.getAsSymbol(0), isLiteral(obj1, ObjectType.untyped()));
         ctx.setBulkIdx(1);
-        assertThat(ctx.getAsSymbol(0), isLiteral(obj2, DataTypes.OBJECT));
+        assertThat(ctx.getAsSymbol(0), isLiteral(obj2, ObjectType.untyped()));
     }
 
     @Test
@@ -117,7 +118,9 @@ public class ParameterContextTest extends CrateUnitTest {
             new Object[]{new String[][]{new String[]{"foo"}}},
         };
         ParameterContext ctx = new ParameterContext(Row.EMPTY, Rows.of(bulkArgs));
-        assertThat(ctx.getAsSymbol(0), isLiteral(bulkArgs[0][0], new ArrayType(new ArrayType(DataTypes.UNDEFINED))));
+        assertThat(
+            ctx.getAsSymbol(0),
+            isLiteral(List.of(Collections.singletonList(null)), new ArrayType<>(new ArrayType<>(DataTypes.UNDEFINED))));
     }
 
     @Test
@@ -127,6 +130,8 @@ public class ParameterContextTest extends CrateUnitTest {
             new Object[]{new String[][]{new String[0]}},
         };
         ParameterContext ctx = new ParameterContext(Row.EMPTY, Rows.of(bulkArgs));
-        assertThat(ctx.getAsSymbol(0), isLiteral(bulkArgs[0][0], new ArrayType(new ArrayType(DataTypes.UNDEFINED))));
+        assertThat(
+            ctx.getAsSymbol(0),
+            isLiteral(List.of(List.of()), new ArrayType<>(new ArrayType<>(DataTypes.UNDEFINED))));
     }
 }

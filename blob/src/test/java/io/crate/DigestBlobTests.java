@@ -32,14 +32,16 @@ import org.junit.rules.TemporaryFolder;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.UUID;
+
+import static org.hamcrest.Matchers.is;
 
 public class DigestBlobTests extends CrateUnitTest {
 
     @Rule
     public TemporaryFolder tmpFolder = new TemporaryFolder();
-
 
     @Test
     public void testDigestBlobResumeHeadAndAddContent() throws IOException {
@@ -48,32 +50,32 @@ public class DigestBlobTests extends CrateUnitTest {
         UUID transferId = UUID.randomUUID();
         int currentPos = 2;
 
-        BlobContainer container = new BlobContainer(tmpFolder.newFolder());
-        File filePath = new File(container.getTmpDirectory(), String.format(Locale.ENGLISH, "%s.%s", digest, transferId.toString()));
+        BlobContainer container = new BlobContainer(tmpFolder.newFolder().toPath());
+        File filePath = new File(container.getTmpDirectory().toFile(), String.format(Locale.ENGLISH, "%s.%s", digest, transferId.toString()));
         if (filePath.exists()) {
-            filePath.delete();
+            assertThat(filePath.delete(), is(true));
         }
 
         DigestBlob digestBlob = DigestBlob.resumeTransfer(
             container, digest, transferId, currentPos);
 
-        BytesArray contentHead = new BytesArray("A".getBytes());
+        BytesArray contentHead = new BytesArray("A".getBytes(StandardCharsets.UTF_8));
         digestBlob.addToHead(contentHead);
 
-        BytesArray contentTail = new BytesArray("CDEFGHIJKL".getBytes());
+        BytesArray contentTail = new BytesArray("CDEFGHIJKL".getBytes(StandardCharsets.UTF_8));
         digestBlob.addContent(contentTail, false);
 
-        contentHead = new BytesArray("B".getBytes());
+        contentHead = new BytesArray("B".getBytes(StandardCharsets.UTF_8));
         digestBlob.addToHead(contentHead);
 
-        contentTail = new BytesArray("MNO".getBytes());
+        contentTail = new BytesArray("MNO".getBytes(StandardCharsets.UTF_8));
         digestBlob.addContent(contentTail, true);
 
         // check if tmp file's content is correct
         byte[] buffer = new byte[15];
         try (FileInputStream stream = new FileInputStream(digestBlob.file())) {
-            stream.read(buffer, 0, 15);
-            assertEquals("ABCDEFGHIJKLMNO", new BytesArray(buffer).toUtf8().trim());
+            assertThat(stream.read(buffer, 0, 15), is(15));
+            assertThat(new BytesArray(buffer).utf8ToString().trim(), is("ABCDEFGHIJKLMNO"));
         }
 
         File file = digestBlob.commit();
@@ -81,8 +83,8 @@ public class DigestBlobTests extends CrateUnitTest {
         buffer = new byte[15];
 
         try (FileInputStream stream = new FileInputStream(file)) {
-            stream.read(buffer, 0, 15);
-            assertEquals("ABCDEFGHIJKLMNO", new BytesArray(buffer).toUtf8().trim());
+            assertThat(stream.read(buffer, 0, 15), is(15));
+            assertThat(new BytesArray(buffer).utf8ToString().trim(), is("ABCDEFGHIJKLMNO"));
         }
 
         // assert file created
@@ -94,24 +96,24 @@ public class DigestBlobTests extends CrateUnitTest {
     @Test
     public void testResumeDigestBlobAddHeadAfterContent() throws IOException {
         UUID transferId = UUID.randomUUID();
-        BlobContainer container = new BlobContainer(tmpFolder.newFolder());
+        BlobContainer container = new BlobContainer(tmpFolder.newFolder().toPath());
         DigestBlob digestBlob = DigestBlob.resumeTransfer(
             container, "417de3231e23dcd6d224ff60918024bc6c59aa58", transferId, 2);
 
-        BytesArray contentTail = new BytesArray("CDEFGHIJKLMN".getBytes());
+        BytesArray contentTail = new BytesArray("CDEFGHIJKLMN".getBytes(StandardCharsets.UTF_8));
         digestBlob.addContent(contentTail, false);
 
-        BytesArray contentHead = new BytesArray("AB".getBytes());
+        BytesArray contentHead = new BytesArray("AB".getBytes(StandardCharsets.UTF_8));
         digestBlob.addToHead(contentHead);
 
-        contentTail = new BytesArray("O".getBytes());
+        contentTail = new BytesArray("O".getBytes(StandardCharsets.UTF_8));
         digestBlob.addContent(contentTail, true);
 
         // check if tmp file's content is correct
         byte[] buffer = new byte[15];
         try (FileInputStream stream = new FileInputStream(digestBlob.file())) {
-            stream.read(buffer, 0, 15);
-            assertEquals("ABCDEFGHIJKLMNO", new BytesArray(buffer).toUtf8().trim());
+            assertThat(stream.read(buffer, 0, 15), is(15));
+            assertThat(new BytesArray(buffer).utf8ToString().trim(), is("ABCDEFGHIJKLMNO"));
         }
 
         File file = digestBlob.commit();
@@ -119,14 +121,13 @@ public class DigestBlobTests extends CrateUnitTest {
         // check if final file's content is correct
         buffer = new byte[15];
         try (FileInputStream stream = new FileInputStream(file)) {
-            stream.read(buffer, 0, 15);
-            assertEquals("ABCDEFGHIJKLMNO", new BytesArray(buffer).toUtf8().trim());
+            assertThat(stream.read(buffer, 0, 15), is(15));
+            assertThat(new BytesArray(buffer).utf8ToString().trim(), is("ABCDEFGHIJKLMNO"));
         }
 
         // assert file created
-        assertTrue(file.exists());
+        assertThat(file.exists(), is(true));
         // just in case any references to file left
-        assertTrue(file.delete());
+        assertThat(file.delete(), is(true));
     }
-
 }

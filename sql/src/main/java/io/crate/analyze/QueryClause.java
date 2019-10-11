@@ -21,17 +21,18 @@
 
 package io.crate.analyze;
 
-import io.crate.analyze.symbol.Symbol;
-import io.crate.operation.Input;
+import io.crate.data.Input;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
 import org.elasticsearch.common.Nullable;
+
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 public abstract class QueryClause {
 
     protected Symbol query;
     protected boolean noMatch = false;
-
-    protected QueryClause() {
-    }
 
     protected QueryClause(@Nullable Symbol normalizedQuery) {
         if (normalizedQuery == null) {
@@ -68,7 +69,34 @@ public abstract class QueryClause {
         return query;
     }
 
+    public Symbol queryOrFallback() {
+        if (query == null) {
+            return noMatch ? Literal.BOOLEAN_FALSE : Literal.BOOLEAN_TRUE;
+        }
+        return query;
+    }
+
     public boolean noMatch() {
         return noMatch;
+    }
+
+    public void replace(Function<? super Symbol, ? extends Symbol> replaceFunction) {
+        if (hasQuery()) {
+            Symbol newQuery = replaceFunction.apply(query);
+            if (query != newQuery) {
+                if (newQuery instanceof Input) {
+                    noMatch = !canMatch(newQuery);
+                    query = null;
+                } else {
+                    query = newQuery;
+                }
+            }
+        }
+    }
+
+    public void accept(Consumer<? super Symbol> consumer) {
+        if (query != null) {
+            consumer.accept(query);
+        }
     }
 }

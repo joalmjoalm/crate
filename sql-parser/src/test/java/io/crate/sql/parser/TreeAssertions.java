@@ -27,7 +27,6 @@ import io.crate.sql.tree.DefaultTraversalVisitor;
 import io.crate.sql.tree.Node;
 import io.crate.sql.tree.Statement;
 
-import javax.annotation.Nullable;
 import java.util.List;
 
 import static io.crate.sql.SqlFormatter.formatSql;
@@ -36,18 +35,18 @@ import static java.lang.String.format;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
-public final class TreeAssertions {
+final class TreeAssertions {
     private TreeAssertions() {
     }
 
-    public static void assertFormattedSql(Node expected) {
+    static void assertFormattedSql(Node expected) {
         String formatted = formatSql(expected);
 
         // verify round-trip of formatting already-formatted SQL
-        assertEquals(formatSql(createStatement(formatted)), formatted);
+        Statement actual = parseFormatted(formatted, expected);
+        assertEquals(formatSql(actual), formatted);
 
         // compare parsed tree with parsed tree of formatted SQL
-        Statement actual = createStatement(formatted);
         if (!actual.equals(expected)) {
             // simplify finding the non-equal part of the tree
             assertListEquals(linearizeTree(actual), linearizeTree(expected));
@@ -55,16 +54,23 @@ public final class TreeAssertions {
         assertEquals(actual, expected);
     }
 
+    private static Statement parseFormatted(String sql, Node tree) {
+        try {
+            return createStatement(sql);
+        } catch (ParsingException e) {
+            throw new AssertionError(format(
+                "failed to parse formatted SQL: %s\nerror: %s\ntree: %s", sql, e.getMessage(), tree));
+        }
+    }
+
     private static List<Node> linearizeTree(Node tree) {
         final ImmutableList.Builder<Node> nodes = ImmutableList.builder();
         new DefaultTraversalVisitor<Node, Void>() {
-            @Override
-            public Node process(Node node, @Nullable Void context) {
-                Node result = super.process(node, context);
+            void process(Node node) {
+                node.accept(this, null);
                 nodes.add(node);
-                return result;
             }
-        }.process(tree, null);
+        }.process(tree);
         return nodes.build();
     }
 

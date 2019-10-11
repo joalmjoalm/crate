@@ -22,152 +22,136 @@
 
 package io.crate.discovery;
 
+import io.crate.test.integration.CrateUnitTest;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
+import io.netty.handler.codec.dns.DefaultDnsRawRecord;
+import io.netty.handler.codec.dns.DefaultDnsRecordEncoder;
+import io.netty.handler.codec.dns.DnsRecord;
+import io.netty.handler.codec.dns.DnsRecordType;
 import org.elasticsearch.Version;
-import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.transport.LocalTransportAddress;
 import org.elasticsearch.common.transport.TransportAddress;
+import org.elasticsearch.test.transport.MockTransportService;
+import org.elasticsearch.threadpool.TestThreadPool;
+import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
+import org.hamcrest.core.AnyOf;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import org.xbill.DNS.*;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
+import java.util.concurrent.TimeUnit;
 
-import static org.junit.Assert.*;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.is;
 
-public class SrvUnicastHostsProviderTest {
+public class SrvUnicastHostsProviderTest extends CrateUnitTest {
 
-    private TransportService transportService;
-
-    abstract class DummySrvUnicastHostsProvider extends SrvUnicastHostsProvider {
-
-        public DummySrvUnicastHostsProvider(Settings settings, TransportService transportService, Version version) {
-            super(settings, transportService, version);
-        }
-
-        @Override
-        protected Record[] lookupRecords() throws TextParseException {
-            return null;
-        }
-    }
+    private ThreadPool threadPool;
+    private SrvUnicastHostsProvider srvUnicastHostsProvider;
+    private AnyOf<String> isLocalHost;
 
     @Before
     public void mockTransportService() throws Exception {
-        transportService = mock(TransportService.class);
-        for (int i = 0; i < 4; i++) {
-            when(transportService.addressesFromString(eq(String.format(Locale.ENGLISH, "crate%d.internal:44300",
-                i + 1)), anyInt())).thenReturn(new TransportAddress[]{
-                new LocalTransportAddress(String.format(Locale.ENGLISH, "crate%d.internal", i + 1))
-            });
+        String localHostName = InetAddress.getLocalHost().getCanonicalHostName();
+        isLocalHost = anyOf(is(localHostName), is("localhost"));
+        threadPool = new TestThreadPool("dummy", Settings.EMPTY);
+        TransportService transportService = MockTransportService.createNewService(
+            Settings.EMPTY, Version.CURRENT, threadPool, null);
+        srvUnicastHostsProvider = new SrvUnicastHostsProvider(Settings.EMPTY, transportService);
+    }
+
+    @After
+    public void releaseResources() throws Exception {
+        srvUnicastHostsProvider.close();
+        srvUnicastHostsProvider.eventLoopGroup().shutdownGracefully();
+        srvUnicastHostsProvider.eventLoopGroup().awaitTermination(30, TimeUnit.SECONDS);
+        threadPool.shutdown();
+        threadPool.awaitTermination(30, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void testParseAddressNoPort() {
+        Settings settings = Settings.builder()
+            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER.getKey(), "127.0.0.1")
+            .build();
+        InetSocketAddress address = srvUnicastHostsProvider.parseResolverAddress(settings);
+        assertThat(address.getHostName(), isLocalHost);
+        assertThat(address.getPort(), is(53));
+    }
+
+    @Test
+    public void testParseAddressValidPort() {
+        Settings settings = Settings.builder()
+            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER.getKey(), "127.0.0.1:1234")
+            .build();
+        InetSocketAddress address = srvUnicastHostsProvider.parseResolverAddress(settings);
+        assertThat(address.getHostName(), isLocalHost);
+        assertThat(address.getPort(), is(1234));
+    }
+
+    @Test
+    public void testParseAddressPortOutOfRange() {
+        Settings settings = Settings.builder()
+            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER.getKey(), "127.0.0.1:1234567")
+            .build();
+        InetSocketAddress address = srvUnicastHostsProvider.parseResolverAddress(settings);
+        assertThat(address.getHostName(), isLocalHost);
+        assertThat(address.getPort(), is(53));
+    }
+
+    @Test
+    public void testParseAddressPortNoInteger() {
+        Settings settings = Settings.builder()
+            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER.getKey(), "127.0.0.1:foo")
+            .build();
+        InetSocketAddress address = srvUnicastHostsProvider.parseResolverAddress(settings);
+        assertThat(address.getHostName(), isLocalHost);
+        assertThat(address.getPort(), is(53));
+    }
+
+    @Test
+    public void testParseRecords() {
+        ByteBuf buf = Unpooled.buffer();
+        buf.writeShort(0); // priority
+        buf.writeShort(0); // weight
+        buf.writeShort(993); // port
+        encodeName("localhost.", buf);
+        DnsRecord record = new DefaultDnsRawRecord("_myprotocol._tcp.crate.io.", DnsRecordType.SRV, 30, buf);
+
+        List<TransportAddress> addresses = srvUnicastHostsProvider.parseRecords(Collections.singletonList(record));
+        assertThat(addresses.get(0).getAddress(), is("127.0.0.1"));
+        assertThat(addresses.get(0).getPort(), is(993));
+    }
+
+    /**
+     * Copied over from {@link DefaultDnsRecordEncoder#encodeName(String, ByteBuf)} as it is not accessible.
+     */
+    private void encodeName(String name, ByteBuf buf) {
+        if (".".equals(name)) {
+            // Root domain
+            buf.writeByte(0);
+            return;
         }
-    }
 
-    @Test
-    public void testInvalidResolver() throws Exception {
-        Settings.Builder builder = Settings.settingsBuilder()
-            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER, "foobar.txt")
-            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_QUERY, "_crate._srv.foo.txt");
-        SrvUnicastHostsProvider unicastHostsProvider = new SrvUnicastHostsProvider(builder.build(),
-            transportService, Version.CURRENT);
-        assertNull(unicastHostsProvider.resolver);
-        assertNull(unicastHostsProvider.lookupRecords());
-    }
-
-    @Test
-    public void testValidResolver() throws Exception {
-        Settings.Builder builder = Settings.settingsBuilder()
-            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER, "8.8.4.4");
-        SrvUnicastHostsProvider unicastHostsProvider = new SrvUnicastHostsProvider(builder.build(),
-            transportService, Version.CURRENT);
-        assertEquals("/8.8.4.4:53", ((SimpleResolver) unicastHostsProvider.resolver).getAddress().toString());
-    }
-
-    @Test
-    public void testValidResolverWithPort() throws Exception {
-        Settings.Builder builder = Settings.settingsBuilder()
-            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER, "127.0.0.1:5353");
-        SrvUnicastHostsProvider unicastHostsProvider = new SrvUnicastHostsProvider(builder.build(),
-            transportService, Version.CURRENT);
-        assertEquals("/127.0.0.1:5353", ((SimpleResolver) unicastHostsProvider.resolver).getAddress().toString());
-    }
-
-    @Test
-    public void testValidResolverWithInvalidPort() throws Exception {
-        Settings.Builder builder = Settings.settingsBuilder()
-            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER, "127.0.0.1:42a");
-        SrvUnicastHostsProvider unicastHostsProvider = new SrvUnicastHostsProvider(builder.build(),
-            transportService, Version.CURRENT);
-        assertEquals("/127.0.0.1:53", ((SimpleResolver) unicastHostsProvider.resolver).getAddress().toString());
-    }
-
-    @Test
-    public void testBuildDynamicNodesNoQuery() throws Exception {
-        // no query -> empty list of discovery nodes
-        SrvUnicastHostsProvider unicastHostsProvider = new SrvUnicastHostsProvider(Settings.EMPTY,
-            transportService, Version.CURRENT);
-        List<DiscoveryNode> discoNodes = unicastHostsProvider.buildDynamicNodes();
-        assertTrue(discoNodes.isEmpty());
-    }
-
-    @Test
-    public void testBuildDynamicNoRecords() throws Exception {
-        // no records -> empty list of discovery nodes
-        Settings.Builder builder = Settings.settingsBuilder()
-            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_QUERY, "_crate._srv.crate.internal");
-        SrvUnicastHostsProvider unicastHostsProvider = new DummySrvUnicastHostsProvider(builder.build(),
-            transportService, Version.CURRENT) {
-            @Override
-            protected Record[] lookupRecords() throws TextParseException {
-                return null;
+        final String[] labels = name.split("\\.");
+        for (String label : labels) {
+            final int labelLen = label.length();
+            if (labelLen == 0) {
+                // zero-length label means the end of the name.
+                break;
             }
-        };
-        List<DiscoveryNode> discoNodes = unicastHostsProvider.buildDynamicNodes();
-        assertTrue(discoNodes.isEmpty());
-    }
 
-    @Test
-    public void testBuildDynamicNodes() throws Exception {
-        // records
-        Settings.Builder builder = Settings.settingsBuilder()
-            .put(SrvUnicastHostsProvider.DISCOVERY_SRV_QUERY, "_crate._srv.crate.internal");
-        SrvUnicastHostsProvider unicastHostsProvider = new DummySrvUnicastHostsProvider(builder.build(),
-            transportService, Version.CURRENT) {
-            @Override
-            protected Record[] lookupRecords() throws TextParseException {
-                Name srvName = Name.fromConstantString("_crate._srv.crate.internal.");
-                return new Record[]{
-                    new SRVRecord(srvName, DClass.IN, 3600, 1, 10, 44300, Name.fromConstantString("crate1.internal.")),
-                    new SRVRecord(srvName, DClass.IN, 3600, 1, 20, 44300, Name.fromConstantString("crate2.internal."))
-                };
-            }
-        };
-        List<DiscoveryNode> discoNodes = unicastHostsProvider.buildDynamicNodes();
-        assertEquals(2, discoNodes.size());
-    }
+            buf.writeByte(labelLen);
+            ByteBufUtil.writeAscii(buf, label);
+        }
 
-    @Test
-    public void testParseRecords() throws Exception {
-        SrvUnicastHostsProvider unicastHostsProvider = new SrvUnicastHostsProvider(Settings.EMPTY,
-            transportService, Version.CURRENT);
-
-        Name srvName = Name.fromConstantString("_crate._srv.crate.internal.");
-        Record[] records = new Record[]{
-            new SRVRecord(srvName, DClass.IN, 3600, 1, 10, 44300, Name.fromConstantString("crate1.internal.")),
-            new SRVRecord(srvName, DClass.IN, 3600, 1, 20, 44300, Name.fromConstantString("crate2.internal.")),
-            new SRVRecord(srvName, DClass.IN, 3600, 2, 10, 44300, Name.fromConstantString("crate3.internal.")),
-            new SRVRecord(srvName, DClass.IN, 3600, 2, 20, 44300, Name.fromConstantString("crate4.internal."))
-        };
-        List<DiscoveryNode> discoNodes = unicastHostsProvider.parseRecords(records);
-        // nodes need to be sorted by priority (asc), weight (desc) and name (asc) of SRV record
-        assertEquals("#srv-crate1.internal:44300", discoNodes.get(0).getId());
-        assertEquals("#srv-crate2.internal:44300", discoNodes.get(1).getId());
-        assertEquals("#srv-crate3.internal:44300", discoNodes.get(2).getId());
-        assertEquals("#srv-crate4.internal:44300", discoNodes.get(3).getId());
+        buf.writeByte(0); // marks end of name field
     }
 }

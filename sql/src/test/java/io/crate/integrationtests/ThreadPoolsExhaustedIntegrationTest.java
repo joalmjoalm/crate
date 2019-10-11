@@ -21,11 +21,8 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLAction;
-import io.crate.action.sql.SQLRequest;
-import io.crate.action.sql.SQLResponse;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.SQLTransportExecutor;
-import io.crate.testing.UseJdbc;
 import org.elasticsearch.action.ActionFuture;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.test.ESIntegTestCase;
@@ -37,16 +34,18 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-@ESIntegTestCase.ClusterScope(maxNumDataNodes = 2)
-@UseJdbc
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.is;
+
+@ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST, maxNumDataNodes = 2)
 public class ThreadPoolsExhaustedIntegrationTest extends SQLTransportIntegrationTest {
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        return Settings.settingsBuilder()
+        return Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
-            .put("threadpool.search.size", 2)
-            .put("threadpool.search.queue_size", 2)
+            .put("thread_pool.search.size", 2)
+            .put("thread_pool.search.queue_size", 2)
             .build();
     }
 
@@ -56,10 +55,23 @@ public class ThreadPoolsExhaustedIntegrationTest extends SQLTransportIntegration
         ensureYellow();
         bulkInsert(10);
 
+        assertRejectedExecutionFailure("select * from t limit ?", new Object[]{1000});
+    }
+
+    @Test
+    public void testDistributedPushSelectWithFewAvailableThreadsShouldNeverGetStuck() throws Exception {
+        execute("create table t (x int) with (number_of_replicas = 0)");
+        ensureYellow();
+        bulkInsert(10);
+
+        // by setting a very high limit we force a push based collection instead of a direct response
+        assertRejectedExecutionFailure("select * from t limit ?", new Object[]{1_000_000});
+    }
+
+    private void assertRejectedExecutionFailure(String stmt, Object[] parameters) {
         List<ActionFuture<SQLResponse>> futures = new ArrayList<>();
         for (int i = 0; i < 1000; i++) {
-            ActionFuture<SQLResponse> future = client().execute(
-                SQLAction.INSTANCE, new SQLRequest("select * from t limit ?", new Object[]{10}));
+            ActionFuture<SQLResponse> future = sqlExecutor.execute(stmt, parameters);
             futures.add(future);
         }
 
@@ -69,12 +81,9 @@ public class ThreadPoolsExhaustedIntegrationTest extends SQLTransportIntegration
             } catch (TimeoutException e) {
                 fail("query run into a timeout");
             } catch (Exception e) {
-                assertThat(e.getMessage(), Matchers.anyOf(
+                assertThat(e.getMessage(), anyOf(
                     Matchers.containsString("rejected execution"),
-                    // FIXME: the original cause should bubble, not killed - ignore this for now
-                    // the main purpose of this test is to make sure queries don't get stuck
-                    Matchers.containsString("Job killed")
-                ));
+                    Matchers.containsString("job killed")));
             }
         }
     }
@@ -84,6 +93,9 @@ public class ThreadPoolsExhaustedIntegrationTest extends SQLTransportIntegration
         for (int i = 0; i < docCount; i++) {
             bulkArgs[i][0] = i;
         }
-        execute("insert into t (x) values (?)", bulkArgs);
+        long[] rowCounts = execute("insert into t (x) values (?)", bulkArgs);
+        for (long rowCount : rowCounts) {
+            assertThat(rowCount, is(1L));
+        }
     }
 }

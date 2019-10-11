@@ -23,9 +23,9 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.plugin.CrateCorePlugin;
+import io.crate.action.sql.SQLOperations;
+import io.crate.exceptions.VersioninigValidationException;
 import io.crate.testing.SQLTransportExecutor;
-import io.crate.testing.UseJdbc;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.test.ESIntegTestCase;
@@ -33,15 +33,13 @@ import org.junit.Test;
 
 import javax.annotation.Nullable;
 
-@ESIntegTestCase.ClusterScope(numDataNodes = 1, numClientNodes = 1, randomDynamicTemplates = false)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(numDataNodes = 1, numClientNodes = 1, supportsDedicatedMasters = false)
 public class JobIntegrationTest extends SQLTransportIntegrationTest {
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        return Settings.settingsBuilder()
+        return Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
-            .put("plugin.types", CrateCorePlugin.class.getName())
             .build();
     }
 
@@ -51,13 +49,18 @@ public class JobIntegrationTest extends SQLTransportIntegrationTest {
             new SQLTransportExecutor.ClientProvider() {
                 @Override
                 public Client client() {
-                    return internalCluster().clientNodeClient();
+                    return internalCluster().coordOnlyNodeClient();
                 }
 
                 @Nullable
                 @Override
                 public String pgUrl() {
                     return null;
+                }
+
+                @Override
+                public SQLOperations sqlOperations() {
+                    return internalCluster().getInstance(SQLOperations.class);
                 }
             }
         ));
@@ -66,7 +69,7 @@ public class JobIntegrationTest extends SQLTransportIntegrationTest {
     @Test
     public void testFailurePropagationNonLocalCollectPhase() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("\"_version\" column is not valid in the WHERE clause");
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
         execute("create table users (name string) clustered into 1 shards with (number_of_replicas=0)");
         ensureYellow();
         execute("insert into users (name) (select name from users where _version = 1)");

@@ -22,15 +22,29 @@
 
 package io.crate.sql;
 
+import io.crate.sql.parser.ParsingException;
 import io.crate.sql.parser.SqlParser;
+import io.crate.sql.parser.antlr.v4.SqlBaseLexer;
+import io.crate.sql.tree.QualifiedNameReference;
+import org.antlr.v4.runtime.Vocabulary;
 
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public class Identifiers {
 
+    private static final Pattern IDENTIFIER = Pattern.compile("(^[a-z_]+[a-z0-9_]*)");
     private static final Pattern ESCAPE_REPLACE_RE = Pattern.compile("\"", Pattern.LITERAL);
     private static final String ESCAPE_REPLACEMENT = Matcher.quoteReplacement("\"\"");
+
+    private static final Set<String> KEYWORDS = identifierCandidates().stream()
+        .filter(Identifiers::reserved)
+        .collect(Collectors.toSet());
+
 
     /**
      * quote and escape the given identifier
@@ -51,26 +65,37 @@ public class Identifiers {
     }
 
     private static boolean areQuotesRequired(String identifier) {
-        for (int i = 0; i < identifier.length(); i++) {
-            int cp = identifier.codePointAt(i);
-            if (cp == '"' || Character.isUpperCase(cp)) {
-                return true;
-            }
-        }
-        return isKeyWord(identifier);
+        return isKeyWord(identifier) || !IDENTIFIER.matcher(identifier).matches();
     }
 
-    private static boolean isKeyWord(String identifier) {
-        if (identifier.length() < 1) {
-            return false;
-        }
-        // TODO: this is causing gazillion allocations and creates expensive exceptions. FIX THIS
+    public static boolean isKeyWord(String identifier) {
+        return KEYWORDS.contains(identifier.toUpperCase(Locale.ENGLISH));
+    }
+
+    private static boolean reserved(String expression) {
         try {
-            SqlParser.createIdentifier(identifier);
-            return false;
-        } catch (Throwable e) {
+            return !(SqlParser.createExpression(expression) instanceof QualifiedNameReference);
+        } catch (ParsingException ignored) {
             return true;
         }
+    }
+
+    private static Set<String> identifierCandidates() {
+        HashSet<String> candidates = new HashSet<>();
+        Vocabulary vocabulary = SqlBaseLexer.VOCABULARY;
+        for (int i = 0; i < vocabulary.getMaxTokenType(); i++) {
+            String literal = vocabulary.getLiteralName(i);
+            if (literal == null) {
+                continue;
+            }
+            literal = literal.replace("'", "");
+
+            Matcher matcher = IDENTIFIER.matcher(literal.toLowerCase(Locale.ENGLISH));
+            if (matcher.matches()) {
+                candidates.add(literal);
+            }
+        }
+        return candidates;
     }
 
     /**

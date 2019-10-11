@@ -22,7 +22,7 @@
 package io.crate.blob;
 
 import io.crate.common.Hex;
-import org.elasticsearch.common.bytes.BytesArray;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
@@ -34,14 +34,15 @@ public class PutChunkRequest extends BlobTransferRequest<PutChunkRequest> implem
     private byte[] digest;
     private long currentPos;
 
-    public PutChunkRequest() {
-    }
-
     public PutChunkRequest(String index, byte[] digest, UUID transferId,
-                           BytesArray content, long currentPos, boolean last) {
+                           BytesReference content, long currentPos, boolean last) {
         super(index, transferId, content, last);
         this.digest = digest;
         this.currentPos = currentPos;
+    }
+
+    public PutChunkRequest() {
+        super();
     }
 
     public String digest() {
@@ -52,9 +53,8 @@ public class PutChunkRequest extends BlobTransferRequest<PutChunkRequest> implem
         return currentPos;
     }
 
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
+    public PutChunkRequest(StreamInput in) throws IOException {
+        super(in);
         digest = new byte[20];
         in.read(digest);
         currentPos = in.readVLong();

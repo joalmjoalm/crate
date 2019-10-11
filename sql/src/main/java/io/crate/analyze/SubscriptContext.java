@@ -35,16 +35,16 @@ public class SubscriptContext {
     private Expression expression;
 
     private final List<String> parts = new ArrayList<>();
-    private Integer index;
+    private Expression index;
 
     public SubscriptContext() {
     }
 
-    public QualifiedName qName() {
+    public QualifiedName qualifiedName() {
         return qName;
     }
 
-    public void qName(QualifiedName qName) {
+    public void qualifiedName(QualifiedName qName) {
         this.qName = qName;
     }
 
@@ -56,12 +56,12 @@ public class SubscriptContext {
         parts.add(0, part);
     }
 
-    public void index(int index) {
+    public void index(Expression index) {
         this.index = index;
     }
 
     @Nullable
-    public Integer index() {
+    public Expression index() {
         return index;
     }
 

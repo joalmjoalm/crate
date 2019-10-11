@@ -21,174 +21,131 @@
 
 package io.crate.analyze;
 
-import com.google.common.collect.ImmutableMap;
-import io.crate.action.sql.SessionContext;
 import io.crate.analyze.relations.DocTableRelation;
-import io.crate.analyze.symbol.DynamicReference;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.core.collections.Row;
-import io.crate.core.collections.RowN;
-import io.crate.core.collections.Rows;
+import io.crate.data.Row;
+import io.crate.data.Row1;
+import io.crate.data.RowN;
 import io.crate.exceptions.ColumnValidationException;
-import io.crate.exceptions.TableUnknownException;
-import io.crate.exceptions.UnsupportedFeatureException;
-import io.crate.metadata.*;
-import io.crate.metadata.sys.MetaDataSysModule;
-import io.crate.metadata.table.SchemaInfo;
-import io.crate.metadata.table.TableInfo;
-import io.crate.metadata.table.TestingTableInfo;
-import io.crate.operation.operator.OperatorModule;
-import io.crate.operation.predicate.PredicateModule;
-import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.sql.parser.SqlParser;
-import io.crate.testing.MockedClusterServiceModule;
+import io.crate.exceptions.OperationOnInaccessibleRelationException;
+import io.crate.exceptions.RelationUnknown;
+import io.crate.exceptions.VersioninigValidationException;
+import io.crate.expression.operator.EqOperator;
+import io.crate.expression.predicate.NotPredicate;
+import io.crate.expression.symbol.Assignments;
+import io.crate.expression.symbol.DynamicReference;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.ParameterSymbol;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.Reference;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.Schemas;
+import io.crate.metadata.doc.DocTableInfo;
+import io.crate.planner.DependencyCarrier;
+import io.crate.planner.Plan;
+import io.crate.planner.operators.SubQueryResults;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.SQLExecutor;
+import io.crate.testing.TestingRowConsumer;
 import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import io.crate.types.DoubleType;
-import org.elasticsearch.common.inject.Module;
+import io.crate.types.ObjectType;
 import org.junit.Assert;
 import org.junit.Before;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.mockito.Mock;
 
-import java.util.*;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
-import static io.crate.testing.TestingHelpers.*;
-import static org.hamcrest.Matchers.*;
-import static org.mockito.Mockito.when;
+import static io.crate.testing.SymbolMatchers.isFunction;
+import static io.crate.testing.SymbolMatchers.isLiteral;
+import static io.crate.testing.SymbolMatchers.isReference;
+import static java.util.Collections.singletonList;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
+import static org.mockito.Mockito.mock;
 
-public class UpdateAnalyzerTest extends BaseAnalyzerTest {
+public class UpdateAnalyzerTest extends CrateDummyClusterServiceUnitTest {
 
-    private static final String VERSION_EX_FROM_VALIDATOR = "Filtering \"_version\" in WHERE clause only works using the \"=\" operator, checking for a numeric value";
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
-
-    private final static TableIdent NESTED_CLUSTERED_BY_TABLE_IDENT = new TableIdent("doc", "nestedclustered");
-    private final static TableInfo NESTED_CLUSTERED_BY_TABLE_INFO = TestingTableInfo.builder(
-        NESTED_CLUSTERED_BY_TABLE_IDENT, SHARD_ROUTING)
-        .add("obj", DataTypes.OBJECT, null)
-        .add("obj", DataTypes.STRING, Collections.singletonList("name"))
-        .add("other_obj", DataTypes.OBJECT, null)
-        .clusteredBy("obj.name").build();
-
-    private final static TableIdent TEST_ALIAS_TABLE_IDENT = new TableIdent(Schemas.DEFAULT_SCHEMA_NAME, "alias");
-    private final static TableInfo TEST_ALIAS_TABLE_INFO = new TestingTableInfo.Builder(
-        TEST_ALIAS_TABLE_IDENT, new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()))
-        .add("bla", DataTypes.STRING, null)
-        .isAlias(true).build();
-
-    private final static TableIdent NESTED_PK = new TableIdent(Schemas.DEFAULT_SCHEMA_NAME, "t_nested_pk");
-    private final static TableInfo TI_NESTED_PK = new TestingTableInfo.Builder(
-        NESTED_PK, SHARD_ROUTING)
-        .add("o", DataTypes.OBJECT)
-        .add("o", DataTypes.INTEGER, Collections.singletonList("x"))
-        .add("o", DataTypes.INTEGER, Collections.singletonList("y"))
-        .addPrimaryKey("o.x")
-        .build();
-
-
-    @Mock
-    private SchemaInfo schemaInfo;
-
-    private class TestMetaDataModule extends MetaDataModule {
-        @Override
-        protected void bindSchemas() {
-            super.bindSchemas();
-            when(schemaInfo.getTableInfo(USER_TABLE_IDENT.name())).thenReturn(USER_TABLE_INFO);
-            when(schemaInfo.getTableInfo(TEST_ALIAS_TABLE_IDENT.name())).thenReturn(TEST_ALIAS_TABLE_INFO);
-            when(schemaInfo.getTableInfo(USER_TABLE_IDENT_CLUSTERED_BY_ONLY.name())).thenReturn(USER_TABLE_INFO_CLUSTERED_BY_ONLY);
-            when(schemaInfo.getTableInfo(TEST_PARTITIONED_TABLE_IDENT.name()))
-                .thenReturn(TEST_PARTITIONED_TABLE_INFO);
-            when(schemaInfo.getTableInfo(DEEPLY_NESTED_TABLE_IDENT.name())).thenReturn(DEEPLY_NESTED_TABLE_INFO);
-            when(schemaInfo.getTableInfo(NESTED_CLUSTERED_BY_TABLE_IDENT.name())).thenReturn(NESTED_CLUSTERED_BY_TABLE_INFO);
-            when(schemaInfo.getTableInfo(NESTED_PK.name())).thenReturn(TI_NESTED_PK);
-            schemaBinder.addBinding(Schemas.DEFAULT_SCHEMA_NAME).toInstance(schemaInfo);
-        }
-    }
-
-    @Override
-    protected List<Module> getModules() {
-        List<Module> modules = super.getModules();
-        modules.addAll(Arrays.<Module>asList(
-            new MockedClusterServiceModule(),
-            new TestMetaDataModule(),
-            new OperatorModule(),
-            new PredicateModule(),
-            new MetaDataSysModule(),
-            new ScalarFunctionModule()
-        ));
-        return modules;
-    }
+    private SQLExecutor e;
 
     @Before
-    public void bindGeneratedColumnTables() {
-        TableIdent partedGeneratedColumnTableIdent = new TableIdent(null, "parted_generated_column");
-        TableInfo partedGeneratedColumnTableInfo = new TestingTableInfo.Builder(
-            partedGeneratedColumnTableIdent, new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()))
-            .add("ts", DataTypes.TIMESTAMP, null)
-            .addGeneratedColumn("day", DataTypes.TIMESTAMP, "date_trunc('day', ts)", true)
-            .build(injector.getInstance(Functions.class));
-        when(schemaInfo.getTableInfo(partedGeneratedColumnTableIdent.name()))
-            .thenReturn(partedGeneratedColumnTableInfo);
+    public void prepare() throws IOException {
+        SQLExecutor.Builder builder = SQLExecutor.builder(clusterService)
+            .enableDefaultTables()
+            .addTable(
+                "create table doc.nestedclustered (" +
+                "   obj object as (" +
+                "       name string" +
+                "   )," +
+                "   other_obj object" +
+                ") clustered by (obj['name']) "
+            )
+            .addTable(
+                "create table doc.t_nested_pk (" +
+                "   o object as (" +
+                "       x integer primary key," +
+                "       y integer" +
+                "   )" +
+                ")"
+            )
+            .addTable("create table bag (id short primary key, ob array(object))")
+            .addPartitionedTable(
+                "create table doc.parted_generated_column (" +
+                "   ts timestamp with time zone," +
+                "   day as date_trunc('day', ts)" +
+                ") partitioned by (day) "
+            )
+            .addPartitionedTable(
+                "create table doc.nested_parted_generated_column (" +
+                "   \"user\" object as (" +
+                "       name string" +
+                "   )," +
+                "   name as concat(\"user\"['name'], 'bar')" +
+                ") partitioned by (name) "
+            );
 
-        TableIdent nestedPartedGeneratedColumnTableIdent = new TableIdent(null, "nested_parted_generated_column");
-        TableInfo nestedPartedGeneratedColumnTableInfo = new TestingTableInfo.Builder(
-            nestedPartedGeneratedColumnTableIdent, new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()))
-            .add("user", DataTypes.OBJECT, null)
-            .add("user", DataTypes.STRING, Arrays.asList("name"))
-            .addGeneratedColumn("name", DataTypes.STRING, "concat(user['name'], 'bar')", true)
-            .build(injector.getInstance(Functions.class));
-        when(schemaInfo.getTableInfo(nestedPartedGeneratedColumnTableIdent.name()))
-            .thenReturn(nestedPartedGeneratedColumnTableInfo);
+        e = builder.build();
     }
 
-    protected UpdateAnalyzedStatement analyze(String statement) {
-        return analyze(statement, new Object[0]);
+    protected AnalyzedUpdateStatement analyze(String statement) {
+        return e.analyze(statement);
     }
 
-    protected UpdateAnalyzedStatement analyze(String statement, Object[] params) {
-        return (UpdateAnalyzedStatement) analyzer.boundAnalyze(SqlParser.createStatement(statement),
-            SessionContext.SYSTEM_SESSION,
-            new ParameterContext(new RowN(params), Collections.<Row>emptyList())).analyzedStatement();
-    }
-
-    protected UpdateAnalyzedStatement analyze(String statement, Object[][] bulkArgs) {
-        return (UpdateAnalyzedStatement) analyzer.boundAnalyze(SqlParser.createStatement(statement),
-            SessionContext.SYSTEM_SESSION,
-            new ParameterContext(Row.EMPTY, Rows.of(bulkArgs))).analyzedStatement();
+    protected AnalyzedUpdateStatement analyze(String statement, Object[] params) {
+        return (AnalyzedUpdateStatement) e.analyze(statement, params);
     }
 
     @Test
     public void testUpdateAnalysis() throws Exception {
         AnalyzedStatement analyzedStatement = analyze("update users set name='Ford Prefect'");
-        assertThat(analyzedStatement, instanceOf(UpdateAnalyzedStatement.class));
+        assertThat(analyzedStatement, instanceOf(AnalyzedUpdateStatement.class));
     }
 
-    @Test(expected = TableUnknownException.class)
+    @Test(expected = RelationUnknown.class)
     public void testUpdateUnknownTable() throws Exception {
         analyze("update unknown set name='Prosser'");
     }
 
     @Test
     public void testUpdateSetColumnToColumnValue() throws Exception {
-        UpdateAnalyzedStatement statement = analyze("update users set name=name");
-        UpdateAnalyzedStatement.NestedAnalyzedStatement statement1 = statement.nestedStatements().get(0);
-        assertThat(statement1.assignments().size(), is(1));
-        Symbol value = statement1.assignments().entrySet().iterator().next().getValue();
+        AnalyzedUpdateStatement update = analyze("update users set name=name");
+        assertThat(update.assignmentByTargetCol().size(), is(1));
+        Symbol value = update.assignmentByTargetCol().entrySet().iterator().next().getValue();
         assertThat(value, isReference("name"));
     }
 
     @Test
     public void testUpdateSetExpression() throws Exception {
-        UpdateAnalyzedStatement statement = analyze("update users set other_id=other_id+1");
-        UpdateAnalyzedStatement.NestedAnalyzedStatement statement1 = statement.nestedStatements().get(0);
-        assertThat(statement1.assignments().size(), is(1));
-        Symbol value = statement1.assignments().entrySet().iterator().next().getValue();
+        AnalyzedUpdateStatement update = analyze("update users set other_id=other_id+1");
+        assertThat(update.assignmentByTargetCol().size(), is(1));
+        Symbol value = update.assignmentByTargetCol().entrySet().iterator().next().getValue();
         assertThat(value, isFunction("add"));
     }
 
@@ -202,111 +159,107 @@ public class UpdateAnalyzerTest extends BaseAnalyzerTest {
         analyze("update users set details['arms']=3, details['arms']=5");
     }
 
-    @Test(expected = UnsupportedOperationException.class)
+    @Test
     public void testUpdateSysTables() throws Exception {
+        expectedException.expect(OperationOnInaccessibleRelationException.class);
+        expectedException.expectMessage("The relation \"sys.nodes\" doesn't support or allow UPDATE " +
+                                        "operations, as it is read-only.");
         analyze("update sys.nodes set fs=?", new Object[]{new HashMap<String, Object>() {{
             put("free", 0);
         }}});
     }
 
     @Test
-    public void testNumericTypeOutOfRange() throws Exception {
+    public void testNumericTypeOutOfRange() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for shorts: -100000 cannot be cast to type short");
-
+        expectedException.expectMessage("Validation failed for shorts: Cannot cast -100000 to type smallint");
         analyze("update users set shorts=-100000");
     }
 
     @Test
-    public void testNumericOutOfRangeFromFunction() throws Exception {
+    public void testNumericOutOfRangeFromFunction() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for bytes: 1234 cannot be cast to type byte");
-
+        expectedException.expectMessage("Validation failed for bytes: Cannot cast 1234 to type char");
         analyze("update users set bytes=abs(-1234)");
     }
 
     @Test
     public void testUpdateAssignments() throws Exception {
-        UpdateAnalyzedStatement statement = analyze("update users set name='Trillian'");
-        UpdateAnalyzedStatement.NestedAnalyzedStatement statement1 = statement.nestedStatements().get(0);
-        assertThat(statement1.assignments().size(), is(1));
-        assertThat(((DocTableRelation) statement.sourceRelation()).tableInfo().ident(), is(new TableIdent(Schemas.DEFAULT_SCHEMA_NAME, "users")));
+        AnalyzedUpdateStatement update = analyze("update users set name='Trillian'");
+        assertThat(update.assignmentByTargetCol().size(), is(1));
+        assertThat(((DocTableRelation) update.table()).tableInfo().ident(), is(new RelationName(Schemas.DOC_SCHEMA_NAME, "users")));
 
-        Reference ref = statement1.assignments().keySet().iterator().next();
+        Reference ref = update.assignmentByTargetCol().keySet().iterator().next();
         assertThat(ref.ident().tableIdent().name(), is("users"));
-        assertThat(ref.ident().columnIdent().name(), is("name"));
-        assertTrue(statement1.assignments().containsKey(ref));
+        assertThat(ref.column().name(), is("name"));
+        assertTrue(update.assignmentByTargetCol().containsKey(ref));
 
-        Symbol value = statement1.assignments().entrySet().iterator().next().getValue();
+        Symbol value = update.assignmentByTargetCol().entrySet().iterator().next().getValue();
         assertThat(value, isLiteral("Trillian"));
     }
 
     @Test
     public void testUpdateAssignmentNestedDynamicColumn() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement statement =
-            analyze("update users set details['arms']=3").nestedStatements().get(0);
-        assertThat(statement.assignments().size(), is(1));
+        AnalyzedUpdateStatement update = analyze("update users set details['arms']=3");
+        assertThat(update.assignmentByTargetCol().size(), is(1));
 
-        Reference ref = statement.assignments().keySet().iterator().next();
+        Reference ref = update.assignmentByTargetCol().keySet().iterator().next();
         assertThat(ref, instanceOf(DynamicReference.class));
         Assert.assertEquals(DataTypes.LONG, ref.valueType());
-        assertThat(ref.ident().columnIdent().isColumn(), is(false));
-        assertThat(ref.ident().columnIdent().fqn(), is("details.arms"));
+        assertThat(ref.column().isTopLevel(), is(false));
+        assertThat(ref.column().fqn(), is("details.arms"));
     }
 
-    @Test(expected = ColumnValidationException.class)
+    @Test
     public void testUpdateAssignmentWrongType() throws Exception {
+        expectedException.expect(ColumnValidationException.class);
         analyze("update users set other_id='String'");
     }
 
     @Test
     public void testUpdateAssignmentConvertableType() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement statement =
-            analyze("update users set other_id=9.9").nestedStatements().get(0);
-        Reference ref = statement.assignments().keySet().iterator().next();
+        AnalyzedUpdateStatement update = analyze("update users set other_id=9.9");
+        Reference ref = update.assignmentByTargetCol().keySet().iterator().next();
         assertThat(ref, not(instanceOf(DynamicReference.class)));
         assertEquals(DataTypes.LONG, ref.valueType());
 
-        Symbol value = statement.assignments().entrySet().iterator().next().getValue();
-        assertThat(value, isLiteral(9L));
+        Assignments assignments = Assignments.convert(update.assignmentByTargetCol());
+        Symbol[] sources = assignments.bindSources(
+            ((DocTableInfo) update.table().tableInfo()), Row.EMPTY, SubQueryResults.EMPTY);
+        assertThat(sources[0], isLiteral(9L));
     }
 
     @Test
     public void testUpdateMuchAssignments() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement statement = analyze(
+        AnalyzedUpdateStatement update = analyze(
             "update users set other_id=9.9, name='Trillian', details=?, stuff=true, foo='bar'",
-            new Object[]{new HashMap<String, Object>()}).nestedStatements().get(0);
-        assertThat(statement.assignments().size(), is(5));
+            new Object[]{new HashMap<String, Object>()});
+        assertThat(update.assignmentByTargetCol().size(), is(5));
     }
 
     @Test
     public void testNoWhereClause() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement analysis =
-            analyze("update users set other_id=9").nestedStatements().get(0);
-        assertThat(analysis.whereClause(), is(WhereClause.MATCH_ALL));
+        AnalyzedUpdateStatement update = analyze("update users set other_id=9");
+        assertThat(update.query(), isLiteral(true));
     }
 
     @Test
     public void testNoMatchWhereClause() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement analysis =
-            analyze("update users set other_id=9 where true=false").nestedStatements().get(0);
-        assertThat(analysis.whereClause().noMatch(), is(true));
+        AnalyzedUpdateStatement update = analyze("update users set other_id=9 where true=false");
+        assertThat(update.query(), isLiteral(false));
     }
 
     @Test
     public void testUpdateWhereClause() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement analysis =
-            analyze("update users set other_id=9 where name='Trillian'").nestedStatements().get(0);
-        assertThat(analysis.whereClause().hasQuery(), is(true));
-        assertThat(analysis.whereClause().noMatch(), is(false));
+        AnalyzedUpdateStatement update = analyze("update users set other_id=9 where name='Trillian'");
+        assertThat(update.query(), isFunction(EqOperator.NAME, isReference("name"), isLiteral("Trillian")));
     }
 
     @Test
     public void testQualifiedNameReference() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Column reference \"users.name\" has too many parts. A column must not have a schema or a table here.");
-        UpdateAnalyzedStatement.NestedAnalyzedStatement analysis =
-            analyze("update users set users.name='Trillian'").nestedStatements().get(0);
+        analyze("update users set users.name='Trillian'");
     }
 
     @Test
@@ -319,50 +272,49 @@ public class UpdateAnalyzerTest extends BaseAnalyzerTest {
                 put("name", "Marvin");
             }}
         };
-        UpdateAnalyzedStatement.NestedAnalyzedStatement analysis =
-            analyze("update users set name=?, other_id=?, friends=? where id=?",
-                new Object[]{"Jeltz", 0, friends, "9"}).nestedStatements().get(0);
-        assertThat(analysis.assignments().size(), is(3));
-        assertThat(
-            analysis.assignments().get(USER_TABLE_INFO.getReference(new ColumnIdent("name"))),
-            isLiteral("Jeltz")
-        );
-        assertThat(
-            analysis.assignments().get(USER_TABLE_INFO.getReference(new ColumnIdent("friends"))),
-            isLiteral(friends, new ArrayType(DataTypes.OBJECT))
-        );
-        assertThat(
-            analysis.assignments().get(USER_TABLE_INFO.getReference(new ColumnIdent("other_id"))),
-            isLiteral(0L)
-        );
+        AnalyzedUpdateStatement update = analyze("update users set name=?, other_id=?, friends=? where id=?",
+            new Object[]{"Jeltz", 0, friends, "9"});
 
-        assertThat(((Function) analysis.whereClause().query()).arguments().get(1), isLiteral(9L));
+        RelationName usersRelation = new RelationName("doc", "users");
+        assertThat(update.assignmentByTargetCol().size(), is(3));
+        DocTableInfo tableInfo = e.schemas().getTableInfo(usersRelation);
+        Reference name = tableInfo.getReference(new ColumnIdent("name"));
+        Reference friendsRef = tableInfo.getReference(new ColumnIdent("friends"));
+        Reference otherId = tableInfo.getReference(new ColumnIdent("other_id"));
+        assertThat(update.assignmentByTargetCol().get(name), instanceOf(ParameterSymbol.class));
+        assertThat(update.assignmentByTargetCol().get(friendsRef), instanceOf(ParameterSymbol.class));
+        assertThat(update.assignmentByTargetCol().get(otherId), instanceOf(ParameterSymbol.class));
+
+        assertThat(update.query(), isFunction(EqOperator.NAME, isReference("id"), instanceOf(ParameterSymbol.class)));
     }
 
 
     @Test
     public void testUpdateWithWrongParameters() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("Cannot cast [1, 2, 3] to type long");
+        Object[] params = {
+            new HashMap<String, Object>(),
+            new Map[0],
+            new Long[]{1L, 2L, 3L}};
+        AnalyzedUpdateStatement update = analyze("update users set name=?, friends=? where other_id=?");
 
-        analyze("update users set name=?, friends=? where other_id=?",
-            new Object[]{
-                new HashMap<String, Object>(),
-                new Map[0],
-                new Long[]{1L, 2L, 3L}}
-        );
+        Assignments assignments = Assignments.convert(update.assignmentByTargetCol());
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Cannot cast {} to type string");
+        assignments.bindSources(((DocTableInfo) update.table().tableInfo()), new RowN(params), SubQueryResults.EMPTY);
     }
 
     @Test
     public void testUpdateWithEmptyObjectArray() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement analysis = analyze("update users set friends=? where other_id=0",
-            new Object[]{new Map[0], 0}).nestedStatements().get(0);
+        Object[] params = {new Map[0], 0};
+        AnalyzedUpdateStatement update = analyze("update users set friends=? where other_id=0");
 
-        Literal friendsLiteral = (Literal) analysis.assignments().get(
-            USER_TABLE_INFO.getReference(new ColumnIdent("friends")));
-        assertThat(friendsLiteral.valueType().id(), is(ArrayType.ID));
-        assertEquals(DataTypes.OBJECT, ((ArrayType) friendsLiteral.valueType()).innerType());
-        assertThat(((Object[]) friendsLiteral.value()).length, is(0));
+        Assignments assignments = Assignments.convert(update.assignmentByTargetCol());
+        Symbol[] sources = assignments.bindSources(((DocTableInfo) update.table().tableInfo()), new RowN(params), SubQueryResults.EMPTY);
+
+
+        assertThat(sources[0].valueType().id(), is(ArrayType.ID));
+        assertThat(((ArrayType) sources[0].valueType()).innerType().id(), is(ObjectType.ID));
+        assertThat(((List) ((Literal) sources[0]).value()).size(), is(0));
     }
 
     @Test
@@ -407,31 +359,29 @@ public class UpdateAnalyzerTest extends BaseAnalyzerTest {
     public void testUpdateColumnReferencedInGeneratedPartitionByColumnNestedParent() throws Exception {
         expectedException.expect(ColumnValidationException.class);
         expectedException.expectMessage("Updating a column which is referenced in a partitioned by generated column expression is not supported");
-        analyze("update nested_parted_generated_column set user = {name = 'Ford'}");
+        analyze("update nested_parted_generated_column set \"user\" = {name = 'Ford'}");
     }
 
     @Test
     public void testUpdateTableAlias() throws Exception {
-        UpdateAnalyzedStatement.NestedAnalyzedStatement expectedAnalysis = analyze(
-            "update users set awesome=true where awesome=false").nestedStatements().get(0);
-        UpdateAnalyzedStatement.NestedAnalyzedStatement actualAnalysis = analyze(
-            "update users as u set awesome=true where awesome=false").nestedStatements().get(0);
+        AnalyzedUpdateStatement expected = analyze("update users set awesome=true where awesome=false");
+        AnalyzedUpdateStatement actual = analyze("update users as u set awesome=true where awesome=false");
 
-        assertEquals(
-            expectedAnalysis.assignments(),
-            actualAnalysis.assignments()
-        );
-        assertEquals(
-            ((Function) expectedAnalysis.whereClause().query()).arguments().get(0),
-            ((Function) actualAnalysis.whereClause().query()).arguments().get(0)
-        );
+        assertThat(expected.assignmentByTargetCol(), is(actual.assignmentByTargetCol()));
+        assertThat(expected.query(), is(actual.query()));
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void testUpdateObjectArrayField() throws Exception {
-        analyze("update users set friends['id'] = ?", new Object[]{
-            new Long[]{1L, 2L, 3L}
-        });
+        expectedException.expect(IllegalArgumentException.class);
+        analyze("update users set friends['id'] = ?");
+    }
+
+    @Test
+    public void testUpdateArrayByElement() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Updating a single element of an array is not supported");
+        analyze("update users set friends[1] = 2");
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -448,14 +398,14 @@ public class UpdateAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testUpdateDynamicNestedArrayParamLiteral() throws Exception {
-        UpdateAnalyzedStatement statement = analyze("update users set new=[[1.9, 4.8], [9.7, 12.7]]");
-        DataType dataType = statement.nestedStatements().get(0).assignments().values().iterator().next().valueType();
-        assertThat(dataType, is((DataType) new ArrayType(new ArrayType(DoubleType.INSTANCE))));
+        AnalyzedUpdateStatement update = analyze("update users set new=[[1.9, 4.8], [9.7, 12.7]]");
+        DataType dataType = update.assignmentByTargetCol().values().iterator().next().valueType();
+        assertThat(dataType, is(new ArrayType(new ArrayType(DoubleType.INSTANCE))));
     }
 
     @Test
     public void testUpdateDynamicNestedArrayParam() throws Exception {
-        UpdateAnalyzedStatement statement = analyze("update users set new=? where id=1", new Object[]{
+        Object[] params = {
             new Object[]{
                 new Object[]{
                     1.9, 4.8
@@ -464,34 +414,43 @@ public class UpdateAnalyzerTest extends BaseAnalyzerTest {
                     9.7, 12.7
                 }
             }
-        });
-        DataType dataType = statement.nestedStatements().get(0).assignments().values().iterator().next().valueType();
-        assertThat(dataType, is((DataType) new ArrayType(new ArrayType(DoubleType.INSTANCE))));
+        };
+        AnalyzedUpdateStatement update = analyze("update users set new=? where id=1");
+        Assignments assignments = Assignments.convert(update.assignmentByTargetCol());
+        Symbol[] sources = assignments.bindSources(
+            ((DocTableInfo) update.table().tableInfo()), new RowN(params), SubQueryResults.EMPTY);
+
+        DataType dataType = sources[0].valueType();
+        assertThat(dataType, is(new ArrayType(new ArrayType(DoubleType.INSTANCE))));
     }
 
     @Test
     public void testUpdateInvalidType() throws Exception {
-        expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for tags: [['a', 'b']] cannot be cast to type string_array");
-        analyze("update users set tags=? where id=1", new Object[]{
+        Object[] params = {
             new Object[]{
                 new Object[]{"a", "b"}
             }
-        });
+        };
+        AnalyzedUpdateStatement update = analyze("update users set tags=? where id=1");
+
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Cannot cast [a, b] to type string");
+        Assignments assignments = Assignments.convert(update.assignmentByTargetCol());
+        assignments.bindSources(((DocTableInfo) update.table().tableInfo()), new RowN(params), SubQueryResults.EMPTY);
     }
 
     @Test
     public void testUsingFQColumnNameShouldBePossibleInWhereClause() throws Exception {
-        UpdateAnalyzedStatement statement = analyze("update users set name = 'foo' where users.name != 'foo'");
-        Function eqFunction = (Function) ((Function) statement.nestedStatements().get(0).whereClause().query()).arguments().get(0);
-        assertThat(eqFunction.arguments().get(0), isReference("name"));
+        AnalyzedUpdateStatement update = analyze("update users set name = 'foo' where users.name != 'foo'");
+        assertThat(update.query(),
+            isFunction(NotPredicate.NAME, isFunction(EqOperator.NAME, isReference("name"), isLiteral("foo"))));
     }
 
     @Test
     public void testTestUpdateOnTableWithAliasAndFQColumnNameInWhereClause() throws Exception {
-        UpdateAnalyzedStatement statement = analyze("update users  t set name = 'foo' where t.name != 'foo'");
-        Function eqFunction = (Function) ((Function) statement.nestedStatements().get(0).whereClause().query()).arguments().get(0);
-        assertThat(eqFunction.arguments().get(0), isReference("name"));
+        AnalyzedUpdateStatement update = analyze("update users  t set name = 'foo' where t.name != 'foo'");
+        assertThat(update.query(),
+            isFunction(NotPredicate.NAME, isFunction(EqOperator.NAME, isReference("name"), isLiteral("foo"))));
     }
 
     @Test
@@ -510,73 +469,103 @@ public class UpdateAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testUpdateWhereVersionUsingWrongOperator() throws Exception {
-        expectedException.expect(UnsupportedOperationException.class);
-        expectedException.expectMessage(VERSION_EX_FROM_VALIDATOR);
-        analyze("update users set text = ? where text = ? and \"_version\" >= ?",
-            new Object[]{"already in panic", "don't panic", 3});
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set text = ? where text = ? and \"_version\" >= ?"),
+            new RowN(new Object[]{"already in panic", "don't panic", 3}));
     }
 
     @Test
     public void testUpdateWhereVersionIsColumn() throws Exception {
-        expectedException.expect(UnsupportedOperationException.class);
-        expectedException.expectMessage(VERSION_EX_FROM_VALIDATOR);
-        analyze("update users set col2 = ? where _version = id",
-            new Object[]{1});
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set col2 = ? where _version = id"), new Row1(1));
     }
 
     @Test
     public void testUpdateWhereVersionInOperatorColumn() throws Exception {
-        expectedException.expect(UnsupportedFeatureException.class);
-        expectedException.expectMessage(UpdateAnalyzer.VERSION_SEARCH_EX_MSG);
-        analyze("update users set col2 = ? where _version in (1,2,3)",
-            new Object[]{1});
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set col2 = 'x' where _version in (1,2,3)"), Row.EMPTY);
     }
 
     @Test
     public void testUpdateWhereVersionOrOperatorColumn() throws Exception {
-        expectedException.expect(UnsupportedFeatureException.class);
-        expectedException.expectMessage(UpdateAnalyzer.VERSION_SEARCH_EX_MSG);
-        analyze("update users set col2 = ? where _version = 1 or _version = 2",
-            new Object[]{1});
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set col2 = ? where _version = 1 or _version = 2"), new Row1(1));
     }
 
 
     @Test
     public void testUpdateWhereVersionAddition() throws Exception {
-        expectedException.expect(UnsupportedOperationException.class);
-        expectedException.expectMessage(VERSION_EX_FROM_VALIDATOR);
-        analyze("update users set col2 = ? where _version + 1 = 2",
-            new Object[]{1});
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set col2 = ? where _version + 1 = 2"), new Row1(1));
     }
 
     @Test
     public void testUpdateWhereVersionNotPredicate() throws Exception {
-        expectedException.expect(UnsupportedOperationException.class);
-        expectedException.expectMessage(VERSION_EX_FROM_VALIDATOR);
-        analyze("update users set text = ? where not (_version = 1 and id = 1)",
-            new Object[]{"Hello"});
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set text = ? where not (_version = 1 and id = 1)"), new Row1(1));
     }
 
     @Test
     public void testUpdateWhereVersionOrOperator() throws Exception {
-        expectedException.expect(UnsupportedFeatureException.class);
-        expectedException.expectMessage(UpdateAnalyzer.VERSION_SEARCH_EX_MSG);
-        analyze("update users set awesome =  true where _version = 1 or _version = 2");
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set awesome = true where _version = 1 or _version = 2"), Row.EMPTY);
     }
 
     @Test
     public void testUpdateWithVersionZero() throws Exception {
-        expectedException.expect(UnsupportedFeatureException.class);
-        expectedException.expectMessage(UpdateAnalyzer.VERSION_SEARCH_EX_MSG);
-        analyze("update users set awesome=true where name='Ford' and _version=0").nestedStatements().get(0);
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set awesome=true where name='Ford' and _version=0"), Row.EMPTY);
     }
-
 
     @Test
     public void testSelectWhereVersionIsNullPredicate() throws Exception {
-        expectedException.expect(UnsupportedOperationException.class);
-        expectedException.expectMessage(VERSION_EX_FROM_VALIDATOR);
-        analyze("update users set col2 = ? where _version is null",
-            new Object[]{1});
+        expectedException.expect(VersioninigValidationException.class);
+        expectedException.expectMessage(VersioninigValidationException.VERSION_COLUMN_USAGE_MSG);
+        execute(e.plan("update users set col2 = 'x' where _version is null"), Row.EMPTY);
+    }
+
+    @Test
+    public void testUpdateElementOfObjectArrayUsingParameterExpressionResultsInCorrectlyTypedParameterSymbol() {
+        AnalyzedUpdateStatement stmt = e.analyze("UPDATE bag SET ob = [?] WHERE id = ?");
+        assertThat(
+            stmt.assignmentByTargetCol().keySet(),
+            contains(isReference("ob", new ArrayType(ObjectType.untyped()))));
+        assertThat(
+            stmt.assignmentByTargetCol().values(),
+            contains(isFunction("_array", singletonList(ObjectType.untyped()))));
+    }
+
+    @Test
+    public void testUpdateElementOfObjectArrayUsingParameterExpressionInsideFunctionResultsInCorrectlyTypedParameterSymbol() {
+        AnalyzedUpdateStatement stmt = e.analyze("UPDATE bag SET ob = array_cat([?], [{obb=1}]) WHERE id = ?");
+        assertThat(
+            stmt.assignmentByTargetCol().keySet(),
+            contains(isReference("ob", new ArrayType(ObjectType.untyped()))));
+        assertThat(
+            stmt.assignmentByTargetCol().values(),
+            contains(isFunction("array_cat",
+                isFunction("_array", singletonList(ObjectType.untyped())),
+                instanceOf(Literal.class)
+            )));
+    }
+
+    private List<Object[]> execute(Plan plan, Row params) throws Exception {
+        TestingRowConsumer consumer = new TestingRowConsumer();
+        plan.execute(
+            mock(DependencyCarrier.class),
+            e.getPlannerContext(clusterService.state()),
+            consumer,
+            params,
+            SubQueryResults.EMPTY
+        );
+        return consumer.getResult();
     }
 }

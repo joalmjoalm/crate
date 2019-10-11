@@ -21,36 +21,33 @@
 
 package io.crate.metadata.information;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSortedMap;
-import io.crate.metadata.*;
-import io.crate.types.DataType;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
+import io.crate.metadata.table.ColumnRegistrar;
+import io.crate.metadata.table.SchemaInfo;
 
-public class InformationSchemataTableInfo extends InformationTableInfo {
+import java.util.Map;
+
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.STRING;
+
+public class InformationSchemataTableInfo extends InformationTableInfo<SchemaInfo> {
 
     public static final String NAME = "schemata";
-    public static final TableIdent IDENT = new TableIdent(InformationSchemaInfo.NAME, NAME);
+    public static final RelationName IDENT = new RelationName(InformationSchemaInfo.NAME, NAME);
 
-    public static class Columns {
-        public static final ColumnIdent SCHEMA_NAME = new ColumnIdent("schema_name");
+    private static ColumnRegistrar<SchemaInfo> columnRegistrar() {
+        return new ColumnRegistrar<SchemaInfo>(IDENT, RowGranularity.DOC)
+            .register("schema_name", STRING, () -> forFunction(SchemaInfo::name));
     }
 
-    public static class References {
-        public static final Reference SCHEMA_NAME = info(Columns.SCHEMA_NAME, DataTypes.STRING);
+    static Map<ColumnIdent, RowCollectExpressionFactory<SchemaInfo>> expressions() {
+        return columnRegistrar().expressions();
     }
 
-    private static Reference info(ColumnIdent columnIdent, DataType dataType) {
-        return new Reference(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
-    }
-
-    protected InformationSchemataTableInfo(ClusterService clusterService) {
-        super(clusterService, IDENT,
-            ImmutableList.of(Columns.SCHEMA_NAME),
-            ImmutableSortedMap.<ColumnIdent, Reference>naturalOrder()
-                .put(Columns.SCHEMA_NAME, References.SCHEMA_NAME)
-                .build()
-        );
+    InformationSchemataTableInfo() {
+        super(IDENT, columnRegistrar(), "schema_name");
     }
 }

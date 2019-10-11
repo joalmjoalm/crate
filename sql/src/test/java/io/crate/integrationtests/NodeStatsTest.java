@@ -21,24 +21,34 @@
 
 package io.crate.integrationtests;
 
-import io.crate.Version;
-import io.crate.action.sql.SQLResponse;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.UseJdbc;
 import org.apache.lucene.util.Constants;
+import org.elasticsearch.Version;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.hamcrest.Matchers;
 import org.junit.Test;
 
-import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.lessThan;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.core.Is.is;
 
-@ESIntegTestCase.ClusterScope(numClientNodes = 0, numDataNodes = 2)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(numClientNodes = 0, numDataNodes = 2, supportsDedicatedMasters = false)
 public class NodeStatsTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -63,12 +73,12 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
 
     @SuppressWarnings("ConstantConditions")
     @Test
-    @UseJdbc(false) // because of json some values are transfered as integer instead of long
+    @UseJdbc(0) // because of json some values are transfered as integer instead of long
     public void testThreadPools() throws Exception {
         SQLResponse response = execute("select thread_pools from sys.nodes limit 1");
 
-        Object[] threadPools = (Object[]) response.rows()[0][0];
-        assertThat(threadPools.length, greaterThanOrEqualTo(1));
+        List threadPools = (List) response.rows()[0][0];
+        assertThat(threadPools.size(), greaterThanOrEqualTo(1));
 
         Map<String, Object> threadPool = null;
         for (Object t : threadPools) {
@@ -78,7 +88,7 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
                 break;
             }
         }
-        assertThat((String) threadPool.get("name"), is("generic"));
+        assertThat(threadPool.get("name"), is("generic"));
         assertThat((Integer) threadPool.get("active"), greaterThanOrEqualTo(0));
         assertThat((Long) threadPool.get("rejected"), greaterThanOrEqualTo(0L));
         assertThat((Integer) threadPool.get("largest"), greaterThanOrEqualTo(0));
@@ -92,14 +102,12 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
         SQLResponse response = execute("select thread_pools['name'], thread_pools['queue'] from sys.nodes limit 1");
         assertThat(response.rowCount(), is(1L));
 
-        Object[] objects = (Object[]) response.rows()[0][0];
-        String[] names = Arrays.copyOf(objects, objects.length, String[].class);
-        assertThat(names.length, greaterThanOrEqualTo(1));
-        assertThat(names, Matchers.hasItemInArray("generic"));
+        List<Object> objects = (List<Object>) response.rows()[0][0];
+        assertThat(objects, Matchers.hasItem("generic"));
 
-        Object[] queues = (Object[]) response.rows()[0][1];
-        assertThat(queues.length, greaterThanOrEqualTo(1));
-        assertThat((Integer) queues[0], greaterThanOrEqualTo(0));
+        List queues = (List) response.rows()[0][1];
+        assertThat(queues.size(), greaterThanOrEqualTo(1));
+        assertThat((Integer) queues.get(0), greaterThanOrEqualTo(0));
     }
 
     @Test
@@ -163,7 +171,7 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    @UseJdbc(false) // because of json some values are transfered as integer instead of long
+    @UseJdbc(0) // because of json some values are transfered as integer instead of long
     public void testSysNodesOs() throws Exception {
         SQLResponse response = execute("select os from sys.nodes limit 1");
         Map results = (Map) response.rows()[0][0];
@@ -181,11 +189,50 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
         assertThat((Short) ((Map) results.get("cpu")).get("used"), greaterThanOrEqualTo((short) -1));
         assertThat((Short) ((Map) results.get("cpu")).get("used"), lessThanOrEqualTo((short) 100));
 
-        assertThat((Short) ((Map) results.get("cpu")).get("idle"), greaterThanOrEqualTo((short) -1));
-        assertThat((Short) ((Map) results.get("cpu")).get("idle"), lessThanOrEqualTo((short) 100));
+    }
 
-        assertThat((Short) ((Map) results.get("cpu")).get("stolen"), greaterThanOrEqualTo((short) -1));
-        assertThat((Short) ((Map) results.get("cpu")).get("stolen"), lessThanOrEqualTo((short) 100));
+    @Test
+    public void testSysNodesCgroup() throws Exception {
+        if (Constants.LINUX && !"true".equals(System.getenv("SHIPPABLE"))) { // cgroups are only available on Linux
+            SQLResponse response = execute("select" +
+                                           " os['cgroup']['cpuacct']['control_group']," +
+                                           " os['cgroup']['cpuacct']['usage_nanos']," +
+                                           " os['cgroup']['cpu']['control_group']," +
+                                           " os['cgroup']['cpu']['cfs_period_micros']," +
+                                           " os['cgroup']['cpu']['cfs_quota_micros']," +
+                                           " os['cgroup']['cpu']['num_elapsed_periods']," +
+                                           " os['cgroup']['cpu']['num_times_throttled']," +
+                                           " os['cgroup']['cpu']['time_throttled_nanos']" +
+                                           " from sys.nodes limit 1");
+            assertThat(response.rowCount(), is(1L));
+            assertThat(response.rows()[0][0], notNullValue());
+            assertThat((long) response.rows()[0][1], greaterThanOrEqualTo(0L));
+            assertThat(response.rows()[0][2], notNullValue());
+            assertThat((long) response.rows()[0][3], greaterThanOrEqualTo(0L));
+            assertThat((long) response.rows()[0][4], anyOf(equalTo(-1L), greaterThanOrEqualTo(0L)));
+            assertThat((long) response.rows()[0][5], greaterThanOrEqualTo(0L));
+            assertThat((long) response.rows()[0][6], greaterThanOrEqualTo(0L));
+            assertThat((long) response.rows()[0][7], greaterThanOrEqualTo(0L));
+        } else {
+            // for all other OS cgroup fields should return `null`
+            response = execute("select os['cgroup']," +
+                               " os['cgroup']['cpuacct']," +
+                               " os['cgroup']['cpuacct']['control_group']," +
+                               " os['cgroup']['cpuacct']['usage_nanos']," +
+                               " os['cgroup']['cpu']," +
+                               " os['cgroup']['cpu']['control_group']," +
+                               " os['cgroup']['cpu']['cfs_period_micros']," +
+                               " os['cgroup']['cpu']['cfs_quota_micros']," +
+                               " os['cgroup']['cpu']['num_elapsed_periods']," +
+                               " os['cgroup']['cpu']['num_times_throttled']," +
+                               " os['cgroup']['cpu']['time_throttled_nanos']" +
+                               " from sys.nodes limit 1");
+            assertThat(response.rowCount(), is(1L));
+            for (int i = 0; i <= 10; i++) {
+                assertNull(response.rows()[0][i]);
+            }
+        }
+
     }
 
     @Test
@@ -218,7 +265,7 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    @UseJdbc(false) // because of json some values are transfered as integer instead of long
+    @UseJdbc(0) // because of json some values are transfered as integer instead of long
     public void testFs() throws Exception {
         SQLResponse response = execute("select fs from sys.nodes limit 1");
         assertThat(response.rowCount(), is(1L));
@@ -234,15 +281,13 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
             assertThat((Long) val, greaterThanOrEqualTo(-1L));
         }
 
-        Object[] disks = (Object[]) fs.get("disks");
-        if (disks.length > 0) {
+        List disks = (List) fs.get("disks");
+        if (disks.size() > 0) {
             // on travis there are no accessible disks
-
-            assertThat(disks.length, greaterThanOrEqualTo(1));
-            Map<String, Object> someDisk = (Map<String, Object>) disks[0];
-            assertThat(someDisk.keySet().size(), is(8));
-            assertThat(someDisk.keySet(), hasItems("dev", "size", "used", "available",
-                "reads", "writes", "bytes_read", "bytes_written"));
+            assertThat(disks.size(), greaterThanOrEqualTo(1));
+            Map<String, Object> someDisk = (Map<String, Object>) disks.get(0);
+            assertThat(someDisk.keySet().size(), is(4));
+            assertThat(someDisk.keySet(), hasItems("dev", "size", "used", "available"));
             for (Map.Entry<String, Object> entry : someDisk.entrySet()) {
                 if (!entry.getKey().equals("dev")) {
                     assertThat((Long) entry.getValue(), greaterThanOrEqualTo(-1L));
@@ -250,12 +295,12 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
             }
         }
 
-        Object[] data = (Object[]) fs.get("data");
-        if (data.length > 0) {
+        List data = (List) fs.get("data");
+        if (data.size() > 0) {
             // without sigar, no data definition returned
             int numDataPaths = internalCluster().getInstance(NodeEnvironment.class).nodeDataPaths().length;
-            assertThat(data.length, is(numDataPaths));
-            Map<String, Object> someData = (Map<String, Object>) data[0];
+            assertThat(data.size(), is(numDataPaths));
+            Map<String, Object> someData = (Map<String, Object>) data.get(0);
             assertThat(someData.keySet().size(), is(2));
             assertThat(someData.keySet(), hasItems("dev", "path"));
         }
@@ -267,10 +312,10 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
         assertThat(response.rowCount(), is(2L));
         for (Object[] row : response.rows()) {
             // data device name
-            for (Object diskDevName : (Object[]) row[0]) {
-                assertThat((String) diskDevName, is(not("rootfs")));
+            for (Object diskDevName : (List) row[0]) {
+                assertThat(diskDevName, is(not("rootfs")));
             }
-            Object[] disks = (Object[]) row[1];
+            List disks = (List) row[1];
             // disks device name
             for (Object disk : disks) {
                 String diskDevName = (String) ((Map<String, Object>) disk).get("dev");
@@ -284,7 +329,7 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
     public void testSysNodesObjectArrayStringChildColumn() throws Exception {
         SQLResponse response = execute("select fs['data']['path'] from sys.nodes");
         assertThat(response.rowCount(), Matchers.is(2L));
-        for (Object path : (Object[]) response.rows()[0][0]) {
+        for (Object path : (List) response.rows()[0][0]) {
             assertThat(path, instanceOf(String.class));
         }
     }
@@ -297,9 +342,9 @@ public class NodeStatsTest extends SQLTransportIntegrationTest {
         assertThat(response.rowCount(), is(1L));
         assertThat(response.rows()[0][0], instanceOf(Map.class));
         assertThat((Map<String, Object>) response.rows()[0][0], allOf(hasKey("number"), hasKey("build_hash"), hasKey("build_snapshot")));
-        assertThat((String) response.rows()[0][1], is(Version.CURRENT.number()));
+        assertThat((String) response.rows()[0][1], is(Version.CURRENT.externalNumber()));
         assertThat(response.rows()[0][2], instanceOf(String.class));
-        assertThat((Boolean) response.rows()[0][3], is(Version.CURRENT.snapshot()));
+        assertThat((Boolean) response.rows()[0][3], is(Version.CURRENT.isSnapshot()));
     }
 
     @Test

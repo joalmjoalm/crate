@@ -22,34 +22,40 @@
 package io.crate.analyze;
 
 import com.google.common.collect.ImmutableMap;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolType;
-import io.crate.sql.parser.ParsingException;
-import io.crate.test.integration.CrateUnitTest;
+import io.crate.exceptions.ConversionException;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolType;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
 import io.crate.testing.SqlExpressions;
 import io.crate.testing.T3;
-import io.crate.types.*;
-import org.apache.lucene.util.BytesRef;
+import io.crate.types.ArrayType;
+import io.crate.types.DataType;
+import io.crate.types.DataTypes;
+import io.crate.types.LongType;
+import io.crate.types.ObjectType;
+import io.crate.types.UndefinedType;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.hamcrest.Matchers;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-import static io.crate.testing.TestingHelpers.isFunction;
+import static io.crate.testing.SymbolMatchers.isFunction;
 import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.is;
 
-public class CompoundLiteralTest extends CrateUnitTest {
+public class CompoundLiteralTest extends CrateDummyClusterServiceUnitTest {
 
     private SqlExpressions expressions;
 
     @Before
     public void prepare() {
-        expressions = new SqlExpressions(T3.SOURCES);
+        expressions = new SqlExpressions(T3.sources(clusterService));
     }
 
     @SuppressWarnings("ConstantConditions")
@@ -58,19 +64,34 @@ public class CompoundLiteralTest extends CrateUnitTest {
         Symbol s = expressions.asSymbol("{}");
         assertThat(s, instanceOf(Literal.class));
         Literal l = (Literal) s;
-        assertThat(l.value(), is((Object) new HashMap<String, Object>()));
+        assertThat(l.value(), is(new HashMap<String, Object>()));
 
         Literal objectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{ident='value'}"));
         assertThat(objectLiteral.symbolType(), is(SymbolType.LITERAL));
-        assertThat(objectLiteral.valueType(), is((DataType) ObjectType.INSTANCE));
-        assertThat(objectLiteral.value(), is((Object) new MapBuilder<String, Object>().put("ident", new BytesRef("value")).map()));
+        assertThat(objectLiteral.valueType().id(), is(ObjectType.ID));
+        assertThat(objectLiteral.value(), is(new MapBuilder<String, Object>().put("ident", "value").map()));
 
         Literal multipleObjectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{\"Ident\"=123.4, a={}, ident='string'}"));
         Map<String, Object> values = (Map<String, Object>) multipleObjectLiteral.value();
         assertThat(values, is(new MapBuilder<String, Object>()
             .put("Ident", 123.4d)
             .put("a", new HashMap<String, Object>())
-            .put("ident", new BytesRef("string"))
+            .put("ident", "string")
+            .map()));
+    }
+
+    @Test
+    public void testObjectConstructionWithExpressionsAsValues() throws Exception {
+        Literal objectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{name = 1 + 2}"));
+        assertThat(objectLiteral.symbolType(), is(SymbolType.LITERAL));
+        assertThat(objectLiteral.value(), is(new MapBuilder<String, Object>().put("name", 3L).map()));
+
+        Literal nestedObjectLiteral = (Literal) expressions.normalize(expressions.asSymbol("{a = {name = concat('foo', 'bar')}}"));
+        @SuppressWarnings("unchecked") Map<String, Object> values = (Map<String, Object>) nestedObjectLiteral.value();
+        assertThat(values, is(new MapBuilder<String, Object>()
+            .put("a", new HashMap<String, Object>() {{
+                put("name", "foobar");
+            }})
             .map()));
     }
 
@@ -84,13 +105,6 @@ public class CompoundLiteralTest extends CrateUnitTest {
     }
 
     @Test
-    public void testObjectConstructionDoesNotSupportFunctionsAsValues() throws Exception {
-        expectedException.expect(ParsingException.class);
-        expectedException.expectMessage("line 1:4: mismatched input 'format' expecting '{'");
-        analyzeExpression("{a=format('%s.', 'dot')}");
-    }
-
-    @Test
     public void testObjectConstructionFailsOnDuplicateKeys() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("object contains duplicate keys");
@@ -100,54 +114,45 @@ public class CompoundLiteralTest extends CrateUnitTest {
     @Test
     public void testArrayConstructionWithOnlyLiterals() throws Exception {
         Literal emptyArray = (Literal) analyzeExpression("[]");
-        assertThat((Object[]) emptyArray.value(), is(new Object[0]));
-        assertThat(emptyArray.valueType(), is((DataType) new ArrayType(UndefinedType.INSTANCE)));
+        assertThat((List<Object>) emptyArray.value(), Matchers.empty());
+        assertThat(emptyArray.valueType(), is(new ArrayType<>(UndefinedType.INSTANCE)));
 
         Literal singleArray = (Literal) analyzeExpression("[1]");
-        assertThat(singleArray.valueType(), is((DataType) new ArrayType(LongType.INSTANCE)));
-        assertThat(((Object[]) singleArray.value()).length, is(1));
-        assertThat(((Object[]) singleArray.value())[0], is((Object) 1L));
+        assertThat(singleArray.valueType(), is(new ArrayType<>(LongType.INSTANCE)));
+        assertThat(((List<Long>) singleArray.value()), contains(1L));
 
         Literal multiArray = (Literal) analyzeExpression("[1, 2, 3]");
-        assertThat(multiArray.valueType(), is((DataType) new ArrayType(LongType.INSTANCE)));
-        assertThat(((Object[]) multiArray.value()).length, is(3));
-        assertThat((Object[]) multiArray.value(), is(new Object[]{1L, 2L, 3L}));
+        assertThat(multiArray.valueType(), is(new ArrayType<>(LongType.INSTANCE)));
+        assertThat(((List<Long>) multiArray.value()), contains(1L, 2L, 3L));
     }
 
     @Test
     public void testArrayConstructionWithParameterExpression() throws Exception {
         Symbol array = expressions.asSymbol("[1, ?]");
         assertThat(array, isFunction("_array"));
-        assertThat(((io.crate.analyze.symbol.Function) array).arguments().size(), is(2));
+        assertThat(((io.crate.expression.symbol.Function) array).arguments().size(), is(2));
     }
 
     @Test
-    public void testArrayDifferentTypes() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("All arguments to an array must have the same type. Found long and string");
+    public void testArrayDifferentTypes() {
+        expectedException.expect(ConversionException.class);
+        expectedException.expectMessage("Cannot cast 'string' to type bigint");
         analyzeExpression("[1, 'string']");
     }
 
     @Test
-    public void testArrayDifferentTypesString() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage("All arguments to an array must have the same type. Found string and long");
-        analyzeExpression("['string', 1]");
-    }
-
-    @Test
     public void testNestedArrayLiteral() throws Exception {
-        Map<String, DataType> expected = ImmutableMap.<String, DataType>builder()
+        Map<String, DataType<?>> expected = ImmutableMap.<String, DataType<?>>builder()
             .put("'string'", DataTypes.STRING)
             .put("0", DataTypes.LONG)
             .put("1.8", DataTypes.DOUBLE)
             .put("TRUE", DataTypes.BOOLEAN)
             .build();
-        for (Map.Entry<String, DataType> entry : expected.entrySet()) {
+        for (Map.Entry<String, DataType<?>> entry : expected.entrySet()) {
             Symbol nestedArraySymbol = analyzeExpression("[[" + entry.getKey() + "]]");
             assertThat(nestedArraySymbol, Matchers.instanceOf(Literal.class));
             Literal nestedArray = (Literal) nestedArraySymbol;
-            assertThat(nestedArray.valueType(), is((DataType) new ArrayType(new ArrayType(entry.getValue()))));
+            assertThat(nestedArray.valueType(), is(new ArrayType<>(new ArrayType<>(entry.getValue()))));
         }
     }
 }

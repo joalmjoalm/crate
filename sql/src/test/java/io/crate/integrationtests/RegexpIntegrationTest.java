@@ -22,12 +22,10 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.testing.UseJdbc;
 import org.junit.Test;
 
 import static org.hamcrest.core.Is.is;
 
-@UseJdbc
 public class RegexpIntegrationTest extends SQLTransportIntegrationTest {
 
     private Setup setup = new Setup(sqlExecutor);
@@ -236,9 +234,9 @@ public class RegexpIntegrationTest extends SQLTransportIntegrationTest {
         ensureGreen();
         refresh();
 
-        execute("select * from sys.shards where table_name ~ '(?i)LOCATIONS' order by table_name");
+        execute("select table_name, * from sys.shards where table_name ~ '(?i)LOCATIONS' order by table_name");
         assertThat(response.rowCount(), is(2L));
-        assertThat((String) response.rows()[0][11], is("locations"));
+        assertThat((String) response.rows()[0][0], is("locations"));
     }
 
     @Test
@@ -247,9 +245,9 @@ public class RegexpIntegrationTest extends SQLTransportIntegrationTest {
         ensureGreen();
         refresh();
 
-        execute("select * from sys.shards where table_name ~* 'LOCATIONS' order by table_name");
+        execute("select table_name, * from sys.shards where table_name ~* 'LOCATIONS' order by table_name");
         assertThat(response.rowCount(), is(2L));
-        assertThat((String) response.rows()[0][11], is("locations"));
+        assertThat((String) response.rows()[0][0], is("locations"));
     }
 
 }

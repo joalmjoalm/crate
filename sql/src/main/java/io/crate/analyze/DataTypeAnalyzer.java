@@ -22,46 +22,55 @@
 package io.crate.analyze;
 
 import io.crate.sql.tree.CollectionColumnType;
+import io.crate.sql.tree.ColumnDefinition;
 import io.crate.sql.tree.ColumnType;
 import io.crate.sql.tree.DefaultTraversalVisitor;
 import io.crate.sql.tree.ObjectColumnType;
 import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
+import io.crate.types.ObjectType;
 
 import java.util.Locale;
 
-public class DataTypeAnalyzer extends DefaultTraversalVisitor<DataType, Void> {
+public final class DataTypeAnalyzer extends DefaultTraversalVisitor<DataType<?>, Void> {
+
+    private DataTypeAnalyzer() {}
+
+    private static final DataTypeAnalyzer INSTANCE = new DataTypeAnalyzer();
+
+    public static DataType convert(ColumnType<?> columnType) {
+        return columnType.accept(INSTANCE, null);
+    }
 
     @Override
-    public DataType visitColumnType(ColumnType node, Void context) {
+    public DataType<?> visitColumnType(ColumnType<?> node, Void context) {
         String typeName = node.name();
         if (typeName == null) {
             return DataTypes.NOT_SUPPORTED;
         } else {
-            typeName = typeName.toLowerCase(Locale.ENGLISH);
-            return DataTypes.ofName(typeName);
+            return DataTypes.ofName(typeName.toLowerCase(Locale.ENGLISH));
         }
     }
 
     @Override
-    public DataType visitObjectColumnType(ObjectColumnType node, Void context) {
-        return DataTypes.OBJECT;
+    public DataType<?> visitObjectColumnType(ObjectColumnType<?> node, Void context) {
+        ObjectColumnType<?> objectColumnType = node;
+        ObjectType.Builder builder = ObjectType.builder();
+        for (ColumnDefinition<?> columnDefinition : objectColumnType.nestedColumns()) {
+            ColumnType<?> type = columnDefinition.type();
+            // can be null for generated columns, as then the type is inferred from the expression.
+            builder.setInnerType(
+                columnDefinition.ident(),
+                type == null ? DataTypes.UNDEFINED : type.accept(this, context)
+            );
+        }
+        return builder.build();
     }
 
     @Override
-    public DataType visitCollectionColumnType(CollectionColumnType node, Void context) {
-        if (node.type() == ColumnType.Type.SET) {
-            throw new UnsupportedOperationException("the SET dataType is currently not supported");
-        }
-
-        if (node.innerType().type() != ColumnType.Type.PRIMITIVE) {
-            throw new UnsupportedOperationException("Nesting ARRAY or SET types is not supported");
-        }
-
-        DataType innerType = process(node.innerType(), context);
-        return new ArrayType(innerType);
+    public DataType<?> visitCollectionColumnType(CollectionColumnType<?> node, Void context) {
+        DataType<?> innerType = node.innerType().accept(this, context);
+        return new ArrayType<>(innerType);
     }
-
-
 }

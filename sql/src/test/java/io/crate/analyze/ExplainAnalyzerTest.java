@@ -22,80 +22,76 @@
 
 package io.crate.analyze;
 
+import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.exceptions.UnsupportedFeatureException;
-import io.crate.metadata.MetaDataModule;
-import io.crate.metadata.Schemas;
-import io.crate.metadata.sys.MetaDataSysModule;
-import io.crate.metadata.table.SchemaInfo;
-import io.crate.testing.MockedClusterServiceModule;
-import org.elasticsearch.common.inject.Module;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.SQLExecutor;
 import org.hamcrest.Matchers;
-import org.junit.Rule;
+import org.junit.Before;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
-import java.util.Arrays;
-import java.util.List;
+import java.io.IOException;
 
-import static io.crate.testing.TestingHelpers.isField;
+import static io.crate.testing.SymbolMatchers.isField;
 import static org.hamcrest.Matchers.instanceOf;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
-public class ExplainAnalyzerTest extends BaseAnalyzerTest {
+public class ExplainAnalyzerTest extends CrateDummyClusterServiceUnitTest {
 
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
+    private SQLExecutor e;
 
-    static class TestMetaDataModule extends MetaDataModule {
-
-        @Override
-        protected void bindSchemas() {
-            super.bindSchemas();
-            SchemaInfo docSchemaInfo = mock(SchemaInfo.class);
-            when(docSchemaInfo.getTableInfo(TEST_PARTITIONED_TABLE_IDENT.name()))
-                .thenReturn(TEST_PARTITIONED_TABLE_INFO);
-            when(docSchemaInfo.getTableInfo(USER_TABLE_IDENT.name())).thenReturn(USER_TABLE_INFO);
-            schemaBinder.addBinding(Schemas.DEFAULT_SCHEMA_NAME).toInstance(docSchemaInfo);
-        }
-    }
-
-    @Override
-    protected List<Module> getModules() {
-        List<Module> modules = super.getModules();
-        modules.addAll(Arrays.<Module>asList(
-            new MockedClusterServiceModule(),
-            new TestMetaDataModule(),
-            new MetaDataSysModule()
-        ));
-        return modules;
+    @Before
+    public void prepare() throws IOException {
+        e = SQLExecutor.builder(clusterService).enableDefaultTables().build();
     }
 
     @Test
     public void testExplain() throws Exception {
-        ExplainAnalyzedStatement stmt = analyze("explain select id from sys.cluster");
+        ExplainAnalyzedStatement stmt = e.analyze("explain select id from sys.cluster");
         assertNotNull(stmt.statement());
-        assertThat(stmt.statement(), instanceOf(SelectAnalyzedStatement.class));
+        assertThat(stmt.statement(), instanceOf(AnalyzedRelation.class));
+        assertThat(stmt.context(), nullValue());
+    }
+
+    @Test
+    public void testAnalyzePropertyIsSetOnExplainAnalyze() {
+        ExplainAnalyzedStatement stmt = e.analyze("explain analyze select id from sys.cluster");
+        assertThat(stmt.context(), notNullValue());
+     }
+
+    @Test
+    public void testAnalyzePropertyIsReflectedInColumnName() {
+        ExplainAnalyzedStatement stmt = e.analyze("explain analyze select 1");
+        assertThat(stmt.fields(), Matchers.contains(isField("EXPLAIN ANALYZE")));
+    }
+
+    @Test
+    public void testExplainArrayComparison() throws Exception {
+        ExplainAnalyzedStatement stmt = e.analyze("explain SELECT id from sys.cluster where id = any([1,2,3])");
+        assertNotNull(stmt.statement());
+        assertThat(stmt.statement(), instanceOf(AnalyzedRelation.class));
+        assertThat(stmt.fields(), Matchers.contains(isField("EXPLAIN")));
     }
 
     @Test
     public void testExplainCopyFrom() throws Exception {
-        ExplainAnalyzedStatement stmt = analyze("explain copy users from '/tmp/*' WITH (shared=True)");
+        ExplainAnalyzedStatement stmt = e.analyze("explain copy users from '/tmp/*' WITH (shared=True)");
         assertThat(stmt.statement(), instanceOf(CopyFromAnalyzedStatement.class));
-        assertThat(stmt.fields(), Matchers.contains(isField("EXPLAIN COPY \"users\" FROM '/tmp/*' WITH (\n   shared = true\n)")));
+        assertThat(stmt.fields(), Matchers.contains(isField("EXPLAIN")));
     }
 
     @Test
     public void testExplainRefreshUnsupported() throws Exception {
         expectedException.expect(UnsupportedFeatureException.class);
         expectedException.expectMessage("EXPLAIN is not supported for RefreshStatement");
-        analyze("explain refresh table parted");
+        e.analyze("explain refresh table parted");
     }
 
     @Test
     public void testExplainOptimizeUnsupported() throws Exception {
         expectedException.expect(UnsupportedFeatureException.class);
         expectedException.expectMessage("EXPLAIN is not supported for OptimizeStatement");
-        analyze("explain optimize table parted");
+        e.analyze("explain optimize table parted");
     }
 }

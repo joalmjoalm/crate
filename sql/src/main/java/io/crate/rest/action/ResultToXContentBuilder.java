@@ -22,46 +22,43 @@
 
 package io.crate.rest.action;
 
-import io.crate.analyze.symbol.Field;
-import io.crate.core.collections.Row;
-import io.crate.types.CollectionType;
+import io.crate.data.Row;
+import io.crate.expression.symbol.Field;
+import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentBuilderString;
-import org.elasticsearch.rest.RestChannel;
 
 import java.io.IOException;
 import java.util.List;
 
 class ResultToXContentBuilder {
 
-    private long rowCount;
 
     static final class FIELDS {
-        static final XContentBuilderString RESULTS = new XContentBuilderString("results");
-        static final XContentBuilderString COLS = new XContentBuilderString("cols");
-        static final XContentBuilderString COLUMN_TYPES = new XContentBuilderString("colTypes");
-        static final XContentBuilderString ROWS = new XContentBuilderString("rows");
-        static final XContentBuilderString ROW_COUNT = new XContentBuilderString("rowcount");
-        static final XContentBuilderString DURATION = new XContentBuilderString("duration");
-        static final XContentBuilderString ERROR_MESSAGE = new XContentBuilderString("error_message");
+        static final String RESULTS = "results";
+        static final String COLS = "cols";
+        static final String COLUMN_TYPES = "col_types";
+        static final String ROWS = "rows";
+        static final String ROW_COUNT = "rowcount";
+        static final String DURATION = "duration";
+        static final String ERROR_MESSAGE = "error_message";
     }
 
     private final XContentBuilder builder;
 
-    private ResultToXContentBuilder(RestChannel channel) throws IOException {
-        builder = channel.newBuilder();
+    private ResultToXContentBuilder(XContentBuilder builder) throws IOException {
+        this.builder = builder;
         builder.startObject();
     }
 
-    static ResultToXContentBuilder builder(RestChannel channel) throws IOException {
-        return new ResultToXContentBuilder(channel);
+    static ResultToXContentBuilder builder(XContentBuilder builder) throws IOException {
+        return new ResultToXContentBuilder(builder);
     }
 
     ResultToXContentBuilder cols(List<Field> fields) throws IOException {
         builder.startArray(FIELDS.COLS);
         for (Field field : fields) {
-            builder.value(field.path().outputName());
+            builder.value(field.path().sqlFqn());
         }
         builder.endArray();
         return this;
@@ -77,10 +74,10 @@ class ResultToXContentBuilder {
     }
 
     private void toXContentNestedDataType(XContentBuilder builder, DataType dataType) throws IOException {
-        if (dataType instanceof CollectionType) {
+        if (dataType instanceof ArrayType) {
             builder.startArray();
             builder.value(dataType.id());
-            toXContentNestedDataType(builder, ((CollectionType) dataType).innerType());
+            toXContentNestedDataType(builder, ((ArrayType) dataType).innerType());
             builder.endArray();
         } else {
             builder.value(dataType.id());
@@ -96,7 +93,6 @@ class ResultToXContentBuilder {
      * startRows() must be called before first setNextRow()
      */
     ResultToXContentBuilder startRows() throws IOException {
-        rowCount = 0;
         builder.startArray(FIELDS.ROWS);
         return this;
     }
@@ -106,7 +102,6 @@ class ResultToXContentBuilder {
      */
     ResultToXContentBuilder finishRows() throws IOException {
         builder.endArray();
-        rowCount(rowCount);
         return this;
     }
 
@@ -122,7 +117,6 @@ class ResultToXContentBuilder {
             builder.value(row.get(j));
         }
         builder.endArray();
-        rowCount++;
         return this;
     }
 

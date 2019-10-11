@@ -21,24 +21,32 @@
 
 package io.crate.analyze.where;
 
-import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import io.crate.analyze.Id;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.ValueSymbolVisitor;
-import org.apache.lucene.util.BytesRef;
+import io.crate.analyze.SymbolEvaluator;
+import io.crate.data.Row;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.Functions;
+import io.crate.metadata.TransactionContext;
+import io.crate.planner.ExplainLeaf;
+import io.crate.planner.operators.SubQueryResults;
+import io.crate.types.DataTypes;
+import io.crate.types.LongType;
 
 import javax.annotation.Nullable;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class DocKeys implements Iterable<DocKeys.DocKey> {
 
     private final int width;
-    private final Function<List<BytesRef>, String> idFunction;
+    private final Function<List<String>, String> idFunction;
+    private final boolean withSequenceVersioning;
     private int clusteredByIdx;
     private final boolean withVersions;
     private final List<List<Symbol>> docKeys;
@@ -47,77 +55,84 @@ public class DocKeys implements Iterable<DocKeys.DocKey> {
     public class DocKey {
 
         private final List<Symbol> key;
-        private String id;
 
         private DocKey(int pos) {
             key = docKeys.get(pos);
         }
 
-        public Optional<Long> version() {
+        public String getId(TransactionContext txnCtx, Functions functions, Row params, SubQueryResults subQueryResults) {
+            return idFunction.apply(
+                Lists.transform(
+                    key.subList(0, width),
+                    s -> DataTypes.STRING.value(SymbolEvaluator.evaluate(txnCtx, functions, s, params, subQueryResults))
+                ));
+        }
+
+        public Optional<Long> version(TransactionContext txnCtx, Functions functions, Row params, SubQueryResults subQueryResults) {
             if (withVersions && key.get(width) != null) {
-                return Optional.of((Long) ((Literal) key.get(width)).value());
+                Object val = SymbolEvaluator.evaluate(txnCtx, functions, key.get(width), params, subQueryResults);
+                return Optional.of(LongType.INSTANCE.value(val));
             }
-            return Optional.absent();
+            return Optional.empty();
         }
 
-        public String routing() {
-            if (clusteredByIdx >= 0) {
-                return ValueSymbolVisitor.STRING.process(key.get(clusteredByIdx));
-            } else {
-                return id();
+        public Optional<Long> sequenceNo(TransactionContext txnCtx, Functions functions, Row params, SubQueryResults subQueryResults) {
+            if (withSequenceVersioning && key.get(width) != null) {
+                Object val = SymbolEvaluator.evaluate(txnCtx, functions, key.get(width), params, subQueryResults);
+                return Optional.of(LongType.INSTANCE.value(val));
             }
-
+            return Optional.empty();
         }
 
-        public Optional<List<BytesRef>> partitionValues() {
-            if (partitionIdx == null || partitionIdx.isEmpty()) {
-                return Optional.absent();
+        public Optional<Long> primaryTerm(TransactionContext txnCtx, Functions functions, Row params, SubQueryResults subQueryResults) {
+            if (withSequenceVersioning && key.get(width + 1) != null) {
+                Object val = SymbolEvaluator.evaluate(txnCtx, functions, key.get(width + 1), params, subQueryResults);
+                return Optional.of(LongType.INSTANCE.value(val));
             }
-            List<BytesRef> values = Lists.transform(partitionIdx, new Function<Integer, BytesRef>() {
-                @Nullable
-                @Override
-                public BytesRef apply(Integer input) {
-                    return ValueSymbolVisitor.BYTES_REF.process(key.get(input));
-                }
-            });
-            return Optional.of(values);
-        }
-
-        public String id() {
-            if (id == null) {
-                id = idFunction.apply(pkValues(key));
-            }
-            return id;
-        }
-
-        private List<BytesRef> pkValues(List<Symbol> key) {
-            return Lists.transform(key.subList(0, width), ValueSymbolVisitor.BYTES_REF.function);
+            return Optional.empty();
         }
 
         public List<Symbol> values() {
             return key;
         }
+
+        public List<String> getPartitionValues(TransactionContext txnCtx, Functions functions, Row params, SubQueryResults subQueryResults) {
+            if (partitionIdx == null || partitionIdx.isEmpty()) {
+                return Collections.emptyList();
+            }
+            return Lists.transform(
+                partitionIdx,
+                pIdx -> DataTypes.STRING.value(SymbolEvaluator.evaluate(txnCtx, functions, key.get(pIdx), params, subQueryResults)));
+
+        }
+
+        public String getRouting(TransactionContext txnCtx, Functions functions, Row params, SubQueryResults subQueryResults) {
+            if (clusteredByIdx >= 0) {
+                return SymbolEvaluator.evaluate(txnCtx, functions, key.get(clusteredByIdx), params, subQueryResults).toString();
+            }
+            return getId(txnCtx, functions, params, subQueryResults);
+        }
     }
 
     public DocKeys(List<List<Symbol>> docKeys,
                    boolean withVersions,
+                   boolean withSequenceVersioning,
                    int clusteredByIdx,
                    @Nullable List<Integer> partitionIdx) {
         this.partitionIdx = partitionIdx;
-        assert ((docKeys != null) && (!docKeys.isEmpty()));
+        assert docKeys != null && !docKeys.isEmpty() : "docKeys must not be null nor empty";
         if (withVersions) {
             this.width = docKeys.get(0).size() - 1;
+        } else if (withSequenceVersioning) {
+            this.width = docKeys.get(0).size() - 2;
         } else {
             this.width = docKeys.get(0).size();
         }
         this.withVersions = withVersions;
+        this.withSequenceVersioning = withSequenceVersioning;
         this.docKeys = docKeys;
         this.clusteredByIdx = clusteredByIdx;
         this.idFunction = Id.compile(width, clusteredByIdx);
-    }
-
-    public boolean withVersions() {
-        return withVersions;
     }
 
     public DocKey getOnlyKey() {
@@ -146,8 +161,17 @@ public class DocKeys implements Iterable<DocKeys.DocKey> {
 
             @Override
             public void remove() {
-                throw new UnsupportedOperationException();
+                throw new UnsupportedOperationException("remove is not supported for " +
+                                                        DocKeys.class.getSimpleName() + "$iterator");
             }
         };
+    }
+
+    @Override
+    public String toString() {
+        return "DocKeys{" + docKeys.stream()
+            .map(ExplainLeaf::printList)
+            .sorted()
+            .collect(Collectors.joining("; ")) + '}';
     }
 }

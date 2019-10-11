@@ -24,11 +24,9 @@ package io.crate.integrationtests;
 import io.crate.Constants;
 import io.crate.action.sql.SQLActionException;
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.table.ColumnPolicy;
+import io.crate.metadata.RelationName;
+import io.crate.sql.tree.ColumnPolicy;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
-import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.action.admin.indices.template.get.GetIndexTemplatesResponse;
 import org.elasticsearch.cluster.metadata.IndexTemplateMetaData;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
@@ -46,12 +44,15 @@ import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-import static org.hamcrest.Matchers.*;
+import static io.crate.metadata.table.ColumnPolicies.decodeMappingValue;
+import static org.hamcrest.Matchers.arrayContaining;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
 
 @ESIntegTestCase.ClusterScope(numDataNodes = 1)
-@UseJdbc
 public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
 
     private String copyFilePath = Paths.get(getClass().getResource("/essetup/data/copy").toURI()).toUri().toString();
@@ -59,14 +60,18 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
     public ColumnPolicyIntegrationTest() throws URISyntaxException {
     }
 
-    public MappingMetaData getMappingMetadata(String index) {
+    private MappingMetaData getMappingMetadata(String index) {
         return clusterService().state().metaData().indices()
             .get(index)
             .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
     }
 
-    public Map<String, Object> getSourceMap(String index) throws IOException {
-        return getMappingMetadata(index).getSourceAsMap();
+    private Map<String, Object> getSourceMap(String index) throws IOException {
+        return getMappingMetadata(getFqn(index)).getSourceAsMap();
+    }
+
+    private Map<String, Object> getSourceMap(String schema, String index) throws IOException {
+        return getMappingMetadata(getFqn(schema, index)).getSourceAsMap();
     }
 
     @Test
@@ -140,10 +145,10 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         execute("select * from dynamic_table order by id");
         assertThat(response.rowCount(), is(2L));
         assertThat(response.cols().length, is(3));
-        assertThat(response.cols(), is(arrayContaining("boo", "id", "name")));
+        assertThat(response.cols(), is(arrayContaining("id", "name", "boo")));
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "NULL| 1| Ford\n" +
-            "true| 2| Trillian\n"));
+            "1| Ford| NULL\n" +
+            "2| Trillian| true\n"));
     }
 
     @Test
@@ -157,8 +162,8 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("dynamic_table", "new", "meta");
         Map<String, Object> sourceMap = getSourceMap("dynamic_table");
         assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.type")), is("array"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.inner.type")), is("string"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.meta.type")), is("string"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.inner.type")), is("keyword"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.meta.type")), is("keyword"));
     }
 
     @Test
@@ -172,17 +177,17 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
 
         Map<String, Object> sourceMap = getSourceMap("dynamic_table");
         assertThat(String.valueOf(nestedValue(sourceMap, "properties.person.properties.addresses.type")), is("array"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.person.properties.name.type")), is("string"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.person.properties.addresses.inner.properties.city.type")), is("string"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.person.properties.addresses.inner.properties.country.type")), is("string"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.person.properties.name.type")), is("keyword"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.person.properties.addresses.inner.properties.city.type")), is("keyword"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.person.properties.addresses.inner.properties.country.type")), is("keyword"));
 
         execute("select person['name'], person['addresses']['city'] from dynamic_table ");
         assertEquals(1L, response.rowCount());
         assertArrayEquals(new String[]{"person['name']", "person['addresses']['city']"},
             response.cols());
-        assertArrayEquals(new Object[]{"Ford", new Object[]{"West Country"}},
-            response.rows()[0]
-        );
+
+        assertThat(response.rows()[0][0], is("Ford"));
+        assertThat((List<Object>) response.rows()[0][1], Matchers.contains("West Country"));
     }
 
     @Test
@@ -200,10 +205,10 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("dynamic_table", "new");
         Map<String, Object> sourceMap = getSourceMap("dynamic_table");
         assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.properties.a.type")), is("array"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.properties.a.inner.type")), is("string"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.properties.a.inner.type")), is("keyword"));
         assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.properties.nest.properties.a.type")), is("array"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.properties.nest.properties.a.inner.type")), is("string"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.meta.type")), is("string"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.new.properties.nest.properties.a.inner.type")), is("keyword"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.meta.type")), is("keyword"));
     }
 
     @Test
@@ -217,10 +222,10 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         execute("insert into c.dynamic_table (meta) values({meta={a=['a','b']}})");
         execute("refresh table c.dynamic_table");
         execute("insert into c.dynamic_table (meta) values({meta={a=['c','d']}})");
-        waitForMappingUpdateOnAll(new TableIdent("c", "dynamic_table"), "meta.meta.a");
-        Map<String, Object> sourceMap = getSourceMap("c.dynamic_table");
+        waitForMappingUpdateOnAll(new RelationName("c", "dynamic_table"), "meta.meta.a");
+        Map<String, Object> sourceMap = getSourceMap("c", "dynamic_table");
         assertThat(String.valueOf(nestedValue(sourceMap, "properties.meta.properties.meta.properties.a.type")), is("array"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.meta.properties.meta.properties.a.inner.type")), is("string"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.meta.properties.meta.properties.a.inner.type")), is("keyword"));
     }
 
     @Test
@@ -236,9 +241,9 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("dynamic_table", "my_object.a", "my_object.b");
         Map<String, Object> sourceMap = getSourceMap("dynamic_table");
         assertThat(String.valueOf(nestedValue(sourceMap, "properties.my_object.properties.a.type")), is("array"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.my_object.properties.a.inner.type")), is("string"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.my_object.properties.a.inner.type")), is("keyword"));
         assertThat(String.valueOf(nestedValue(sourceMap, "properties.my_object.properties.b.type")), is("array"));
-        assertThat(String.valueOf(nestedValue(sourceMap, "properties.my_object.properties.b.inner.type")), is("string"));
+        assertThat(String.valueOf(nestedValue(sourceMap, "properties.my_object.properties.b.inner.type")), is("keyword"));
     }
 
     @Test
@@ -311,8 +316,8 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("dynamic_table", "boo");
         execute("select * from dynamic_table");
         assertThat(response.rowCount(), is(1L));
-        assertThat(response.cols(), is(arrayContaining("boo", "id", "name")));
-        assertThat(response.rows()[0], is(Matchers.<Object>arrayContaining(true, 1, "Trillian")));
+        assertThat(response.cols(), is(arrayContaining("id", "name", "boo")));
+        assertThat(response.rows()[0], is(Matchers.arrayContaining(1, "Trillian", true)));
     }
 
     @Test
@@ -320,7 +325,7 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         execute("create table dynamic_table (" +
                 "  id integer primary key, " +
                 "  score double" +
-                ") with (number_of_replicas=0)");
+                ") with (number_of_replicas=0, column_policy='dynamic')");
         ensureYellow();
         execute("insert into dynamic_table (id, score) values (1, 42.24)");
         execute("refresh table dynamic_table");
@@ -336,10 +341,10 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("dynamic_table", "good");
         execute("select * from dynamic_table order by id");
         assertThat(response.rowCount(), is(2L));
-        assertThat(response.cols(), is(arrayContaining("good", "id", "score")));
+        assertThat(response.cols(), is(arrayContaining("id", "score", "good")));
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "NULL| 1| 42.24\n" +
-            "false| 2| -0.01\n"));
+            "1| 42.24| NULL\n" +
+            "2| -0.01| false\n"));
     }
 
     @Test
@@ -347,7 +352,7 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         execute("create table dynamic_table (" +
                 "  id integer primary key, " +
                 "  score double" +
-                ") with (number_of_replicas=0)");
+                ") with (number_of_replicas=0, column_policy='dynamic')");
         ensureYellow();
         execute("insert into dynamic_table (id, score) values (1, 4656234.345)");
         execute("refresh table dynamic_table");
@@ -355,7 +360,7 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         execute("select * from dynamic_table");
         assertThat(response.rowCount(), is(1L));
         assertThat(response.cols(), is(arrayContaining("id", "score")));
-        assertThat(response.rows()[0], is(Matchers.<Object>arrayContaining(1, 4656234.345D)));
+        assertThat(response.rows()[0], is(Matchers.arrayContaining(1, 4656234.345D)));
 
         execute("update dynamic_table set name='Trillian', good=true where score > 0.0");
         execute("refresh table dynamic_table");
@@ -363,8 +368,8 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("dynamic_table", "name");
         execute("select * from dynamic_table");
         assertThat(response.rowCount(), is(1L));
-        assertThat(response.cols(), is(arrayContaining("good", "id", "name", "score")));
-        assertThat(response.rows()[0], is(Matchers.<Object>arrayContaining(true, 1, "Trillian", 4656234.345D)));
+        assertThat(response.cols(), is(arrayContaining("id", "score", "name", "good")));
+        assertThat(response.rows()[0], is(Matchers.arrayContaining(1, 4656234.345D, "Trillian", true)));
     }
 
     @Test
@@ -377,25 +382,25 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         ensureYellow();
 
         GetIndexTemplatesResponse response = client().admin().indices()
-            .prepareGetTemplates(PartitionName.templateName(null, "numbers"))
+            .prepareGetTemplates(PartitionName.templateName(sqlExecutor.getCurrentSchema(), "numbers"))
             .execute().actionGet();
         assertThat(response.getIndexTemplates().size(), is(1));
         IndexTemplateMetaData template = response.getIndexTemplates().get(0);
         CompressedXContent mappingStr = template.mappings().get(Constants.DEFAULT_MAPPING_TYPE);
         assertThat(mappingStr, is(notNullValue()));
-        Tuple<XContentType, Map<String, Object>> typeAndMap = XContentHelper.convertToMap(mappingStr.compressedReference(), false);
+        Tuple<XContentType, Map<String, Object>> typeAndMap =
+            XContentHelper.convertToMap(mappingStr.compressedReference(), false, XContentType.JSON);
         @SuppressWarnings("unchecked")
         Map<String, Object> mapping = (Map<String, Object>) typeAndMap.v2().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(mapping.get("dynamic")), is(ColumnPolicy.STRICT.value()));
+        assertThat(decodeMappingValue(mapping.get("dynamic")), is(ColumnPolicy.STRICT));
 
         execute("insert into numbers (num, odd, prime) values (?, ?, ?)",
             new Object[]{6, true, false});
         execute("refresh table numbers");
 
-        MappingMetaData partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("numbers", Arrays.asList(new BytesRef("true"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(ColumnPolicy.STRICT.value()));
+        Map<String, Object> sourceMap = getSourceMap(
+            new PartitionName(new RelationName("doc", "numbers"), Arrays.asList("true")).asIndexName());
+        assertThat(decodeMappingValue(sourceMap.get("dynamic")), is(ColumnPolicy.STRICT));
 
         expectedException.expect(SQLActionException.class);
         expectedException.expectMessage("Column perfect unknown");
@@ -413,7 +418,7 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         ensureYellow();
 
         GetIndexTemplatesResponse response = client().admin().indices()
-            .prepareGetTemplates(PartitionName.templateName(null, "numbers"))
+            .prepareGetTemplates(PartitionName.templateName(sqlExecutor.getCurrentSchema(), "numbers"))
             .execute().actionGet();
         assertThat(response.getIndexTemplates().size(), is(1));
         IndexTemplateMetaData template = response.getIndexTemplates().get(0);
@@ -422,16 +427,15 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         Tuple<XContentType, Map<String, Object>> typeAndMap = XContentHelper.convertToMap(mappingStr.compressedReference(), false);
         @SuppressWarnings("unchecked")
         Map<String, Object> mapping = (Map<String, Object>) typeAndMap.v2().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(mapping.get("dynamic")), is(ColumnPolicy.STRICT.value()));
+        assertThat(decodeMappingValue(mapping.get("dynamic")), is(ColumnPolicy.STRICT));
 
         execute("insert into numbers (num, odd, prime) values (?, ?, ?)",
             new Object[]{6, true, false});
         execute("refresh table numbers");
 
-        MappingMetaData partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("numbers", Arrays.asList(new BytesRef("true"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(ColumnPolicy.STRICT.value()));
+        Map<String, Object> sourceMap = getSourceMap(
+            new PartitionName(new RelationName("doc", "numbers"), Arrays.asList("true")).asIndexName());
+        assertThat(decodeMappingValue(sourceMap.get("dynamic")), is(ColumnPolicy.STRICT));
 
         expectedException.expect(SQLActionException.class);
         expectedException.expectMessage("Column perfect unknown");
@@ -449,7 +453,7 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         ensureYellow();
 
         GetIndexTemplatesResponse templateResponse = client().admin().indices()
-            .prepareGetTemplates(PartitionName.templateName(null, "numbers"))
+            .prepareGetTemplates(PartitionName.templateName(sqlExecutor.getCurrentSchema(), "numbers"))
             .execute().actionGet();
         assertThat(templateResponse.getIndexTemplates().size(), is(1));
         IndexTemplateMetaData template = templateResponse.getIndexTemplates().get(0);
@@ -464,10 +468,9 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
             new Object[]{6, true, false});
         execute("refresh table numbers");
 
-        MappingMetaData partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("numbers", Collections.singletonList(new BytesRef("true"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is("true"));
+        Map<String, Object> sourceMap = getSourceMap(
+            new PartitionName(new RelationName("doc", "numbers"), Collections.singletonList("true")).asIndexName());
+        assertThat(String.valueOf(sourceMap.get("dynamic")), is("true"));
 
         execute("insert into numbers (num, odd, prime, perfect) values (?, ?, ?, ?)",
             new Object[]{28, true, false, true});
@@ -477,10 +480,10 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("numbers", "perfect");
         execute("select * from numbers order by num");
         assertThat(response.rowCount(), is(2L));
-        assertThat(response.cols(), arrayContaining("num", "odd", "perfect", "prime"));
+        assertThat(response.cols(), arrayContaining("num", "odd", "prime", "perfect"));
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "6| true| NULL| false\n" +
-            "28| true| true| false\n"));
+            "6| true| false| NULL\n" +
+            "28| true| false| true\n"));
 
         execute("update numbers set prime=true, changed='2014-10-23T10:20', author='troll' where num=28");
         assertThat(response.rowCount(), is(1L));
@@ -522,18 +525,16 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
                 "  score double" +
                 ") with (number_of_replicas=0)");
         ensureYellow();
-        execute("alter table dynamic_table set (column_policy = 'strict')");
+        execute("alter table dynamic_table set (column_policy = 'dynamic')");
         waitNoPendingTasksOnAll();
-        MappingMetaData partitionMetaData = clusterService().state().metaData().indices()
-            .get("dynamic_table")
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(ColumnPolicy.STRICT.value()));
+        assertThat(
+            decodeMappingValue(getSourceMap("dynamic_table").get("dynamic")),
+            is(ColumnPolicy.DYNAMIC));
         execute("alter table dynamic_table reset (column_policy)");
         waitNoPendingTasksOnAll();
-        partitionMetaData = clusterService().state().metaData().indices()
-            .get("dynamic_table")
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(String.valueOf(ColumnPolicy.DYNAMIC.mappingValue())));
+        assertThat(
+            decodeMappingValue(getSourceMap("dynamic_table").get("dynamic")),
+            is(ColumnPolicy.STRICT));
     }
 
     @Test
@@ -545,18 +546,16 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         ensureYellow();
         execute("insert into dynamic_table (id, score) values (1, 10)");
         execute("refresh table dynamic_table");
-        execute("alter table dynamic_table set (column_policy = 'strict')");
+        execute("alter table dynamic_table set (column_policy = 'dynamic')");
         waitNoPendingTasksOnAll();
-        MappingMetaData partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("dynamic_table", Arrays.asList(new BytesRef("10.0"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(ColumnPolicy.STRICT.value()));
+        String indexName = new PartitionName(
+            new RelationName("doc", "dynamic_table"), Arrays.asList("10.0")).asIndexName();
+        Map<String, Object> sourceMap = getSourceMap(indexName);
+        assertThat(decodeMappingValue(sourceMap.get("dynamic")), is(ColumnPolicy.DYNAMIC));
         execute("alter table dynamic_table reset (column_policy)");
         waitNoPendingTasksOnAll();
-        partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("dynamic_table", Arrays.asList(new BytesRef("10.0"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(String.valueOf(ColumnPolicy.DYNAMIC.mappingValue())));
+        sourceMap = getSourceMap(indexName);
+        assertThat(decodeMappingValue(sourceMap.get("dynamic")), is(ColumnPolicy.STRICT));
     }
 
     @Test
@@ -580,36 +579,34 @@ public class ColumnPolicyIntegrationTest extends SQLTransportIntegrationTest {
         execute("refresh table dynamic_table");
         ensureYellow();
         GetIndexTemplatesResponse response = client().admin().indices()
-            .prepareGetTemplates(PartitionName.templateName(null, "dynamic_table"))
+            .prepareGetTemplates(PartitionName.templateName(sqlExecutor.getCurrentSchema(), "dynamic_table"))
             .execute().actionGet();
         assertThat(response.getIndexTemplates().size(), is(1));
         IndexTemplateMetaData template = response.getIndexTemplates().get(0);
         CompressedXContent mappingStr = template.mappings().get(Constants.DEFAULT_MAPPING_TYPE);
         assertThat(mappingStr, is(notNullValue()));
-        Tuple<XContentType, Map<String, Object>> typeAndMap = XContentHelper.convertToMap(mappingStr.compressedReference(), false);
+        Tuple<XContentType, Map<String, Object>> typeAndMap =
+            XContentHelper.convertToMap(mappingStr.compressedReference(), false, XContentType.JSON);
         @SuppressWarnings("unchecked")
         Map<String, Object> mapping = (Map<String, Object>) typeAndMap.v2().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(mapping.get("dynamic")), is(String.valueOf(ColumnPolicy.DYNAMIC.mappingValue())));
+        assertThat(decodeMappingValue(mapping.get("dynamic")), is(ColumnPolicy.DYNAMIC));
 
         execute("insert into dynamic_table (id, score, new_col) values (?, ?, ?)",
             new Object[]{6, 3, "hello"});
         execute("refresh table dynamic_table");
         ensureYellow();
 
-        MappingMetaData partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("dynamic_table", Arrays.asList(new BytesRef("10.0"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(String.valueOf(ColumnPolicy.DYNAMIC.mappingValue())));
+        Map<String, Object> sourceMap = getSourceMap(
+            new PartitionName(new RelationName("doc", "dynamic_table"), Arrays.asList("10.0")).asIndexName());
+        assertThat(decodeMappingValue(sourceMap.get("dynamic")), is(ColumnPolicy.DYNAMIC));
 
-        partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("dynamic_table", Arrays.asList(new BytesRef("5.0"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(String.valueOf(ColumnPolicy.DYNAMIC.mappingValue())));
+        sourceMap = getSourceMap(new PartitionName(
+            new RelationName("doc", "dynamic_table"), Arrays.asList("5.0")).asIndexName());
+        assertThat(decodeMappingValue(sourceMap.get("dynamic")), is(ColumnPolicy.DYNAMIC));
 
-        partitionMetaData = clusterService().state().metaData().indices()
-            .get(new PartitionName("dynamic_table", Arrays.asList(new BytesRef("3.0"))).asIndexName())
-            .getMappings().get(Constants.DEFAULT_MAPPING_TYPE);
-        assertThat(String.valueOf(partitionMetaData.getSourceAsMap().get("dynamic")), is(String.valueOf(ColumnPolicy.DYNAMIC.mappingValue())));
+        sourceMap = getSourceMap(new PartitionName(
+            new RelationName("doc", "dynamic_table"), Arrays.asList("3.0")).asIndexName());
+        assertThat(decodeMappingValue(sourceMap.get("dynamic")), is(ColumnPolicy.DYNAMIC));
     }
 
 }

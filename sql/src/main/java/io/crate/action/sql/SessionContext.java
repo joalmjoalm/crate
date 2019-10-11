@@ -22,35 +22,73 @@
 
 package io.crate.action.sql;
 
-import javax.annotation.Nullable;
+import io.crate.auth.user.User;
+import io.crate.metadata.SearchPath;
+
 import java.util.Set;
+
+import static io.crate.metadata.SearchPath.createSearchPathFrom;
+import static io.crate.metadata.SearchPath.pathWithPGCatalogAndDoc;
+import static java.util.Objects.requireNonNull;
 
 public class SessionContext {
 
-    public static final SessionContext SYSTEM_SESSION = new SessionContext(0, Option.NONE, null);
-
-    private final int defaultLimit;
     private final Set<Option> options;
+    private final User user;
 
-    @Nullable
-    private final String defaultSchema;
+    private SearchPath searchPath;
+    private boolean hashJoinEnabled = true;
 
-    public SessionContext(int defaultLimit, Set<Option> options, @Nullable String defaultSchema ) {
-        this.defaultLimit = defaultLimit;
+    /**
+     * Creates a new SessionContext suitable to use as system SessionContext
+     */
+    public static SessionContext systemSessionContext() {
+        return new SessionContext(Option.NONE, User.CRATE_USER);
+    }
+
+    public SessionContext(Set<Option> options, User user, String... searchPath) {
         this.options = options;
-        this.defaultSchema = defaultSchema;
+        this.user = requireNonNull(user, "User is required");
+        this.searchPath = createSearchPathFrom(searchPath);
+    }
+
+    /**
+     * Reverts the schema to the built-in default.
+     */
+    public void resetSchema() {
+        searchPath = pathWithPGCatalogAndDoc();
     }
 
     public Set<Option> options() {
         return options;
     }
 
-    @Nullable
-    public String defaultSchema() {
-        return defaultSchema;
+    public SearchPath searchPath() {
+        return searchPath;
     }
 
-    public int defaultLimit() {
-        return defaultLimit;
+    public void setSearchPath(SearchPath searchPath) {
+        this.searchPath = searchPath;
+    }
+
+    public void setSearchPath(String... schemas) {
+        this.searchPath = createSearchPathFrom(schemas);
+    }
+
+    public boolean isHashJoinEnabled() {
+        return hashJoinEnabled;
+    }
+
+    public void setHashJoinEnabled(boolean hashJoinEnabled) {
+        this.hashJoinEnabled = hashJoinEnabled;
+    }
+
+    public User user() {
+        return user;
+    }
+
+    public void resetToDefaults() {
+        resetSchema();
+        hashJoinEnabled = true;
     }
 }

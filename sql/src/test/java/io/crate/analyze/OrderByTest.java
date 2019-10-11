@@ -22,49 +22,40 @@
 package io.crate.analyze;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.analyze.symbol.Symbol;
+import io.crate.expression.symbol.Symbol;
 import io.crate.metadata.Reference;
 import io.crate.metadata.ReferenceIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.junit.Test;
 
-import static io.crate.testing.TestingHelpers.isSQL;
 import static org.hamcrest.Matchers.is;
 
 public class OrderByTest extends CrateUnitTest {
 
-    private static final TableIdent TI = new TableIdent("doc", "people");
+    private static final RelationName TI = new RelationName("doc", "people");
 
     private Reference ref(String name) {
-        return new Reference(new ReferenceIdent(TI, name), RowGranularity.DOC, DataTypes.STRING);
+        return new Reference(new ReferenceIdent(TI, name), RowGranularity.DOC, DataTypes.STRING, null, null);
     }
 
     @Test
     public void testStreaming() throws Exception {
-        OrderBy orderBy = new OrderBy(ImmutableList.<Symbol>of(ref("name")), new boolean[]{true}, new Boolean[]{true});
+        OrderBy orderBy = new OrderBy(ImmutableList.<Symbol>of(ref("name")), new boolean[]{true}, new boolean[]{true});
         BytesStreamOutput out = new BytesStreamOutput();
         orderBy.writeTo(out);
 
-        StreamInput in = StreamInput.wrap(out.bytes());
-        OrderBy orderBy2 = OrderBy.fromStream(in);
+        StreamInput in = out.bytes().streamInput();
+        OrderBy orderBy2 = new OrderBy(in);
 
         assertEquals(orderBy.orderBySymbols(), orderBy2.orderBySymbols());
         assertThat(orderBy2.reverseFlags().length, is(1));
         assertThat(orderBy2.reverseFlags()[0], is(true));
         assertThat(orderBy2.nullsFirst().length, is(1));
         assertThat(orderBy2.nullsFirst()[0], is(true));
-    }
-
-    @Test
-    public void testSubset() throws Exception {
-        OrderBy orderBy = new OrderBy(ImmutableList.<Symbol>of(
-            ref("a"), ref("b"), ref("c")), new boolean[]{true, false, true}, new Boolean[]{true, null, false});
-        assertThat(orderBy.subset(ImmutableList.of(0, 2)), isSQL("doc.people.a DESC NULLS FIRST, doc.people.c DESC NULLS LAST"));
-        assertThat(orderBy.subset(ImmutableList.of(1)), isSQL("doc.people.b"));
     }
 }

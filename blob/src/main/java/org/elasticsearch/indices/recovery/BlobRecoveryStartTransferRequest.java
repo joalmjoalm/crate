@@ -31,21 +31,18 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class BlobRecoveryStartTransferRequest extends BlobRecoveryRequest {
 
-    private static final AtomicLong transferIdGenerator = new AtomicLong();
-    private String path;
-    private BytesReference content;
-    private long size;
-    private long transferId;
-
-    public BlobRecoveryStartTransferRequest() {
-    }
+    private static final AtomicLong TRANSFER_ID_GENERATOR = new AtomicLong();
+    private final String path;
+    private final BytesReference content;
+    private final long size;
+    private final long transferId;
 
     public BlobRecoveryStartTransferRequest(long recoveryId, String path, BytesArray content, long size) {
         super(recoveryId);
         this.path = path;
         this.content = content;
         this.size = size;
-        this.transferId = transferIdGenerator.incrementAndGet();
+        this.transferId = TRANSFER_ID_GENERATOR.incrementAndGet();
     }
 
     public String path() {
@@ -64,9 +61,8 @@ public class BlobRecoveryStartTransferRequest extends BlobRecoveryRequest {
         return transferId;
     }
 
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
+    public BlobRecoveryStartTransferRequest(StreamInput in) throws IOException {
+        super(in);
         path = in.readString();
         content = in.readBytesReference();
         size = in.readVLong();

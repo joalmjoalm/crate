@@ -21,23 +21,34 @@
 
 package io.crate.analyze.expressions;
 
-import io.crate.core.collections.Row;
+import io.crate.data.Row;
 import io.crate.sql.ExpressionFormatter;
-import io.crate.sql.tree.*;
-import org.elasticsearch.common.lucene.BytesRefs;
+import io.crate.sql.tree.ArrayLiteral;
+import io.crate.sql.tree.AstVisitor;
+import io.crate.sql.tree.BooleanLiteral;
+import io.crate.sql.tree.DoubleLiteral;
+import io.crate.sql.tree.LongLiteral;
+import io.crate.sql.tree.NegativeExpression;
+import io.crate.sql.tree.Node;
+import io.crate.sql.tree.NullLiteral;
+import io.crate.sql.tree.ObjectLiteral;
+import io.crate.sql.tree.ParameterExpression;
+import io.crate.sql.tree.QualifiedNameReference;
+import io.crate.sql.tree.StringLiteral;
+import io.crate.sql.tree.SubscriptExpression;
 
 import javax.annotation.Nullable;
 import java.util.Locale;
 
 public class ExpressionToStringVisitor extends AstVisitor<String, Row> {
 
-    private final static ExpressionToStringVisitor INSTANCE = new ExpressionToStringVisitor();
+    private static final ExpressionToStringVisitor INSTANCE = new ExpressionToStringVisitor();
 
     private ExpressionToStringVisitor() {
     }
 
     public static String convert(Node node, @Nullable Row context) {
-        return INSTANCE.process(node, context);
+        return node.accept(INSTANCE, context);
     }
 
     @Override
@@ -67,27 +78,29 @@ public class ExpressionToStringVisitor extends AstVisitor<String, Row> {
 
     @Override
     public String visitArrayLiteral(ArrayLiteral node, Row context) {
-        return ExpressionFormatter.formatExpression(node);
+        return ExpressionFormatter.formatStandaloneExpression(node);
     }
 
     @Override
     public String visitObjectLiteral(ObjectLiteral node, Row context) {
-        return ExpressionFormatter.formatExpression(node);
+        return ExpressionFormatter.formatStandaloneExpression(node);
     }
 
     @Override
     public String visitParameterExpression(ParameterExpression node, Row parameters) {
-        return BytesRefs.toString(parameters.get(node.index()));
+        return parameters.get(node.index()).toString();
     }
 
     @Override
     protected String visitNegativeExpression(NegativeExpression node, Row context) {
-        return "-" + process(node.getValue(), context);
+        return "-" + node.getValue().accept(this, context);
     }
 
     @Override
     protected String visitSubscriptExpression(SubscriptExpression node, Row context) {
-        return String.format(Locale.ENGLISH, "%s.%s", process(node.name(), context), process(node.index(), context));
+        return String.format(Locale.ENGLISH, "%s.%s",
+                             node.name().accept(this, context),
+                             node.index().accept(this, context));
     }
 
     @Override

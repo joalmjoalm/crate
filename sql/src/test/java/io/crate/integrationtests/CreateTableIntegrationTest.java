@@ -21,7 +21,6 @@
 
 package io.crate.integrationtests;
 
-import io.crate.testing.UseJdbc;
 import org.junit.Test;
 
 import java.util.concurrent.ExecutorService;
@@ -31,7 +30,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.Matchers.is;
 
-@UseJdbc
 public class CreateTableIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -64,7 +62,7 @@ public class CreateTableIntegrationTest extends SQLTransportIntegrationTest {
         }
 
         executorService.shutdown();
-        assertThat("executorservice did not shutdown within timeout", executorService.awaitTermination(3, TimeUnit.SECONDS), is(true));
+        assertThat("executorservice did not shutdown within timeout", executorService.awaitTermination(10, TimeUnit.SECONDS), is(true));
 
         Throwable throwable = lastThrowable.get();
         if (throwable != null) {

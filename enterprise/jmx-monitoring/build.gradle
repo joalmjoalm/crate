@@ -1,0 +1,13 @@
+apply from: "$rootDir/enterprise/enterpriseModule.gradle"
+
+archivesBaseName = 'jmx-monitoring'
+group = 'io.crate'
+description = 'CrateDB JMX monitoring plugin'
+
+dependencies {
+    implementation project(':dex')
+    implementation project(':sql')
+
+    testImplementation project(':integration-testing')
+    testImplementation project(path: ':sql', configuration: 'testOutput')
+}

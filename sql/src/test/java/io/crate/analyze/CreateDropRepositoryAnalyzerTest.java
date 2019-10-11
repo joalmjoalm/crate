@@ -21,144 +21,224 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Joiner;
-import com.google.common.collect.ImmutableSortedMap;
+import io.crate.analyze.repositories.RepositoryParamValidator;
+import io.crate.analyze.repositories.RepositorySettingsModule;
+import io.crate.data.Row;
 import io.crate.exceptions.RepositoryAlreadyExistsException;
 import io.crate.exceptions.RepositoryUnknownException;
-import io.crate.metadata.MetaDataModule;
-import io.crate.testing.MockedClusterServiceModule;
+import io.crate.planner.PlannerContext;
+import io.crate.planner.node.ddl.CreateRepositoryPlan;
+import io.crate.planner.operators.SubQueryResults;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.SQLExecutor;
+import org.elasticsearch.action.admin.cluster.repositories.put.PutRepositoryRequest;
+import org.elasticsearch.cluster.ClusterName;
+import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.metadata.MetaData;
 import org.elasticsearch.cluster.metadata.RepositoriesMetaData;
 import org.elasticsearch.cluster.metadata.RepositoryMetaData;
-import org.elasticsearch.common.inject.Module;
+import org.elasticsearch.common.inject.ModulesBuilder;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.test.ClusterServiceUtils;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.Mock;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.Collections;
 
-import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.hasEntry;
 import static org.hamcrest.Matchers.is;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Mockito.when;
 
-public class CreateDropRepositoryAnalyzerTest extends BaseAnalyzerTest {
+public class CreateDropRepositoryAnalyzerTest extends CrateDummyClusterServiceUnitTest {
 
-    @Mock
-    private RepositoriesMetaData repositoriesMetaData;
-
-
-    private class MyMockedClusterServiceModule extends MockedClusterServiceModule {
-
-        @Override
-        protected void configureMetaData(MetaData metaData) {
-            when(metaData.custom(RepositoriesMetaData.TYPE)).thenReturn(repositoriesMetaData);
-        }
-
-    }
-
-    @Override
-    protected List<Module> getModules() {
-        List<Module> modules = super.getModules();
-        modules.addAll(Arrays.<Module>asList(
-            new MyMockedClusterServiceModule(),
-            new MetaDataModule())
-        );
-        return modules;
-    }
+    private SQLExecutor e;
+    private PlannerContext plannerContext;
+    private RepositoryParamValidator repositoryParamValidator;
 
     @Before
-    public void before() throws Exception {
-        RepositoryMetaData repositoryMetaData = new RepositoryMetaData("my_repo", "fs", Settings.EMPTY);
-        when(repositoriesMetaData.repository(anyString())).thenReturn(null);
-        when(repositoriesMetaData.repository("my_repo")).thenReturn(repositoryMetaData);
+    public void prepare() {
+        RepositoriesMetaData repositoriesMetaData = new RepositoriesMetaData(
+            Collections.singletonList(
+                new RepositoryMetaData(
+                    "my_repo",
+                    "fs",
+                    Settings.builder().put("location", "/tmp/my_repo").build()
+                )));
+        ClusterState clusterState = ClusterState.builder(new ClusterName("testing"))
+            .metaData(MetaData.builder()
+                          .putCustom(RepositoriesMetaData.TYPE, repositoriesMetaData))
+            .build();
+        ClusterServiceUtils.setState(clusterService, clusterState);
+        e = SQLExecutor.builder(clusterService).build();
+        plannerContext = e.getPlannerContext(clusterService.state());
+        repositoryParamValidator = new ModulesBuilder()
+            .add(new RepositorySettingsModule())
+            .createInjector()
+            .getInstance(RepositoryParamValidator.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <S> S analyze(SQLExecutor e, String stmt) {
+        AnalyzedStatement analyzedStatement = e.analyze(stmt);
+        if (analyzedStatement instanceof AnalyzedCreateRepository) {
+            return (S) CreateRepositoryPlan.createRequest(
+                (AnalyzedCreateRepository) analyzedStatement,
+                plannerContext.transactionContext(),
+                plannerContext.functions(),
+                Row.EMPTY,
+                SubQueryResults.EMPTY,
+                repositoryParamValidator);
+        } else if (analyzedStatement instanceof AnalyzedDropRepository) {
+            return (S) analyzedStatement;
+        } else {
+            throw new AssertionError("Statement of type " + analyzedStatement.getClass() + " not supported");
+        }
     }
 
     @Test
-    public void testCreateRepository() throws Exception {
-        CreateRepositoryAnalyzedStatement statement = analyze("CREATE REPOSITORY \"new_repository\" TYPE \"fs\" with (location='/mount/backups/my_backup', compress=True)");
-        assertThat(statement.repositoryName(), is("new_repository"));
-        assertThat(statement.repositoryType(), is("fs"));
-        assertThat(statement.settings().get("compress"), is("true"));
-        assertThat(statement.settings().get("location"), is("/mount/backups/my_backup"));
+    public void testCreateRepository() {
+        PutRepositoryRequest request = analyze(
+            e,
+            "CREATE REPOSITORY \"new_repository\" TYPE \"fs\" WITH (" +
+            "   location='/mount/backups/my_backup'," +
+            "   compress=True)");
+        assertThat(request.name(), is("new_repository"));
+        assertThat(request.type(), is("fs"));
+        assertThat(
+            request.settings().getAsStructuredMap(),
+            allOf(
+                hasEntry("compress", "true"),
+                hasEntry("location", "/mount/backups/my_backup"))
+        );
     }
 
     @Test
-    public void testCreateExistingRepository() throws Exception {
+    public void testCreateExistingRepository() {
         expectedException.expect(RepositoryAlreadyExistsException.class);
         expectedException.expectMessage("Repository 'my_repo' already exists");
-        analyze("create repository my_repo TYPE fs");
+        analyze(e, "CREATE REPOSITORY my_repo TYPE fs");
     }
 
     @Test
-    public void testDropUnknownRepository() throws Exception {
+    public void testDropUnknownRepository() {
         expectedException.expect(RepositoryUnknownException.class);
         expectedException.expectMessage("Repository 'unknown_repo' unknown");
-        analyze("DROP REPOSITORY \"unknown_repo\"");
+        analyze(e, "DROP REPOSITORY \"unknown_repo\"");
     }
 
     @Test
-    public void testDropExistingRepo() throws Exception {
-        DropRepositoryAnalyzedStatement statement = analyze("DROP REPOSITORY my_repo");
-        assertThat(statement.repositoryName(), is("my_repo"));
-
+    public void testDropExistingRepo() {
+        AnalyzedDropRepository statement = analyze(e, "DROP REPOSITORY my_repo");
+        assertThat(statement.name(), is("my_repo"));
     }
 
     @Test
-    public void testCreateS3RepositoryWithAllSettings() throws Exception {
-        CreateRepositoryAnalyzedStatement analysis = analyze("CREATE REPOSITORY foo TYPE s3 WITH (" +
-                                                             "bucket='abc'," +
-                                                             "region='us-north-42'," +
-                                                             "endpoint='www.example.com'," +
-                                                             "protocol='arp'," +
-                                                             "base_path='/holz/'," +
-                                                             "access_key='0xAFFE'," +
-                                                             "secret_key='0xCAFEE'," +
-                                                             "concurrent_streams=4," +
-                                                             "chunk_size=12," +
-                                                             "compress=true," +
-                                                             "server_side_encryption=false," +
-                                                             "buffer_size=128," +
-                                                             "max_retries=2," +
-                                                             "canned_acl=false)");
-        assertThat(analysis.repositoryType(), is("s3"));
-        assertThat(analysis.repositoryName(), is("foo"));
-        Map<String, String> sortedSettingsMap = ImmutableSortedMap.copyOf(analysis.settings().getAsMap());
+    public void testCreateS3RepositoryWithAllSettings() {
+        PutRepositoryRequest request = analyze(
+            e,
+            "CREATE REPOSITORY foo TYPE s3 WITH (" +
+            "   bucket='abc'," +
+            "   endpoint='www.example.com'," +
+            "   protocol='http'," +
+            "   base_path='/holz/'," +
+            "   access_key='0xAFFE'," +
+            "   secret_key='0xCAFEE'," +
+            "   chunk_size='12mb'," +
+            "   compress=true," +
+            "   server_side_encryption=false," +
+            "   buffer_size='5mb'," +
+            "   max_retries=2," +
+            "   use_throttle_retries=false," +
+            "   canned_acl=false)");
+        assertThat(request.name(), is("foo"));
+        assertThat(request.type(), is("s3"));
         assertThat(
-            Joiner.on(",").withKeyValueSeparator(":")
-                .join(sortedSettingsMap),
-            is("access_key:0xAFFE," +
-               "base_path:/holz/," +
-               "bucket:abc," +
-               "buffer_size:128," +
-               "canned_acl:false," +
-               "chunk_size:12," +
-               "compress:true," +
-               "concurrent_streams:4," +
-               "endpoint:www.example.com," +
-               "max_retries:2," +
-               "protocol:arp," +
-               "region:us-north-42," +
-               "secret_key:0xCAFEE," +
-               "server_side_encryption:false"));
+            request.settings().getAsStructuredMap(),
+            allOf(
+                hasEntry("access_key", "0xAFFE"),
+                hasEntry("base_path", "/holz/"),
+                hasEntry("bucket", "abc"),
+                hasEntry("buffer_size", "5mb"),
+                hasEntry("canned_acl", "false"),
+                hasEntry("chunk_size", "12mb"),
+                hasEntry("compress", "true"),
+                hasEntry("endpoint", "www.example.com"),
+                hasEntry("max_retries", "2"),
+                hasEntry("use_throttle_retries", "false"),
+                hasEntry("protocol", "http"),
+                hasEntry("secret_key", "0xCAFEE"),
+                hasEntry("server_side_encryption", "false"))
+        );
     }
 
     @Test
-    public void testCreateS3RepoWithoutSettings() throws Exception {
-        CreateRepositoryAnalyzedStatement analysis = analyze("CREATE REPOSITORY foo TYPE s3");
-        assertThat(analysis.repositoryName(), is("foo"));
-        assertThat(analysis.repositoryType(), is("s3"));
-        // two settings are there because those have default values
-        assertThat(analysis.settings().getAsMap().keySet(), containsInAnyOrder("compress", "server_side_encryption"));
+    public void testCreateS3RepoWithMissingMandatorySettings() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("The following required parameters are missing to" +
+                                        " create a repository of type \"s3\": [secret_key]");
+        analyze(e, "CREATE REPOSITORY foo TYPE s3 WITH (access_key='test')");
     }
 
     @Test
-    public void testCreateS3RepoWithWrongSettings() throws Exception {
+    public void testCreateAzureRepositoryWithAllSettings() {
+        PutRepositoryRequest request = analyze(
+            e,
+            "CREATE REPOSITORY foo TYPE azure WITH (" +
+            "   container='test_container'," +
+            "   base_path='test_path'," +
+            "   chunk_size='12mb'," +
+            "   compress=true," +
+            "   readonly=true," +
+            "   location_mode='primary_only'," +
+            "   account='test_account'," +
+            "   key='test_key'," +
+            "   max_retries=3," +
+            "   endpoint_suffix='.com'," +
+            "   timeout='30s'," +
+            "   proxy_port=0," +
+            "   proxy_type='socks'," +
+            "   proxy_host='localhost')");
+        assertThat(request.name(), is("foo"));
+        assertThat(request.type(), is("azure"));
+        assertThat(
+            request.settings().getAsStructuredMap(),
+            allOf(
+                hasEntry("container", "test_container"),
+                hasEntry("base_path", "test_path"),
+                hasEntry("chunk_size", "12mb"),
+                hasEntry("compress", "true"),
+                hasEntry("readonly", "true"),
+                hasEntry("account", "test_account"),
+                hasEntry("key", "test_key"),
+                hasEntry("max_retries", "3"),
+                hasEntry("endpoint_suffix", ".com"),
+                hasEntry("timeout", "30s"),
+                hasEntry("proxy_port", "0"),
+                hasEntry("proxy_type", "socks"),
+                hasEntry("proxy_host", "localhost")
+            )
+        );
+    }
+
+    @Test
+    public void testCreateAzureRepoWithMissingMandatorySettings() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("The following required parameters are missing to" +
+                                        " create a repository of type \"azure\": [key]");
+        analyze(e, "CREATE REPOSITORY foo TYPE azure WITH (account='test')");
+    }
+
+    @Test
+    public void testCreateAzureRepoWithWrongSettings() {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("setting 'wrong' not supported");
-        analyze("CREATE REPOSITORY foo TYPE s3 WITH (wrong=true)");
+        analyze(e, "CREATE REPOSITORY foo TYPE azure WITH (wrong=true)");
+    }
+
+    @Test
+    public void testCreateS3RepoWithWrongSettings() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("setting 'wrong' not supported");
+        analyze(e, "CREATE REPOSITORY foo TYPE s3 WITH (wrong=true)");
     }
 }

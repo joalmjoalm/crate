@@ -21,19 +21,23 @@
 
 package io.crate.integrationtests;
 
-import io.crate.Build;
-import io.crate.Version;
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLResponse;
-import io.crate.metadata.settings.CrateSettings;
+import io.crate.execution.engine.collect.stats.JobsLogService;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.SQLTransportExecutor;
-import io.crate.testing.TestingHelpers;
 import io.crate.testing.UseJdbc;
 import org.apache.lucene.util.Constants;
+import org.elasticsearch.Build;
+import org.elasticsearch.Version;
+import org.elasticsearch.common.xcontent.DeprecationHandler;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.hamcrest.Matchers;
+import org.joda.time.DateTimeUtils;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -48,17 +52,45 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static com.carrotsearch.randomizedtesting.RandomizedTest.$;
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.arrayContaining;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.core.Is.is;
 
-@ESIntegTestCase.ClusterScope(numClientNodes = 0, numDataNodes = 2)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(numClientNodes = 0, numDataNodes = 2, supportsDedicatedMasters = false)
 public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegrationTest {
 
     @Rule
     public TemporaryFolder folder = new TemporaryFolder();
+
+    @BeforeClass
+    public static void setTimeForTesting() throws Exception {
+        // A monotonically increasing system clock that prevents from clock adjustments (e.g. via NTP)
+        // and avoids synchronization.
+        DateTimeUtils.setCurrentMillisProvider(new DateTimeUtils.MillisProvider() {
+            private final AtomicLong lastTime = new AtomicLong();
+
+            @Override
+            public long getMillis() {
+                long now = System.currentTimeMillis();
+                long time = lastTime.incrementAndGet();
+                if (now >= time) {
+                    lastTime.compareAndSet(time, now);
+                    return lastTime.getAndIncrement();
+                }
+                return time;
+            }
+        });
+    }
 
     @Before
     public void initTestData() throws Exception {
@@ -76,20 +108,8 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     @Test
     public void testSelectNonExistentGlobalExpression() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Cannot resolve relation 'suess.cluster'");
+        expectedException.expectMessage("Relation 'suess.cluster' unknown");
         execute("select count(race), suess.cluster.name from characters");
-    }
-
-    @Test
-    public void testSelectOrderByNullSortingASC() throws Exception {
-        SQLResponse response = execute("select age from characters order by age");
-        assertEquals(32, response.rows()[0][0]);
-        assertEquals(34, response.rows()[1][0]);
-        assertEquals(43, response.rows()[2][0]);
-        assertEquals(112, response.rows()[3][0]);
-        assertEquals(null, response.rows()[4][0]);
-        assertEquals(null, response.rows()[5][0]);
-        assertEquals(null, response.rows()[6][0]);
     }
 
     @Test
@@ -106,52 +126,29 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     @Test
     public void testSelectRaw() throws Exception {
         SQLResponse response = execute("select _raw from characters order by name desc limit 1");
-        assertEquals(
-            "{\"race\":\"Human\",\"gender\":\"female\",\"age\":32,\"birthdate\":276912000000," +
-            "\"name\":\"Trillian\",\"details\":{\"job\":\"Mathematician\"}}\n",
-            TestingHelpers.printedTable(response.rows()));
+        Object raw = response.rows()[0][0];
+        Map<String, Object> rawMap = JsonXContent.jsonXContent.createParser(
+            NamedXContentRegistry.EMPTY, DeprecationHandler.THROW_UNSUPPORTED_OPERATION, (String) raw).map();
+
+        assertThat(rawMap.get("race"), is("Human"));
+        assertThat(rawMap.get("gender"), is("female"));
+        assertThat(rawMap.get("age"), is(32));
+        assertThat(rawMap.get("name"), is("Trillian"));
     }
 
     @Test
     public void testSelectRawWithGrouping() throws Exception {
         SQLResponse response = execute("select name, _raw from characters " +
                                        "group by _raw, name order by name desc limit 1");
-        assertEquals(
-            "Trillian| {\"race\":\"Human\",\"gender\":\"female\",\"age\":32,\"birthdate\":276912000000," +
-            "\"name\":\"Trillian\",\"details\":{\"job\":\"Mathematician\"}}\n",
-            TestingHelpers.printedTable(response.rows()));
-    }
 
-    @Test
-    public void testSelectOrderByNullSortingDESC() throws Exception {
-        SQLResponse response = execute("select age from characters order by age desc");
-        assertEquals(null, response.rows()[0][0]);
-        assertEquals(null, response.rows()[1][0]);
-        assertEquals(null, response.rows()[2][0]);
-        assertEquals(112, response.rows()[3][0]);
-        assertEquals(43, response.rows()[4][0]);
-        assertEquals(34, response.rows()[5][0]);
-        assertEquals(32, response.rows()[6][0]);
-    }
+        Object raw = response.rows()[0][1];
+        Map<String, Object> rawMap = JsonXContent.jsonXContent.createParser(
+            NamedXContentRegistry.EMPTY, DeprecationHandler.THROW_UNSUPPORTED_OPERATION, (String) raw).map();
 
-    @Test
-    public void testSelectGroupByOrderByNullSortingASC() throws Exception {
-        SQLResponse response = execute("select age from characters group by age order by age");
-        assertEquals(32, response.rows()[0][0]);
-        assertEquals(34, response.rows()[1][0]);
-        assertEquals(43, response.rows()[2][0]);
-        assertEquals(112, response.rows()[3][0]);
-        assertEquals(null, response.rows()[4][0]);
-    }
-
-    @Test
-    public void testSelectGroupByOrderByNullSortingDESC() throws Exception {
-        SQLResponse response = execute("select age from characters group by age order by age desc");
-        assertEquals(null, response.rows()[0][0]);
-        assertEquals(112, response.rows()[1][0]);
-        assertEquals(43, response.rows()[2][0]);
-        assertEquals(34, response.rows()[3][0]);
-        assertEquals(32, response.rows()[4][0]);
+        assertThat(rawMap.get("race"), is("Human"));
+        assertThat(rawMap.get("gender"), is("female"));
+        assertThat(rawMap.get("age"), is(32));
+        assertThat(rawMap.get("name"), is("Trillian"));
     }
 
     @Test
@@ -176,7 +173,7 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
         response = execute("select sum(age) as sum_age from characters");
         assertEquals(1, response.rowCount());
         assertEquals("sum_age", response.cols()[0]);
-        assertEquals(221.0d, response.rows()[0][0]);
+        assertEquals(221L, response.rows()[0][0]);
     }
 
     @Test
@@ -210,7 +207,7 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     public void testGlobalAggregateMany() throws Exception {
         SQLResponse response = execute("select sum(age), min(age), max(age), avg(age) from characters");
         assertEquals(1, response.rowCount());
-        assertEquals(221.0d, response.rows()[0][0]);
+        assertEquals(221L, response.rows()[0][0]);
         assertEquals(32, response.rows()[0][1]);
         assertEquals(112, response.rows()[0][2]);
         assertEquals(55.25d, response.rows()[0][3]);
@@ -219,7 +216,7 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     @Test
     public void selectMultiGetRequestFromNonExistentTable() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("TableUnknownException: Table 'doc.non_existent' unknown");
+        expectedException.expectMessage("RelationUnknown: Relation 'non_existent' unknown");
         execute("SELECT * FROM \"non_existent\" WHERE \"_id\" in (?,?)", new Object[]{"1", "2"});
     }
 
@@ -261,7 +258,7 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     }
 
     @Test
-    @UseJdbc(false) // NPE because of unused null parameter
+    @UseJdbc(0) // NPE because of unused null parameter
     public void testCountWithGroupByNullArgs() throws Exception {
         SQLResponse response = execute("select count(*), race from characters group by race", new Object[]{null});
         assertEquals(3, response.rowCount());
@@ -354,31 +351,6 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     }
 
     @Test
-    public void testOrderByNullsFirstAndLast() throws Exception {
-        SQLResponse response = execute(
-            "select details['job'] from characters order by details['job'] nulls first limit 1");
-        assertNull(response.rows()[0][0]);
-
-        response = execute(
-            "select details['job'] from characters order by details['job'] desc nulls first limit 1");
-        assertNull(response.rows()[0][0]);
-
-        response = execute(
-            "select details['job'] from characters order by details['job'] nulls last");
-        assertNull(response.rows()[((Long) response.rowCount()).intValue() - 1][0]);
-
-        response = execute(
-            "select details['job'] from characters order by details['job'] desc nulls last");
-        assertNull(response.rows()[((Long) response.rowCount()).intValue() - 1][0]);
-
-
-        response = execute(
-            "select distinct details['job'] from characters order by details['job'] desc nulls last");
-        assertNull(response.rows()[((Long) response.rowCount()).intValue() - 1][0]);
-    }
-
-    @Test
-    @UseJdbc(false) // copy has no rowcount
     public void testCopyToDirectoryOnPartitionedTableWithPartitionClause() throws Exception {
         String uriTemplate = Paths.get(folder.getRoot().toURI()).toUri().toString();
         SQLResponse response = execute("copy parted partition (date='2014-01-01') to DIRECTORY ?", $(uriTemplate));
@@ -399,7 +371,6 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     }
 
     @Test
-    @UseJdbc(false) // COPY has no rowcount
     public void testCopyToDirectoryOnPartitionedTableWithoutPartitionClause() throws Exception {
         String uriTemplate = Paths.get(folder.getRoot().toURI()).toUri().toString();
         SQLResponse response = execute("copy parted to DIRECTORY ?", $(uriTemplate));
@@ -423,15 +394,15 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
 
     @Test
     public void testArithmeticFunctions() throws Exception {
-        SQLResponse response = execute("select ((2 * 4 - 2 + 1) / 2) % 3 from sys.cluster");
+        execute("select ((2 * 4 - 2 + 1) / 2) % 3 from sys.cluster");
         assertThat(response.cols()[0], is("(((((2 * 4) - 2) + 1) / 2) % 3)"));
-        assertThat((Long) response.rows()[0][0], is(0L));
+        assertThat(response.rows()[0][0], is(0L));
 
-        response = execute("select ((2 * 4.0 - 2 + 1) / 2) % 3 from sys.cluster");
-        assertThat((Double) response.rows()[0][0], is(0.5));
+        execute("select ((2 * 4.0 - 2 + 1) / 2) % 3 from sys.cluster");
+        assertThat(response.rows()[0][0], is(0.5));
 
-        response = execute("select ? + 2 from sys.cluster", $(1));
-        assertThat((Long) response.rows()[0][0], is(3L));
+        execute("select ? + 2 from sys.cluster", $(1));
+        assertThat(response.rows()[0][0], is(3L));
 
         if (!Constants.WINDOWS) {
             response = execute("select load['1'] + load['5'], load['1'], load['5'] from sys.nodes limit 1");
@@ -440,13 +411,12 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     }
 
     @Test
-    @UseJdbc(false) // set has no rowcount
     public void testSetMultipleStatement() throws Exception {
         SQLResponse response = execute(
             "select settings['stats']['operations_log_size'], settings['stats']['enabled'] from sys.cluster");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Integer) response.rows()[0][0], is(CrateSettings.STATS_OPERATIONS_LOG_SIZE.defaultValue()));
-        assertThat((Boolean) response.rows()[0][1], is(CrateSettings.STATS_ENABLED.defaultValue()));
+        assertThat((Integer) response.rows()[0][0], is(JobsLogService.STATS_OPERATIONS_LOG_SIZE_SETTING.getDefault()));
+        assertThat((Boolean) response.rows()[0][1], is(JobsLogService.STATS_ENABLED_SETTING.getDefault()));
 
         response = execute("set global persistent stats.operations_log_size=1024, stats.enabled=false");
         assertThat(response.rowCount(), is(1L));
@@ -464,8 +434,8 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
         response = execute(
             "select settings['stats']['operations_log_size'], settings['stats']['enabled'] from sys.cluster");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Integer) response.rows()[0][0], is(CrateSettings.STATS_OPERATIONS_LOG_SIZE.defaultValue()));
-        assertThat((Boolean) response.rows()[0][1], is(CrateSettings.STATS_ENABLED.defaultValue()));
+        assertThat((Integer) response.rows()[0][0], is(JobsLogService.STATS_OPERATIONS_LOG_SIZE_SETTING.getDefault()));
+        assertThat((Boolean) response.rows()[0][1], is(JobsLogService.STATS_ENABLED_SETTING.getDefault()));
     }
 
     @Test
@@ -474,16 +444,18 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
             execute("set global persistent stats.operations_log_size=-1024");
             fail("expected SQLActionException, none was thrown");
         } catch (SQLActionException e) {
-            assertThat(e.getMessage(), containsString("Invalid value for argument 'stats.operations_log_size'"));
+            assertThat(e.getMessage(), containsString("Failed to parse value [-1024] for setting [stats.operations_log_size] must be >= 0"));
 
             SQLResponse response = execute("select settings['stats']['operations_log_size'] from sys.cluster");
             assertThat(response.rowCount(), is(1L));
-            assertThat((Integer) response.rows()[0][0], is(CrateSettings.STATS_OPERATIONS_LOG_SIZE.defaultValue()));
+            assertThat((Integer) response.rows()[0][0], is(JobsLogService.STATS_OPERATIONS_LOG_SIZE_SETTING.getDefault()));
         }
     }
 
     @Test
     public void testSysOperationsLog() throws Exception {
+        execute("set global transient stats.enabled = false");
+
         execute(
             "select count(*), race from characters group by race order by count(*) desc limit 2");
         SQLResponse resp = execute("select count(*) from sys.operations_log");
@@ -495,26 +467,23 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
         execute(
             "select count(*), race from characters group by race order by count(*) desc limit 2");
 
-        assertBusy(new Runnable() {
-            @Override
-            public void run() {
-                SQLResponse resp = execute("select * from sys.operations_log order by ended limit 3");
+        assertBusy(() -> {
+            SQLResponse response = execute("select * from sys.operations_log order by ended limit 3");
 
-                List<String> names = new ArrayList<>();
-                for (Object[] objects : resp.rows()) {
-                    names.add((String) objects[4]);
-                }
-                assertThat(names, Matchers.anyOf(
-                    Matchers.hasItems("distributing collect", "distributing collect"),
-                    Matchers.hasItems("collect", "localMerge"),
-
-                    // the select * from sys.operations_log has 2 collect operations (1 per node)
-                    Matchers.hasItems("collect", "collect"),
-                    Matchers.hasItems("distributed merge", "localMerge")));
+            List<String> names = new ArrayList<>();
+            for (Object[] objects : response.rows()) {
+                names.add((String) objects[4]);
             }
+            assertThat(names, Matchers.anyOf(
+                Matchers.hasItems("distributing collect", "distributing collect"),
+                Matchers.hasItems("collect", "localMerge"),
+
+                // the select * from sys.operations_log has 2 collect operations (1 per node)
+                Matchers.hasItems("collect", "collect"),
+                Matchers.hasItems("distributed merge", "localMerge")));
         }, 10L, TimeUnit.SECONDS);
 
-        execute("reset global stats.enabled, stats.operations_log_size");
+        execute("set global transient stats.enabled = false");
         waitNoPendingTasksOnAll();
         resp = execute("select count(*) from sys.operations_log");
         assertThat((Long) resp.rows()[0][0], is(0L));
@@ -551,7 +520,6 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     @Test
     public void testSelectFromJobsLogWithLimit() throws Exception {
         // this is an regression test to verify that the CollectionTerminatedException is handled correctly
-        execute("set global transient stats.enabled = true");
         execute("select * from sys.jobs");
         execute("select * from sys.jobs");
         execute("select * from sys.jobs");
@@ -583,7 +551,7 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
     public void testDistanceQueryOnSysTable() throws Exception {
         SQLResponse response = execute(
             "select Distance('POINT (10 20)', 'POINT (11 21)') from sys.cluster");
-        assertThat((Double) response.rows()[0][0], is(152462.70754934277));
+        assertThat(response.rows()[0][0], is(152354.3209044634));
     }
 
     @Test
@@ -602,20 +570,19 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
         for (int i = 0; i <= 1; i++) {
             assertThat(response.rows()[i][0], instanceOf(Map.class));
             assertThat((Map<String, Object>) response.rows()[i][0], allOf(hasKey("number"), hasKey("build_hash"), hasKey("build_snapshot")));
-            assertThat((String) response.rows()[i][1], Matchers.is(Version.CURRENT.number()));
+            assertThat((String) response.rows()[i][1], Matchers.is(Version.CURRENT.externalNumber()));
             assertThat((String) response.rows()[i][2], is(Build.CURRENT.hash()));
-            assertThat((Boolean) response.rows()[i][3], is(Version.CURRENT.snapshot()));
+            assertThat((Boolean) response.rows()[i][3], is(Version.CURRENT.isSnapshot()));
         }
     }
 
     @Test
     public void selectCurrentTimestamp() throws Exception {
-        long before = System.currentTimeMillis();
+        long before = DateTimeUtils.currentTimeMillis();
         SQLResponse response = execute("select current_timestamp from sys.cluster");
-        long after = System.currentTimeMillis();
-
+        long after = DateTimeUtils.currentTimeMillis();
         assertThat(response.cols(), arrayContaining("current_timestamp"));
-        assertThat((Long) response.rows()[0][0], allOf(greaterThanOrEqualTo(before), lessThanOrEqualTo(after)));
+        assertThat((long) response.rows()[0][0], allOf(greaterThanOrEqualTo(before), lessThanOrEqualTo(after)));
     }
 
     @Test
@@ -626,5 +593,4 @@ public class TransportSQLActionClassLifecycleTest extends SQLTransportIntegratio
         SQLResponse newResponse = execute("select * from sys.cluster where current_timestamp > current_timestamp");
         assertThat(newResponse.rowCount(), is(0L));
     }
-
 }

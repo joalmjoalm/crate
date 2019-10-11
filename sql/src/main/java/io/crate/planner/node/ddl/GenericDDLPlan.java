@@ -21,33 +21,36 @@
 
 package io.crate.planner.node.ddl;
 
-import io.crate.analyze.AbstractDDLAnalyzedStatement;
+import io.crate.analyze.DDLStatement;
+import io.crate.data.Row;
+import io.crate.data.Row1;
+import io.crate.data.RowConsumer;
+import io.crate.execution.support.OneRowActionListener;
+import io.crate.planner.DependencyCarrier;
 import io.crate.planner.Plan;
-import io.crate.planner.PlanVisitor;
-
-import java.util.UUID;
+import io.crate.planner.PlannerContext;
+import io.crate.planner.operators.SubQueryResults;
 
 public class GenericDDLPlan implements Plan {
 
-    private final UUID id;
-    private final AbstractDDLAnalyzedStatement statement;
+    private final DDLStatement statement;
 
-    public GenericDDLPlan(UUID jobId, AbstractDDLAnalyzedStatement statement) {
-        id = jobId;
+    public GenericDDLPlan(DDLStatement statement) {
         this.statement = statement;
     }
 
     @Override
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context) {
-        return visitor.visitGenericDDLPLan(this, context);
+    public StatementType type() {
+        return StatementType.DDL;
     }
 
     @Override
-    public UUID jobId() {
-        return id;
-    }
-
-    public AbstractDDLAnalyzedStatement statement() {
-        return statement;
+    public void executeOrFail(DependencyCarrier executor,
+                              PlannerContext plannerContext,
+                              RowConsumer consumer,
+                              Row params,
+                              SubQueryResults subQueryResults) {
+        executor.ddlAction().apply(statement, params, plannerContext.transactionContext())
+            .whenComplete(new OneRowActionListener<>(consumer, rCount -> new Row1(rCount == null ? -1 : rCount)));
     }
 }

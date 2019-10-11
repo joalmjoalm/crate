@@ -22,20 +22,47 @@
 
 package io.crate.analyze;
 
+import io.crate.common.collections.Maps;
 import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.Reference;
 import io.crate.metadata.doc.DocTableInfo;
+import io.crate.types.ObjectType;
 
 import java.util.Collection;
 import java.util.Locale;
+import java.util.Map;
 
 public final class ConstraintsValidator {
 
-    public static void validate(Object value, Reference targetColumn) {
+    public static void validate(Object value, Reference targetColumn, Collection<ColumnIdent> notNullColumns) {
+        assert targetColumn != null : "targetColumn is required to be able to validate it";
         // Validate NOT NULL constraint
         if (value == null && !targetColumn.isNullable()) {
-            throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "Cannot insert null value for column %s", targetColumn.ident().columnIdent().fqn()));
+            throw new IllegalArgumentException("\"" + targetColumn.column() + "\" must not be null");
+        }
+        validateNotNullOnChildren(value, targetColumn, notNullColumns);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void validateNotNullOnChildren(Object value,
+                                                  Reference targetColumn,
+                                                  Collection<ColumnIdent> notNullColumns) {
+        if (targetColumn.valueType().id() == ObjectType.ID) {
+            Map<String, Object> valueMap = (Map<String, Object>) value;
+            for (ColumnIdent columnIdent : notNullColumns) {
+                if (columnIdent.isChildOf(targetColumn.column())) {
+                    Map<String, Object> map = valueMap;
+                    for (String path : columnIdent.path()) {
+                        Object nested = Maps.get(map, path);
+                        if (nested == null) {
+                            throw new IllegalArgumentException("\"" + columnIdent + "\" must not be null");
+                        }
+                        if (nested instanceof Map) {
+                            map = (Map<String, Object>) nested;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -59,7 +86,7 @@ public final class ConstraintsValidator {
         for (ColumnIdent column : notUsedNonGeneratedColumns) {
             if (!tableInfo.getReference(column).isNullable()) {
                 throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                    "Cannot insert null value for column %s", column.fqn()));
+                    "Cannot insert null value for column '%s'", column));
             }
         }
     }

@@ -22,41 +22,77 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLResponse;
-import io.crate.blob.v2.BlobIndices;
 import io.crate.metadata.PartitionName;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
+import org.apache.lucene.util.Version;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.cluster.metadata.MetaData;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import static org.hamcrest.Matchers.*;
+import static io.crate.testing.TestingHelpers.resolveCanonicalString;
+import static org.hamcrest.Matchers.arrayContaining;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.hasEntry;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
 
-@ESIntegTestCase.ClusterScope(numClientNodes = 0, numDataNodes = 2)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(numClientNodes = 0, numDataNodes = 2, supportsDedicatedMasters = false)
 public class SysShardsTest extends SQLTransportIntegrationTest {
 
     @Before
     public void initTestData() throws Exception {
         Setup setup = new Setup(sqlExecutor);
         setup.groupBySetup();
-        sqlExecutor.exec(
-            "create table quotes (id integer primary key, quote string) with(number_of_replicas=1)");
-        BlobIndices blobIndices = internalCluster().getInstance(BlobIndices.class);
-        Settings indexSettings = Settings.builder()
-            .put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, 1)
-            .put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, 5)
-            .build();
-        blobIndices.createBlobTable("blobs", indexSettings);
-        sqlExecutor.ensureGreen();
+        execute("create table quotes (id integer primary key, quote string) with (number_of_replicas=1)");
+        execute("create blob table blobs clustered into 5 shards with (number_of_replicas=1)");
+        ensureGreen();
+    }
+
+    @Test
+    public void testPathAndBlobPath() throws Exception {
+        Path blobs = createTempDir("blobs");
+        execute("create table t1 (x int) clustered into 1 shards with (number_of_replicas = 0)");
+        execute("create blob table b1 clustered into 1 shards with (number_of_replicas = 0)");
+        execute("create blob table b2 " +
+                "clustered into 1 shards with (number_of_replicas = 0, blobs_path = '" + blobs.toString() + "')");
+        ensureYellow();
+
+        execute("select path, blob_path from sys.shards where table_name in ('t1', 'b1', 'b2') " +
+                "order by table_name asc");
+        // b1
+        // path + /blobs == blob_path without custom blob path
+        assertThat(response.rows()[0][0] + resolveCanonicalString("/blobs"), is(response.rows()[0][1]));
+
+        ClusterService clusterService = internalCluster().getInstance(ClusterService.class);
+        MetaData metaData = clusterService.state().getMetaData();
+        IndexMetaData index = metaData.index(".blob_b2");
+        String indexUUID = index.getIndexUUID();
+
+        // b2
+        String b2Path = (String) response.rows()[1][0];
+        assertThat(b2Path, containsString(resolveCanonicalString("/nodes/")));
+        assertThat(b2Path, endsWith(resolveCanonicalString("/indices/" + indexUUID + "/0")));
+
+        String b2BlobPath = (String) response.rows()[1][1];
+        assertThat(b2BlobPath, containsString(resolveCanonicalString("/nodes/")));
+        assertThat(b2BlobPath, endsWith(resolveCanonicalString("/indices/" + indexUUID + "/0/blobs")));
+        // t1
+        assertThat(response.rows()[2][1], nullValue());
     }
 
     @Test
@@ -81,16 +117,16 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
     @Test
     public void testGroupByWithLimitUnassignedShards() throws Exception {
         try {
-            execute("create table t (id int, name string) with (number_of_replicas=2)");
+            execute("create table t (id int, name string) with (number_of_replicas=2, \"write.wait_for_active_shards\"=1)");
             ensureYellow();
 
             SQLResponse response = execute("select sum(num_docs), table_name, sum(num_docs) from sys.shards group by table_name order by table_name desc limit 1000");
             assertThat(response.rowCount(), is(4L));
             assertThat(TestingHelpers.printedTable(response.rows()),
-                is("0.0| t| 0.0\n" +
-                   "0.0| quotes| 0.0\n" +
-                   "14.0| characters| 14.0\n" +
-                   "0.0| blobs| 0.0\n"));
+                is("0| t| 0\n" +
+                   "0| quotes| 0\n" +
+                   "14| characters| 14\n" +
+                   "0| blobs| 0\n"));
         } finally {
             execute("drop table t");
         }
@@ -122,27 +158,32 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
         SQLResponse response = execute(
             "select * from sys.shards where table_name = 'characters'");
         assertEquals(8L, response.rowCount());
-        assertEquals(12, response.cols().length);
     }
 
     @Test
     public void testSelectStarAllTables() throws Exception {
         SQLResponse response = execute("select * from sys.shards");
         assertEquals(26L, response.rowCount());
-        assertEquals(12, response.cols().length);
+        assertEquals(18, response.cols().length);
         assertThat(response.cols(), arrayContaining(
+            "blob_path",
             "id",
+            "min_lucene_version",
+            "node",
             "num_docs",
             "orphan_partition",
             "partition_ident",
+            "path",
             "primary",
             "recovery",
             "relocating_node",
             "routing_state",
             "schema_name",
+            "seq_no_stats",
             "size",
             "state",
-            "table_name"));
+            "table_name",
+            "translog_stats"));
     }
 
     @Test
@@ -150,7 +191,6 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
         SQLResponse response = execute(
             "select * from sys.shards where table_name like 'charact%'");
         assertEquals(8L, response.rowCount());
-        assertEquals(12, response.cols().length);
     }
 
     @Test
@@ -158,7 +198,6 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
         SQLResponse response = execute(
             "select * from sys.shards where table_name not like 'quotes%'");
         assertEquals(18L, response.rowCount());
-        assertEquals(12, response.cols().length);
     }
 
     @Test
@@ -166,7 +205,18 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
         SQLResponse response = execute(
             "select * from sys.shards where table_name in ('characters')");
         assertEquals(8L, response.rowCount());
-        assertEquals(12, response.cols().length);
+    }
+
+    @Test
+    public void test_translog_stats_can_be_retrieved() {
+        execute("SELECT translog_stats, translog_stats['size'] FROM sys.shards " +
+                "WHERE id = 0 AND \"primary\" = true AND table_name = 'characters'");
+        Object[] resultRow = response.rows()[0];
+        Map<String, Object> translogStats = (Map<String, Object>) resultRow[0];
+        assertThat(((Number) translogStats.get("size")).longValue(), is(resultRow[1]));
+        assertThat(((Number) translogStats.get("uncommitted_size")).longValue(), greaterThanOrEqualTo(0L));
+        assertThat(((Number) translogStats.get("number_of_operations")).longValue(), greaterThanOrEqualTo(0L));
+        assertThat(((Number) translogStats.get("uncommitted_operations")).longValue(), greaterThanOrEqualTo(0L));
     }
 
     @Test
@@ -178,11 +228,13 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testSelectOrderBy() throws Exception {
-        SQLResponse response = execute("select * from sys.shards order by table_name");
+        SQLResponse response = execute("select table_name, min_lucene_version, * " +
+                                       "from sys.shards order by table_name");
         assertEquals(26L, response.rowCount());
         List<String> tableNames = Arrays.asList("blobs", "characters", "quotes");
-        for (int i = 0; i < response.rowCount(); i++) {
-            assertThat(tableNames.contains(response.rows()[i][11]), is(true));
+        for (Object[] row : response.rows()) {
+            assertThat(tableNames.contains(row[0]), is(true));
+            assertThat(row[1], is(Version.LATEST.toString()));
         }
     }
 
@@ -264,7 +316,7 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
     @Test
     public void testSelectShardIdFromSysNodes() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Cannot resolve relation 'sys.shards'");
+        expectedException.expectMessage("Relation 'sys.shards' unknown");
         execute("select sys.shards.id from sys.nodes");
     }
 
@@ -288,7 +340,7 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
     @Test
     public void testSelectNodeSysExpression() throws Exception {
         SQLResponse response = execute(
-            "select _node, _node['name'], id from sys.shards order by _node['name'], id  limit 1");
+            "select node, node['name'], id from sys.shards order by node['name'], id  limit 1");
         assertEquals(1L, response.rowCount());
         Map<String, Object> fullNode = (Map<String, Object>) response.rows()[0][0];
         String nodeName = response.rows()[0][1].toString();
@@ -327,10 +379,10 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
     public void testSelectNodeSysExpressionWithUnassignedShards() throws Exception {
         try {
             execute("create table users (id integer primary key, name string) " +
-                    "clustered into 5 shards with (number_of_replicas=2)");
+                    "clustered into 5 shards with (number_of_replicas=2, \"write.wait_for_active_shards\"=1)");
             ensureYellow();
             SQLResponse response = execute(
-                "select _node['name'], id from sys.shards where table_name = 'users' order by _node['name'] nulls last"
+                "select node['name'], id from sys.shards where table_name = 'users' order by node['name'] nulls last"
             );
             String nodeName = response.rows()[0][0].toString();
             assertEquals("node_s0", nodeName);
@@ -353,5 +405,16 @@ public class SysShardsTest extends SQLTransportIntegrationTest {
             Map<String, Long> size = (Map<String, Long>) row[5];
             assertThat(((Map<String, Long>) recovery.get("size")).entrySet(), equalTo(size.entrySet()));
         }
+    }
+
+    @Test
+    public void testScalarEvaluatesInErrorOnSysShards() throws Exception {
+        // we need at least 1 shard, otherwise the table is empty and no evaluation occurs
+        execute("create table t1 (id integer) clustered into 1 shards with (number_of_replicas=0)");
+        ensureYellow();
+
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage(" / by zero");
+        execute("select 1/0 from sys.shards");
     }
 }

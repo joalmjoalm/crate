@@ -22,12 +22,9 @@
 package io.crate.integrationtests;
 
 import com.google.common.base.Joiner;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Sets;
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLResponse;
 import io.crate.metadata.FulltextAnalyzerResolver;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.SQLResponse;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateResponse;
 import org.elasticsearch.common.settings.Settings;
 import org.junit.After;
@@ -38,14 +35,21 @@ import org.junit.Test;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 
-import static org.hamcrest.Matchers.*;
-import static org.hamcrest.collection.IsMapContaining.hasEntry;
-import static org.hamcrest.collection.IsMapContaining.hasKey;
+import static io.crate.metadata.FulltextAnalyzerResolver.CustomType.ANALYZER;
+import static io.crate.metadata.FulltextAnalyzerResolver.CustomType.CHAR_FILTER;
+import static io.crate.metadata.FulltextAnalyzerResolver.CustomType.TOKENIZER;
+import static io.crate.metadata.FulltextAnalyzerResolver.CustomType.TOKEN_FILTER;
+import static io.crate.testing.SettingMatcher.hasEntry;
+import static io.crate.testing.SettingMatcher.hasKey;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.is;
 
-@UseJdbc
 public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
 
     private static FulltextAnalyzerResolver fulltextAnalyzerResolver;
@@ -65,16 +69,14 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
     @Override
     @After
     public void tearDown() throws Exception {
-        Set<String> settingsToRemove = Sets.filter(getPersistentClusterSettings().getAsMap().keySet(), new Predicate<String>() {
-            @Override
-            public boolean apply(String input) {
-                return input.startsWith("crate");
-            }
-        });
+        Map<String, Object> settingsToRemove = new HashMap<>();
+        getPersistentClusterSettings().keySet().stream()
+            .filter(s -> s.startsWith("crate"))
+            .forEach(s -> settingsToRemove.put(s, null));
         if (!settingsToRemove.isEmpty()) {
             client().admin().cluster().prepareUpdateSettings()
-                .setTransientSettingsToRemove(settingsToRemove)
-                .setPersistentSettingsToRemove(settingsToRemove).execute().actionGet();
+                .setPersistentSettings(settingsToRemove)
+                .setTransientSettings(settingsToRemove).execute().actionGet();
         }
         super.tearDown();
     }
@@ -88,14 +90,14 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
     public void resolveSimpleAnalyzerSettings() throws Exception {
         execute("CREATE ANALYZER a1 (tokenizer lowercase)");
         Settings fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("a1");
-        assertThat(fullAnalyzerSettings.getAsMap().size(), is(2));
+        assertThat(fullAnalyzerSettings.size(), is(2));
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a1.type", "custom")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a1", "type"), "custom")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a1.tokenizer", "lowercase")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a1", TOKENIZER.getName()), "lowercase")
         );
     }
 
@@ -111,20 +113,19 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         Settings fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("a2");
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a2.type", "custom")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a2", "type"), "custom")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a2.tokenizer", "a2_tok2")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a2", TOKENIZER.getName()), "a2_tok2")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
+            fullAnalyzerSettings,
             allOf(
-                hasEntry("index.analysis.tokenizer.a2_tok2.type", "ngram"),
-                hasEntry("index.analysis.tokenizer.a2_tok2.min_ngram", "2"),
-                hasEntry("index.analysis.tokenizer.a2_tok2.token_chars.0", "letter"),
-                hasEntry("index.analysis.tokenizer.a2_tok2.token_chars.1", "digits")
+                hasEntry(TOKENIZER.buildSettingChildName("a2_tok2", "type"), "ngram"),
+                hasEntry(TOKENIZER.buildSettingChildName("a2_tok2", "min_ngram"), "2"),
+                hasEntry(TOKENIZER.buildSettingChildName("a2_tok2", "token_chars"), "[letter, digits]")
             )
         );
     }
@@ -144,25 +145,24 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         Settings fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("a3");
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a3.type", "custom")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a3", "type"), "custom")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a3.tokenizer", "lowercase")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a3", TOKENIZER.getName()), "lowercase")
         );
         assertThat(
-            fullAnalyzerSettings.getAsArray("index.analysis.analyzer.a3.char_filter"),
-            arrayContainingInAnyOrder("html_strip", "a3_my_mapping")
+            fullAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a3", CHAR_FILTER.getName())),
+            containsInAnyOrder("html_strip", "a3_my_mapping")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.char_filter.a3_my_mapping.type", "mapping")
+            fullAnalyzerSettings,
+            hasEntry(CHAR_FILTER.buildSettingChildName("a3_my_mapping","type"), "mapping")
         );
         assertThat(
-            fullAnalyzerSettings.getAsArray("index.analysis.char_filter.a3_my_mapping" +
-                                            ".mappings"),
-            arrayContainingInAnyOrder("ph=>f", "ß=>ss", "ö=>oe")
+            fullAnalyzerSettings.getAsList(CHAR_FILTER.buildSettingChildName("a3_my_mapping", "mappings")),
+            containsInAnyOrder("ph=>f", "ß=>ss", "ö=>oe")
         );
         execute("CREATE TABLE t1(content " +
                 "string index using fulltext with (analyzer='a3'))");
@@ -176,12 +176,12 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         Settings fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("a4");
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a4.type", "german")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a4", "type"), "german")
         );
         assertThat(
-            fullAnalyzerSettings.getAsArray("index.analysis.analyzer.a4.stop_words"),
-            arrayContainingInAnyOrder("der", "die", "das")
+            fullAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a4", "stop_words")),
+            containsInAnyOrder("der", "die", "das")
         );
 
         // extend analyzer who extends builtin analyzer (chain can be longer than 1)
@@ -191,12 +191,12 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("a4e");
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a4e.type", "german")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a4e", "type"), "german")
         );
         assertThat(
-            fullAnalyzerSettings.getAsArray("index.analysis.analyzer.a4e.stop_words"),
-            arrayContainingInAnyOrder("der", "die", "das", "wer", "wie", "was")
+            fullAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a4e", "stop_words")),
+            containsInAnyOrder("der", "die", "das", "wer", "wie", "was")
         );
     }
 
@@ -212,10 +212,10 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         Settings fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("builtin_filter");
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
+            fullAnalyzerSettings,
             allOf(
-                hasEntry("index.analysis.filter.builtin_filter_ngram.type", "ngram"),
-                hasEntry("index.analysis.filter.builtin_filter_ngram.min_gram", "1")
+                hasEntry(TOKEN_FILTER.buildSettingChildName("builtin_filter_ngram", "type"), "ngram"),
+                hasEntry(TOKEN_FILTER.buildSettingChildName("builtin_filter_ngram", "min_gram"), "1")
             )
         );
     }
@@ -234,22 +234,22 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         Settings fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("a5");
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a5.type", "custom")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a5", "type"), "custom")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a5.tokenizer", "whitespace")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a5", TOKENIZER.getName()), "whitespace")
         );
         assertThat(
-            fullAnalyzerSettings.getAsArray("index.analysis.analyzer.a5.filter"),
-            arrayContainingInAnyOrder("lowercase", "a5_germanstemmer")
+            fullAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a5", TOKEN_FILTER.getName())),
+            containsInAnyOrder("lowercase", "a5_germanstemmer")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
+            fullAnalyzerSettings,
             allOf(
-                hasEntry("index.analysis.filter.a5_germanstemmer.type", "stemmer"),
-                hasEntry("index.analysis.filter.a5_germanstemmer.language", "german")
+                hasEntry(TOKEN_FILTER.buildSettingChildName("a5_germanstemmer", "type"), "stemmer"),
+                hasEntry(TOKEN_FILTER.buildSettingChildName("a5_germanstemmer", "language"), "german")
             )
         );
 
@@ -266,27 +266,27 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
 
         fullAnalyzerSettings = fulltextAnalyzerResolver.resolveFullCustomAnalyzerSettings("a5e");
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a5e.type", "custom")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a5e", "type"), "custom")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a5e.tokenizer", "letter")
+            fullAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a5e", TOKENIZER.getName()), "letter")
         );
         assertThat(
-            fullAnalyzerSettings.getAsArray("index.analysis.analyzer.a5e.filter"),
-            arrayContainingInAnyOrder("lowercase", "a5_germanstemmer")
+            fullAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a5e", TOKEN_FILTER.getName())),
+            containsInAnyOrder("lowercase", "a5_germanstemmer")
         );
         assertThat(
-            fullAnalyzerSettings.getAsMap(),
+            fullAnalyzerSettings,
             allOf(
-                hasEntry("index.analysis.filter.a5_germanstemmer.type", "stemmer"),
-                hasEntry("index.analysis.filter.a5_germanstemmer.language", "german")
+                hasEntry(TOKEN_FILTER.buildSettingChildName("a5_germanstemmer", "type"), "stemmer"),
+                hasEntry(TOKEN_FILTER.buildSettingChildName("a5_germanstemmer", "language"), "german")
             )
         );
         assertThat(
-            fullAnalyzerSettings.getAsArray("index.analysis.analyzer.a5e.char_filter"),
-            arrayContainingInAnyOrder("html_strip", "a5e_mymapping")
+            fullAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a5e", CHAR_FILTER.getName())),
+            containsInAnyOrder("html_strip", "a5e_mymapping")
         );
     }
 
@@ -295,8 +295,8 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
         List<String> analyzers = new ArrayList<>(fulltextAnalyzerResolver.getBuiltInAnalyzers());
         Collections.sort(analyzers);
         assertThat(Joiner.on(", ").join(analyzers),
-            is("arabic, armenian, basque, brazilian, bulgarian, catalan, chinese, cjk, " +
-               "classic, czech, danish, default, dutch, english, finnish, french, " +
+            is("arabic, armenian, basque, bengali, brazilian, bulgarian, catalan, chinese, cjk, " +
+               "czech, danish, default, dutch, english, fingerprint, finnish, french, " +
                "galician, german, greek, hindi, hungarian, indonesian, irish, " +
                "italian, keyword, latvian, lithuanian, norwegian, pattern, persian, portuguese, " +
                "romanian, russian, simple, snowball, sorani, spanish, standard, " +
@@ -306,11 +306,24 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
     @Test
     public void testBuiltInTokenizers() throws Exception {
         List<String> tokenizers = new ArrayList<>(fulltextAnalyzerResolver.getBuiltInTokenizers());
-        Collections.sort(tokenizers);
-        assertThat(Joiner.on(", ").join(tokenizers),
-            is("PathHierarchy, classic, edgeNGram, edge_ngram, keyword, letter, lowercase, " +
-               "nGram, ngram, path_hierarchy, pattern, standard, thai, " +
-               "uax_url_email, whitespace"));
+        assertThat(tokenizers, containsInAnyOrder(
+            "PathHierarchy",
+            "char_group",
+            "classic",
+            "edge_ngram",
+            "keyword",
+            "letter",
+            "lowercase",
+            "ngram",
+            "path_hierarchy",
+            "pattern",
+            "simple_pattern",
+            "simple_pattern_split",
+            "standard",
+            "thai",
+            "uax_url_email",
+            "whitespace"
+        ));
     }
 
     @Test
@@ -318,18 +331,18 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
         List<String> tokenFilters = new ArrayList<>(fulltextAnalyzerResolver.getBuiltInTokenFilters());
         Collections.sort(tokenFilters);
         assertThat(Joiner.on(", ").join(tokenFilters),
-            is("apostrophe, arabic_normalization, arabic_stem, asciifolding, brazilian_stem, " +
-               "cjk_bigram, cjk_width, classic, common_grams, czech_stem, decimal_digit, " +
+            is("apostrophe, arabic_normalization, arabic_stem, asciifolding, bengali_normalization, brazilian_stem, " +
+               "cjk_bigram, cjk_width, classic, common_grams, czech_stem, decimal_digit, delimited_payload, " +
                "delimited_payload_filter, dictionary_decompounder, dutch_stem, " +
-               "edgeNGram, edge_ngram, elision, french_stem, german_normalization, " +
+               "edge_ngram, elision, fingerprint, flatten_graph, french_stem, german_normalization, " +
                "german_stem, hindi_normalization, hunspell, " +
-               "hyphenation_decompounder, indic_normalization, keep, " +
-               "keyword_marker, keyword_repeat, " +
-               "kstem, length, limit, lowercase, nGram, ngram, pattern_capture, " +
-               "pattern_replace, persian_normalization, porter_stem, reverse, " +
-               "russian_stem, scandinavian_folding, scandinavian_normalization, " +
+               "hyphenation_decompounder, indic_normalization, keep, keep_types, " +
+               "keyword_marker, " +
+               "kstem, length, limit, lowercase, min_hash, multiplexer, ngram, pattern_capture, " +
+               "pattern_replace, persian_normalization, porter_stem, remove_duplicates, reverse, " +
+               "russian_stem, scandinavian_folding, scandinavian_normalization, serbian_normalization, " +
                "shingle, snowball, sorani_normalization, standard, stemmer, stemmer_override, " +
-               "stop, synonym, trim, truncate, type_as_payload, unique, uppercase, word_delimiter"));
+               "stop, synonym, trim, truncate, unique, uppercase, word_delimiter, word_delimiter_graph"));
     }
 
     @Test
@@ -337,7 +350,7 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
         List<String> charFilters = new ArrayList<>(fulltextAnalyzerResolver.getBuiltInCharFilters());
         Collections.sort(charFilters);
         assertThat(Joiner.on(", ").join(charFilters),
-            is("htmlStrip, html_strip, mapping, pattern_replace"));
+            is("html_strip, mapping, pattern_replace"));
     }
 
     @Test
@@ -352,7 +365,7 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 "     \"html_strip\"" +
                 "  )," +
                 "  tokenizer mytok WITH (" +
-                "    type='edgeNGram'," +
+                "    type='edge_ngram'," +
                 "    \"min_gram\" = 2," +
                 "    \"max_gram\" = 5," +
                 "    \"token_chars\" = [ 'letter', 'digit' ]" +
@@ -373,27 +386,27 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
         Settings settings = getPersistentClusterSettings();
 
         assertThat(
-            settings.getAsMap(),
+            settings,
             allOf(
-                hasKey("crate.analysis.custom.analyzer.a7"),
-                hasKey("crate.analysis.custom.tokenizer.a7_mytok"),
-                hasKey("crate.analysis.custom.char_filter.a7_mypattern"),
-                hasKey("crate.analysis.custom.filter.a7_myshingle"),
-                hasKey("crate.analysis.custom.filter.a7_my_stemmer")
+                hasKey(ANALYZER.buildSettingName("a7")),
+                hasKey(TOKENIZER.buildSettingName("a7_mytok")),
+                hasKey(CHAR_FILTER.buildSettingName("a7_mypattern")),
+                hasKey(TOKEN_FILTER.buildSettingName("a7_myshingle")),
+                hasKey(TOKEN_FILTER.buildSettingName("a7_my_stemmer"))
             )
         );
-        Settings analyzerSettings = FulltextAnalyzerResolver.decodeSettings(settings.get("crate.analysis.custom.analyzer.a7"));
+        Settings analyzerSettings = FulltextAnalyzerResolver.decodeSettings(settings.get(ANALYZER.buildSettingName("a7")));
         assertThat(
-            analyzerSettings.getAsArray("index.analysis.analyzer.a7.char_filter"),
-            arrayContainingInAnyOrder("a7_mypattern", "html_strip")
+            analyzerSettings.getAsList(ANALYZER.buildSettingChildName("a7", CHAR_FILTER.getName())),
+            containsInAnyOrder("a7_mypattern", "html_strip")
         );
         assertThat(
-            analyzerSettings.getAsArray("index.analysis.analyzer.a7.filter"),
-            arrayContainingInAnyOrder("a7_myshingle", "lowercase", "a7_my_stemmer")
+            analyzerSettings.getAsList(ANALYZER.buildSettingChildName("a7", TOKEN_FILTER.getName())),
+            containsInAnyOrder("a7_myshingle", "lowercase", "a7_my_stemmer")
         );
         assertThat(
-            analyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a7.tokenizer", "a7_mytok")
+            analyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a7", TOKENIZER.getName()), "a7_mytok")
         );
         execute("CREATE ANALYZER a8 EXTENDS a7 (" +
                 "  token_filters (" +
@@ -403,28 +416,28 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         Settings extendedSettings = getPersistentClusterSettings();
         assertThat(
-            extendedSettings.getAsMap(),
+            extendedSettings,
             allOf(
-                hasKey("crate.analysis.custom.analyzer.a8"),
-                hasKey("crate.analysis.custom.tokenizer.a7_mytok")
+                hasKey(ANALYZER.buildSettingName("a8")),
+                hasKey(TOKENIZER.buildSettingName("a7_mytok"))
             )
         );
-        Settings extendedAnalyzerSettings = FulltextAnalyzerResolver.decodeSettings(extendedSettings.get("crate.analysis.custom.analyzer.a8"));
+        Settings extendedAnalyzerSettings = FulltextAnalyzerResolver.decodeSettings(extendedSettings.get(ANALYZER.buildSettingName("a8")));
         assertThat(
-            extendedAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a8.type", "custom")
+            extendedAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a8", "type"), "custom")
         );
         assertThat(
-            extendedAnalyzerSettings.getAsMap(),
-            hasEntry("index.analysis.analyzer.a8.tokenizer", "a7_mytok")
+            extendedAnalyzerSettings,
+            hasEntry(ANALYZER.buildSettingChildName("a8", TOKENIZER.getName()), "a7_mytok")
         );
         assertThat(
-            extendedAnalyzerSettings.getAsArray("index.analysis.analyzer.a8.filter"),
-            arrayContainingInAnyOrder("lowercase", "kstem")
+            extendedAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a8", TOKEN_FILTER.getName())),
+            containsInAnyOrder("lowercase", "kstem")
         );
         assertThat(
-            extendedAnalyzerSettings.getAsArray("index.analysis.analyzer.a8.char_filter"),
-            arrayContainingInAnyOrder("a7_mypattern", "html_strip")
+            extendedAnalyzerSettings.getAsList(ANALYZER.buildSettingChildName("a8", CHAR_FILTER.getName())),
+            containsInAnyOrder("a7_mypattern", "html_strip")
         );
 
     }
@@ -433,7 +446,7 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
     public void reuseExistingTokenizer() {
         execute("CREATE ANALYZER a9 (" +
                 "  TOKENIZER a9tok WITH (" +
-                "    type='nGram'," +
+                "    type='ngram'," +
                 "    \"token_chars\"=['letter', 'digit']" +
                 "  )" +
                 ")");
@@ -472,15 +485,14 @@ public class FulltextAnalyzerResolverTest extends SQLTransportIntegrationTest {
                 ")");
         Settings settings = getPersistentClusterSettings();
         assertThat(
-            settings.getAsMap(),
+            settings,
             allOf(
-                hasKey("crate.analysis.custom.analyzer.a11"),
-                hasKey("crate.analysis.custom.filter.a11_mystop")
+                hasKey(ANALYZER.buildSettingName("a11")),
+                hasKey(TOKEN_FILTER.buildSettingName("a11_mystop"))
             )
         );
-        Settings analyzerSettings = FulltextAnalyzerResolver.decodeSettings(settings.get("crate.analysis.custom.analyzer.a11"));
-        Settings tokenFilterSettings = FulltextAnalyzerResolver.decodeSettings(settings.get("crate" +
-                                                                                            ".analysis.custom.filter.a11_mystop"));
+        Settings analyzerSettings = FulltextAnalyzerResolver.decodeSettings(settings.get(ANALYZER.buildSettingName("a11")));
+        Settings tokenFilterSettings = FulltextAnalyzerResolver.decodeSettings(settings.get(TOKEN_FILTER.buildSettingName("a11_mystop")));
         Settings.Builder builder = Settings.builder();
         builder.put(analyzerSettings);
         builder.put(tokenFilterSettings);

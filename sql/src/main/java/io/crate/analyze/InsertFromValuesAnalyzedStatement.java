@@ -21,12 +21,11 @@
 
 package io.crate.analyze;
 
-import io.crate.analyze.symbol.Symbol;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.IndexParts;
 import io.crate.metadata.PartitionName;
 import io.crate.metadata.Reference;
 import io.crate.metadata.doc.DocTableInfo;
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.lucene.BytesRefs;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -36,6 +35,7 @@ import java.util.Map;
 
 public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedStatement {
 
+    private final boolean ignoreDuplicateKeys;
     private final List<Symbol[]> onDuplicateKeyAssignments = new ArrayList<>();
     private final List<String[]> onDuplicateKeyAssignmentsColumns = new ArrayList<>();
     private final List<Object[]> sourceMaps = new ArrayList<>();
@@ -47,17 +47,18 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
 
     private final int numBulkResponses;
 
-    private int numAddedGeneratedColumns = 0;
+    private int numAddedColumnsWithExpression = 0;
 
-    public InsertFromValuesAnalyzedStatement(DocTableInfo tableInfo, int numBulkResponses) {
+    public InsertFromValuesAnalyzedStatement(DocTableInfo tableInfo, int numBulkResponses, boolean ignoreDuplicateKeys) {
         this.numBulkResponses = numBulkResponses;
+        this.ignoreDuplicateKeys = ignoreDuplicateKeys;
         super.tableInfo(tableInfo);
         if (tableInfo.isPartitioned()) {
             for (Map<String, String> partitionMap : partitionMaps) {
                 partitionMap = new HashMap<>(tableInfo.partitionedByColumns().size());
                 for (Reference partInfo : tableInfo.partitionedByColumns()) {
                     // initialize with null values for missing partitioned columns
-                    partitionMap.put(partInfo.ident().columnIdent().name(), null);
+                    partitionMap.put(partInfo.column().name(), null);
                 }
             }
         }
@@ -72,23 +73,22 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
         Map<String, String> map = new HashMap<>(tableInfo().partitionedByColumns().size());
         for (Reference partInfo : tableInfo().partitionedByColumns()) {
             // initialize with null values for missing partitioned columns
-            map.put(partInfo.ident().columnIdent().fqn(), null);
+            map.put(partInfo.column().fqn(), null);
         }
         partitionMaps.add(map);
         return map;
     }
 
-    public
     @Nullable
-    Map<String, String> currentPartitionMap() {
+    public Map<String, String> currentPartitionMap() {
         return partitionMaps.get(partitionMaps.size() - 1);
     }
 
     private List<String> partitionedByColumnNames() {
-        assert tableInfo != null;
+        assert tableInfo != null : "tableInfo must not be null";
         List<String> names = new ArrayList<>(tableInfo.partitionedByColumns().size());
         for (Reference info : tableInfo.partitionedByColumns()) {
-            names.add(info.ident().columnIdent().fqn());
+            names.add(info.column().fqn());
         }
         return names;
     }
@@ -96,13 +96,12 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
     public List<String> generatePartitions() {
         List<String> partitionValues = new ArrayList<>(partitionMaps.size());
         for (Map<String, String> map : partitionMaps) {
-            List<BytesRef> values = new ArrayList<>(map.size());
+            List<String> values = new ArrayList<>(map.size());
             List<String> columnNames = partitionedByColumnNames();
             for (String columnName : columnNames) {
-                values.add(BytesRefs.toBytesRef(map.get(columnName)));
+                values.add(map.get(columnName));
             }
-            PartitionName partitionName = new PartitionName(tableInfo().ident(), values);
-            partitionValues.add(partitionName.asIndexName());
+            partitionValues.add(IndexParts.toIndexName(tableInfo.ident(), PartitionName.encodeIdent(values)));
         }
         return partitionValues;
     }
@@ -118,6 +117,10 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
         } else {
             routingValues.add(clusteredByValue);
         }
+    }
+
+    public boolean isIgnoreDuplicateKeys() {
+        return ignoreDuplicateKeys;
     }
 
     public void addOnDuplicateKeyAssignments(Symbol[] assignments) {
@@ -155,13 +158,13 @@ public class InsertFromValuesAnalyzedStatement extends AbstractInsertAnalyzedSta
         return numBulkResponses;
     }
 
-    public void addGeneratedColumn(Reference reference) {
+    public void addColumnWithExpression(Reference reference) {
         columns().add(reference);
-        numAddedGeneratedColumns++;
+        numAddedColumnsWithExpression++;
     }
 
-    public int numAddedGeneratedColumns() {
-        return numAddedGeneratedColumns;
+    public int numAddedColumnsWithExpression() {
+        return numAddedColumnsWithExpression;
     }
 
     public List<Integer> bulkIndices() {

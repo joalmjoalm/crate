@@ -21,11 +21,8 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLResponse;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.SQLResponse;
 import org.hamcrest.Matchers;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -35,19 +32,7 @@ import java.util.List;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.startsWith;
 
-@UseJdbc
 public class SysOperationsTest extends SQLTransportIntegrationTest {
-
-
-    @Before
-    public void enableStats() throws Exception {
-        execute("set global stats.enabled = true");
-    }
-
-    @After
-    public void disableStats() {
-        execute("reset global stats.enabled");
-    }
 
     @Test
     public void testDistinctSysOperations() throws Exception {
@@ -60,11 +45,11 @@ public class SysOperationsTest extends SQLTransportIntegrationTest {
     public void testQueryNameFromSysOperations() throws Exception {
         SQLResponse resp = execute("select name, job_id from sys.operations order by name asc");
 
-        // usually this should return collect on 2 nodes, localMerge on 1 node
+        // usually this should return collect per node and an optional merge on handler
         // but it could be that the collect is finished before the localMerge task is started in which
         // case it is missing.
 
-        assertThat(resp.rowCount(), Matchers.greaterThanOrEqualTo(2L));
+        assertThat(resp.rowCount(), Matchers.greaterThanOrEqualTo((long) internalCluster().numDataNodes()));
         List<String> names = new ArrayList<>();
         for (Object[] objects : resp.rows()) {
             names.add((String) objects[0]);
@@ -76,7 +61,7 @@ public class SysOperationsTest extends SQLTransportIntegrationTest {
     @Test
     public void testNodeExpressionOnSysOperations() throws Exception {
         execute("select * from sys.nodes");
-        SQLResponse response = execute("select _node['name'], id from sys.operations limit 1");
+        SQLResponse response = execute("select node['name'], id from sys.operations limit 1");
         assertThat(response.rowCount(), is(1L));
         assertThat(response.rows()[0][0].toString(), startsWith("node_s"));
     }

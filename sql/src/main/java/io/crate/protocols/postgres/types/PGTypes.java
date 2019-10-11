@@ -26,9 +26,9 @@ import com.carrotsearch.hppc.IntObjectHashMap;
 import com.carrotsearch.hppc.IntObjectMap;
 import com.google.common.collect.ImmutableMap;
 import io.crate.types.ArrayType;
-import io.crate.types.CollectionType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
+import io.crate.types.ObjectType;
 
 import java.util.HashSet;
 import java.util.Locale;
@@ -41,33 +41,40 @@ public class PGTypes {
         .put(DataTypes.BYTE, CharType.INSTANCE)
         .put(DataTypes.STRING, VarCharType.INSTANCE)
         .put(DataTypes.BOOLEAN, BooleanType.INSTANCE)
-        .put(DataTypes.OBJECT, JsonType.INSTANCE)
+        .put(ObjectType.untyped(), JsonType.INSTANCE)
         .put(DataTypes.SHORT, SmallIntType.INSTANCE)
         .put(DataTypes.INTEGER, IntegerType.INSTANCE)
         .put(DataTypes.LONG, BigIntType.INSTANCE)
         .put(DataTypes.FLOAT, RealType.INSTANCE)
         .put(DataTypes.DOUBLE, DoubleType.INSTANCE)
+        .put(DataTypes.TIMESTAMPZ, TimestampZType.INSTANCE)
         .put(DataTypes.TIMESTAMP, TimestampType.INSTANCE)
         .put(DataTypes.IP, VarCharType.INSTANCE) // postgres has no IP type, so map it to varchar - it matches the client representation
-        .put(DataTypes.UNDEFINED, JsonType.INSTANCE)
-        .put(DataTypes.GEO_POINT, PGArray.FLOAT8_ARRAY)
+        .put(DataTypes.UNDEFINED, VarCharType.INSTANCE)
         .put(DataTypes.GEO_SHAPE, JsonType.INSTANCE)
-        .put(new ArrayType(DataTypes.BYTE), PGArray.CHAR_ARRAY)
-        .put(new ArrayType(DataTypes.SHORT), PGArray.INT2_ARRAY)
-        .put(new ArrayType(DataTypes.INTEGER), PGArray.INT4_ARRAY)
-        .put(new ArrayType(DataTypes.LONG), PGArray.INT8_ARRAY)
-        .put(new ArrayType(DataTypes.FLOAT), PGArray.FLOAT4_ARRAY)
-        .put(new ArrayType(DataTypes.DOUBLE), PGArray.FLOAT8_ARRAY)
-        .put(new ArrayType(DataTypes.BOOLEAN), PGArray.BOOL_ARRAY)
-        .put(new ArrayType(DataTypes.TIMESTAMP), PGArray.TIMESTAMPZ_ARRAY)
-        .put(new ArrayType(DataTypes.STRING), PGArray.VARCHAR_ARRAY)
-        .put(new ArrayType(DataTypes.GEO_POINT), PGArray.FLOAT8_ARRAY)
-        .put(new ArrayType(DataTypes.GEO_SHAPE), PGArray.JSON_ARRAY)
-        .put(new ArrayType(DataTypes.OBJECT), JsonType.INSTANCE)
+        .put(DataTypes.GEO_POINT, PointType.INSTANCE)
+        .put(DataTypes.INTERVAL,IntervalType.INSTANCE)
+        .put(new ArrayType<>(DataTypes.BYTE), PGArray.CHAR_ARRAY)
+        .put(new ArrayType<>(DataTypes.SHORT), PGArray.INT2_ARRAY)
+        .put(new ArrayType<>(DataTypes.INTEGER), PGArray.INT4_ARRAY)
+        .put(new ArrayType<>(DataTypes.LONG), PGArray.INT8_ARRAY)
+        .put(new ArrayType<>(DataTypes.FLOAT), PGArray.FLOAT4_ARRAY)
+        .put(new ArrayType<>(DataTypes.DOUBLE), PGArray.FLOAT8_ARRAY)
+        .put(new ArrayType<>(DataTypes.BOOLEAN), PGArray.BOOL_ARRAY)
+        .put(new ArrayType<>(DataTypes.TIMESTAMPZ), PGArray.TIMESTAMPZ_ARRAY)
+        .put(new ArrayType<>(DataTypes.TIMESTAMP), PGArray.TIMESTAMP_ARRAY)
+        .put(new ArrayType<>(DataTypes.STRING), PGArray.VARCHAR_ARRAY)
+        .put(new ArrayType<>(DataTypes.IP), PGArray.VARCHAR_ARRAY)
+        .put(new ArrayType<>(DataTypes.GEO_POINT), PGArray.POINT_ARRAY)
+        .put(new ArrayType<>(DataTypes.GEO_SHAPE), PGArray.JSON_ARRAY)
+        .put(new ArrayType<>(DataTypes.INTERVAL), PGArray.INTERVAL_ARRAY)
+        .put(new ArrayType<>(ObjectType.untyped()), JsonType.INSTANCE)
         .build();
 
     private static final IntObjectMap<DataType> PG_TYPES_TO_CRATE_TYPE = new IntObjectHashMap<>();
     private static final Set<PGType> TYPES;
+    private static final int TEXT_OID = 25;
+    private static final int TEXT_ARRAY_OID = 1009;
 
     static {
         for (Map.Entry<DataType, PGType> e : CRATE_TO_PG_TYPES.entrySet()) {
@@ -78,9 +85,13 @@ public class PGTypes {
             }
         }
         PG_TYPES_TO_CRATE_TYPE.put(0, DataTypes.UNDEFINED);
+        PG_TYPES_TO_CRATE_TYPE.put(TEXT_OID, DataTypes.STRING);
+        PG_TYPES_TO_CRATE_TYPE.put(TEXT_ARRAY_OID, new ArrayType(DataTypes.STRING));
         TYPES = new HashSet<>(CRATE_TO_PG_TYPES.values()); // some pgTypes are used multiple times, de-dup them
+        // the below is added manually as currently we do not want to expose this type to crateDB
+        // we merely need this type information in 'pg_types' static table for postgres compatibility
+        TYPES.add(VarCharType.NameType.INSTANCE);
     }
-
 
     public static Iterable<PGType> pgTypes() {
         return TYPES;
@@ -91,9 +102,9 @@ public class PGTypes {
     }
 
     public static PGType get(DataType type) {
-        if (type instanceof CollectionType) {
-            DataType<?> innerType = ((CollectionType) type).innerType();
-            if (innerType instanceof CollectionType) {
+        if (type instanceof ArrayType) {
+            DataType<?> innerType = ((ArrayType) type).innerType();
+            if (innerType instanceof ArrayType) {
                 // if this is a nested collection stream it as JSON because
                 // postgres binary format doesn't support multidimensional arrays with sub-arrays of different length
                 // (something like [ [1, 2], [3] ] is not supported)

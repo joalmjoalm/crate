@@ -21,10 +21,9 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Function;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.core.collections.Row;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.data.Row;
 import io.crate.sql.tree.ParameterExpression;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
@@ -34,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Function;
 
 
 public class ParameterContext implements Function<ParameterExpression, Symbol> {
@@ -56,9 +56,9 @@ public class ParameterContext implements Function<ParameterExpression, Symbol> {
     }
 
     private void validateBulkParams(List<Row> bulkParams) {
-        int length = bulkParams.get(0).size();
+        int length = bulkParams.get(0).numColumns();
         for (Row bulkParam : bulkParams) {
-            if (bulkParam.size() != length) {
+            if (bulkParam.numColumns() != length) {
                 throw new IllegalArgumentException("mixed number of arguments inside bulk arguments");
             }
         }
@@ -92,7 +92,7 @@ public class ParameterContext implements Function<ParameterExpression, Symbol> {
         return parameters;
     }
 
-    public io.crate.analyze.symbol.Literal getAsSymbol(int index) {
+    public io.crate.expression.symbol.Literal getAsSymbol(int index) {
         try {
             Object value = parameters().get(index);
             DataType type = guessTypeSafe(value);
@@ -107,8 +107,8 @@ public class ParameterContext implements Function<ParameterExpression, Symbol> {
 
     public ParamTypeHints typeHints() {
         if (typeHints == null) {
-            List<DataType> types = new ArrayList<>(parameters.size());
-            for (int i = 0; i < parameters.size(); i++) {
+            List<DataType> types = new ArrayList<>(parameters.numColumns());
+            for (int i = 0; i < parameters.numColumns(); i++) {
                 types.add(guessTypeSafe(parameters.get(i)));
             }
             typeHints = new ParamTypeHints(types);

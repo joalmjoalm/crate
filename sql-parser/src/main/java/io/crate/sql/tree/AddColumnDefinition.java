@@ -22,51 +22,72 @@
 package io.crate.sql.tree;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.collect.ImmutableList;
+import io.crate.common.collections.Lists2;
 
 import javax.annotation.Nullable;
 import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
-public class AddColumnDefinition extends TableElement {
+public class AddColumnDefinition<T> extends TableElement<T> {
 
-    private final Expression name;
+    private final T name;
     @Nullable
-    private final Expression generatedExpression;
+    private final T generatedExpression;
+    private final boolean generated;
     @Nullable
-    private final ColumnType type;
-    private final List<ColumnConstraint> constraints;
+    private final ColumnType<T> type;
+    private final List<ColumnConstraint<T>> constraints;
 
-    public AddColumnDefinition(Expression name,
-                               @Nullable Expression generatedExpression,
-                               @Nullable ColumnType type,
-                               @Nullable List<ColumnConstraint> constraints) {
+    public AddColumnDefinition(T name,
+                               @Nullable T generatedExpression,
+                               @Nullable ColumnType<T> type,
+                               List<ColumnConstraint<T>> constraints) {
+        this(name, generatedExpression, type, constraints, true, generatedExpression != null);
+    }
+
+    public AddColumnDefinition(T name,
+                               @Nullable T generatedExpression,
+                               @Nullable ColumnType<T> type,
+                               List<ColumnConstraint<T>> constraints,
+                               boolean validate,
+                               boolean generated) {
         this.name = name;
         this.generatedExpression = generatedExpression;
+        this.generated = generated;
         this.type = type;
-        this.constraints = MoreObjects.firstNonNull(constraints, ImmutableList.<ColumnConstraint>of());
+        this.constraints = constraints;
+        if (validate) {
+            validateColumnDefinition();
+        }
     }
 
-    public AddColumnDefinition(Expression name,
-                               Expression generatedExpression,
-                               List<ColumnConstraint> constraints) {
-        this(name, generatedExpression, null, constraints);
+    private void validateColumnDefinition() {
+        if (type == null && generatedExpression == null) {
+            throw new IllegalArgumentException("Column [" + name + "]: data type needs to be provided " +
+                                               "or column should be defined as a generated expression");
+        }
     }
 
-    public Expression name() {
+    public T name() {
         return name;
     }
 
     @Nullable
-    public Expression generatedExpression() {
+    public T generatedExpression() {
         return generatedExpression;
     }
 
+    public boolean isGenerated() {
+        return generated;
+    }
+
     @Nullable
-    public ColumnType type() {
+    public ColumnType<T> type() {
         return type;
     }
 
-    public List<ColumnConstraint> constraints() {
+    public List<ColumnConstraint<T>> constraints() {
         return constraints;
     }
 
@@ -107,5 +128,38 @@ public class AddColumnDefinition extends TableElement {
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitAddColumnDefinition(this, context);
+    }
+
+    @Override
+    public <U> AddColumnDefinition<U> map(Function<? super T, ? extends U> mapper) {
+        return new AddColumnDefinition<>(
+            mapper.apply(name),
+            null,   // expression must be mapped later on using mapExpressions()
+            type == null ? null : type.map(mapper),
+            Lists2.map(constraints, x -> x.map(mapper)),
+            false,
+            generatedExpression != null
+        );
+    }
+
+    @Override
+    public <U> TableElement<U> mapExpressions(TableElement<U> mappedElement,
+                                              Function<? super T, ? extends U> mapper) {
+        AddColumnDefinition<U> mappedAddDefinition = (AddColumnDefinition<U>) mappedElement;
+        return new AddColumnDefinition<>(
+            mappedAddDefinition.name,
+            generatedExpression == null ? null : mapper.apply(generatedExpression),
+            type == null ? null : type.mapExpressions(mappedAddDefinition.type, mapper),
+            mappedAddDefinition.constraints
+        );
+    }
+
+    @Override
+    public void visit(Consumer<? super T> consumer) {
+        consumer.accept(name);
+        consumer.accept(generatedExpression);
+        for (ColumnConstraint<T> constraint : constraints) {
+            constraint.visit(consumer);
+        }
     }
 }

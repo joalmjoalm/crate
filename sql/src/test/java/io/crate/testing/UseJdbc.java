@@ -22,7 +22,11 @@
 
 package io.crate.testing;
 
-import java.lang.annotation.*;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Inherited;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
 
 /**
  * Mark a test as executable via JDBC.
@@ -32,5 +36,9 @@ import java.lang.annotation.*;
 @Inherited
 public @interface UseJdbc {
 
-    boolean value() default true;
+    // 0 -> disabled
+    // 1 -> always enabled
+    // close to 1 -> mostly enabled
+    // close to 0 -> mostly disabled
+    double value() default 0.5;
 }

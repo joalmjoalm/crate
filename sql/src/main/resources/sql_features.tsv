@@ -32,8 +32,8 @@ B128	Routine language SQL			NO
 B211	Module language Ada: VARCHAR and NUMERIC support			NO		
 B221	Routine language Ada: VARCHAR and NUMERIC support			NO		
 E011	Numeric data types			NO		Only Java types are supported
-E011	Numeric data types	1	INTEGER and SMALLINT data types	NO		missing smallint
-E011	Numeric data types	2	REAL, DOUBLE PRECISION, and FLOAT data types	NO		missing real, double precission
+E011	Numeric data types	1	INTEGER and SMALLINT data types	YES		
+E011	Numeric data types	2	REAL, DOUBLE PRECISION, and FLOAT data types	YES		
 E011	Numeric data types	3	DECIMAL and NUMERIC data types	NO		
 E011	Numeric data types	4	Arithmetic operators	YES		
 E011	Numeric data types	5	Numeric comparison	YES		
@@ -47,7 +47,7 @@ E021	Character string types	5	OCTET_LENGTH function	YES
 E021	Character string types	6	SUBSTRING function	NO		substr scalar
 E021	Character string types	7	Character concatenation	YES		
 E021	Character string types	8	UPPER and LOWER functions	YES		
-E021	Character string types	9	TRIM function	NO		
+E021	Character string types	9	TRIM function	YES		
 E021	Character string types	10	Implicit casting among the character string types	-		just one type
 E021	Character string types	11	POSITION function	NO		
 E021	Character string types	12	Character comparison	YES		
@@ -66,7 +66,7 @@ E051	Basic query specification	8	Correlation names in the FROM clause	YES
 E051	Basic query specification	9	Rename columns in the FROM clause	NO		
 E061	Basic predicates and search conditions			NO		
 E061	Basic predicates and search conditions	1	Comparison predicate	YES		
-E061	Basic predicates and search conditions	2	BETWEEN predicate	NO		
+E061	Basic predicates and search conditions	2	BETWEEN predicate	YES		
 E061	Basic predicates and search conditions	3	IN predicate with list of values	YES		
 E061	Basic predicates and search conditions	4	LIKE predicate	YES		
 E061	Basic predicates and search conditions	5	LIKE predicate ESCAPE clause	NO		
@@ -74,19 +74,19 @@ E061	Basic predicates and search conditions	6	NULL predicate	YES
 E061	Basic predicates and search conditions	7	Quantified comparison predicate	NO		only ANY(array) 
 E061	Basic predicates and search conditions	8	EXISTS predicate	NO		
 E061	Basic predicates and search conditions	9	Subqueries in comparison predicate	NO		
-E061	Basic predicates and search conditions	11	Subqueries in IN predicate	NO		
+E061	Basic predicates and search conditions	11	Subqueries in IN predicate	YES		
 E061	Basic predicates and search conditions	12	Subqueries in quantified comparison predicate	NO		
 E061	Basic predicates and search conditions	13	Correlated subqueries	NO		
 E061	Basic predicates and search conditions	14	Search condition	YES		
 E071	Basic query expressions			NO		
 E071	Basic query expressions	1	UNION DISTINCT table operator	NO		
-E071	Basic query expressions	2	UNION ALL table operator	NO		
+E071	Basic query expressions	2	UNION ALL table operator	YES		
 E071	Basic query expressions	3	EXCEPT DISTINCT table operator	NO		
 E071	Basic query expressions	5	Columns combined via table operators need not have exactly the same data type	NO		
 E071	Basic query expressions	6	Table operators in subqueries	NO		
-E081	Basic Privileges			NO		
-E081	Basic Privileges	1	SELECT privilege	NO		
-E081	Basic Privileges	2	DELETE privilege	NO		
+E081	Basic Privileges			YES		
+E081	Basic Privileges	1	SELECT privilege	YES		
+E081	Basic Privileges	2	DELETE privilege	YES		
 E081	Basic Privileges	3	INSERT privilege at the table level	NO		
 E081	Basic Privileges	4	UPDATE privilege at the table level	NO		
 E081	Basic Privileges	5	UPDATE privilege at the column level	NO		
@@ -96,13 +96,13 @@ E081	Basic Privileges	8	WITH GRANT OPTION	NO
 E081	Basic Privileges	9	USAGE privilege	NO		
 E081	Basic Privileges	10	EXECUTE privilege	NO		
 E091	Set functions			NO		
-E091	Set functions	1	AVG	NO		
-E091	Set functions	2	COUNT	NO		
-E091	Set functions	3	MAX	NO		
-E091	Set functions	4	MIN	NO		
-E091	Set functions	5	SUM	NO		
+E091	Set functions	1	AVG	YES		
+E091	Set functions	2	COUNT	YES		
+E091	Set functions	3	MAX	YES		
+E091	Set functions	4	MIN	YES		
+E091	Set functions	5	SUM	YES		
 E091	Set functions	6	ALL quantifier	NO		
-E091	Set functions	7	DISTINCT quantifier	NO		
+E091	Set functions	7	DISTINCT quantifier	YES		
 E101	Basic data manipulation			YES		
 E101	Basic data manipulation	1	INSERT statement	YES		
 E101	Basic data manipulation	3	Searched UPDATE statement	YES		
@@ -120,16 +120,16 @@ E121	Basic cursor support	10	FETCH statement implicit NEXT	NO
 E121	Basic cursor support	17	WITH HOLD cursors	NO		
 E131	Null value support (nulls in lieu of values)			YES		
 E141	Basic integrity constraints			NO		
-E141	Basic integrity constraints	1	NOT NULL constraints	NO		
+E141	Basic integrity constraints	1	NOT NULL constraints	YES		
 E141	Basic integrity constraints	2	UNIQUE constraints of NOT NULL columns	NO		
 E141	Basic integrity constraints	3	PRIMARY KEY constraints	YES		
 E141	Basic integrity constraints	4	Basic FOREIGN KEY constraint with the NO ACTION default for both referential delete action and referential update action	NO		
 E141	Basic integrity constraints	6	CHECK constraints	NO		
-E141	Basic integrity constraints	7	Column defaults	NO		
+E141	Basic integrity constraints	7	Column defaults	YES		
 E141	Basic integrity constraints	8	NOT NULL inferred on PRIMARY KEY	YES		
 E141	Basic integrity constraints	10	Names in a foreign key can be specified in any order	NO		
 E151	Transaction support			NO		
-E151	Transaction support	1	COMMIT statement	NO		
+E151	Transaction support	1	COMMIT statement	YES		
 E151	Transaction support	2	ROLLBACK statement	NO		
 E152	Basic SET TRANSACTION statement			NO		
 E152	Basic SET TRANSACTION statement	1	SET TRANSACTION statement: ISOLATION LEVEL SERIALIZABLE clause	NO		
@@ -141,22 +141,22 @@ E182	Module language			NO
 F021	Basic information schema			NO		
 F021	Basic information schema	1	COLUMNS view	YES		
 F021	Basic information schema	2	TABLES view	YES		
-F021	Basic information schema	3	VIEWS view	NO		
+F021	Basic information schema	3	VIEWS view	YES		
 F021	Basic information schema	4	TABLE_CONSTRAINTS view	YES		
 F021	Basic information schema	5	REFERENTIAL_CONSTRAINTS view	-		
 F021	Basic information schema	6	CHECK_CONSTRAINTS view	-		
 F031	Basic schema manipulation			NO		
 F031	Basic schema manipulation	1	CREATE TABLE statement to create persistent base tables	YES		
-F031	Basic schema manipulation	2	CREATE VIEW statement	NO		
-F031	Basic schema manipulation	3	GRANT statement	NO		
+F031	Basic schema manipulation	2	CREATE VIEW statement	YES		
+F031	Basic schema manipulation	3	GRANT statement	YES		
 F031	Basic schema manipulation	4	ALTER TABLE statement: ADD COLUMN clause	YES		
 F031	Basic schema manipulation	13	DROP TABLE statement: RESTRICT clause	NO		
 F031	Basic schema manipulation	16	DROP VIEW statement: RESTRICT clause	NO		
 F031	Basic schema manipulation	19	REVOKE statement: RESTRICT clause	NO		
 F032	CASCADE drop behavior			NO		
 F033	ALTER TABLE statement: DROP COLUMN clause			NO		
-F034	Extended REVOKE statement			NO		
-F034	Extended REVOKE statement	1	REVOKE statement performed by other than the owner of a schema object	NO		
+F034	Extended REVOKE statement			YES		
+F034	Extended REVOKE statement	1	REVOKE statement performed by other than the owner of a schema object	YES		
 F034	Extended REVOKE statement	2	REVOKE statement: GRANT OPTION FOR clause	NO		
 F034	Extended REVOKE statement	3	REVOKE statement to revoke a privilege that the grantee has WITH GRANT OPTION	NO		
 F041	Basic joined table			NO		
@@ -209,12 +209,12 @@ F231	Privilege tables	1	TABLE_PRIVILEGES view	NO
 F231	Privilege tables	2	COLUMN_PRIVILEGES view	NO		
 F231	Privilege tables	3	USAGE_PRIVILEGES view	NO		
 F251	Domain support			NO		
-F261	CASE expression			NO		
-F261	CASE expression	1	Simple CASE	NO		
-F261	CASE expression	2	Searched CASE	NO		
-F261	CASE expression	3	NULLIF	NO		
-F261	CASE expression	4	COALESCE	NO		
-F262	Extended CASE expression			NO		
+F261	CASE expression			YES		
+F261	CASE expression	1	Simple CASE	YES		
+F261	CASE expression	2	Searched CASE	YES		
+F261	CASE expression	3	NULLIF	YES		
+F261	CASE expression	4	COALESCE	YES		
+F262	Extended CASE expression			YES		
 F263	Comma-separated predicates in simple CASE expression			NO		
 F271	Compound character literals			NO		
 F281	LIKE enhancements			NO		
@@ -304,7 +304,7 @@ F741	Referential MATCH types			NO
 F751	View CHECK enhancements			NO		
 F761	Session management			NO		
 F762	CURRENT_CATALOG			NO		
-F763	CURRENT_SCHEMA			NO		
+F763	CURRENT_SCHEMA			YES		
 F771	Connection management			NO		crash shell only
 F781	Self-referencing operations			NO		
 F791	Insensitive cursors			NO		
@@ -451,12 +451,12 @@ T285	Enhanced derived column names			NO
 T301	Functional dependencies			NO		
 T312	OVERLAY function			NO		
 T321	Basic SQL-invoked routines			NO		
-T321	Basic SQL-invoked routines	1	User-defined functions with no overloading	NO		
+T321	Basic SQL-invoked routines	1	User-defined functions with no overloading	YES		
 T321	Basic SQL-invoked routines	2	User-defined stored procedures with no overloading	NO		
-T321	Basic SQL-invoked routines	3	Function invocation	NO		
+T321	Basic SQL-invoked routines	3	Function invocation	YES		
 T321	Basic SQL-invoked routines	4	CALL statement	NO		
 T321	Basic SQL-invoked routines	5	RETURN statement	NO		
-T321	Basic SQL-invoked routines	6	ROUTINES view	NO		
+T321	Basic SQL-invoked routines	6	ROUTINES view	YES		
 T321	Basic SQL-invoked routines	7	PARAMETERS view	NO		
 T322	Declared data type attributes			NO		
 T323	Explicit security for external routines			NO		
@@ -494,10 +494,10 @@ T611	Elementary OLAP operations			NO
 T612	Advanced OLAP operations			NO		
 T613	Sampling			NO		
 T614	NTILE function			NO		
-T615	LEAD and LAG functions			NO		
+T615	LEAD and LAG functions			YES		
 T616	Null treatment option for LEAD and LAG functions			NO		
-T617	FIRST_VALUE and LAST_VALUE function			NO		
-T618	NTH_VALUE function			NO		
+T617	FIRST_VALUE and LAST_VALUE function			YES		
+T618	NTH_VALUE function			YES		
 T619	Nested window functions			NO		
 T620	WINDOW clause: GROUPS option			NO		
 T621	Enhanced numeric functions			NO		missing: exp, power

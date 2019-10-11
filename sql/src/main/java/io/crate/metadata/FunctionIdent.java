@@ -21,37 +21,36 @@
 
 package io.crate.metadata;
 
-import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.collect.ComparisonChain;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Ordering;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Streamable;
+import org.elasticsearch.common.io.stream.Writeable;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-public class FunctionIdent implements Comparable<FunctionIdent>, Streamable {
+public final class FunctionIdent implements Comparable<FunctionIdent>, Writeable {
 
-    private String name;
-    private List<DataType> argumentTypes;
+    private final FunctionName fqnName;
+    private final List<DataType> argumentTypes;
 
-    public FunctionIdent() {
-
+    public FunctionIdent(FunctionName functionName, List<DataType> argumentTypes) {
+        this.fqnName = functionName;
+        this.argumentTypes = argumentTypes;
     }
 
-    public static FunctionIdent of(String name, DataType type1, DataType type2) {
-        return new FunctionIdent(name, ImmutableList.of(type1, type2));
+    public FunctionIdent(@Nullable String schema, String name, List<DataType> argumentTypes) {
+        this(new FunctionName(schema, name), argumentTypes);
     }
 
     public FunctionIdent(String name, List<DataType> argumentTypes) {
-        this.name = name;
-        this.argumentTypes = argumentTypes;
+        this(null, name, argumentTypes);
     }
 
     public List<DataType> argumentTypes() {
@@ -59,7 +58,11 @@ public class FunctionIdent implements Comparable<FunctionIdent>, Streamable {
     }
 
     public String name() {
-        return name;
+        return fqnName.name();
+    }
+
+    public FunctionName fqnName() {
+        return fqnName;
     }
 
     @Override
@@ -72,38 +75,36 @@ public class FunctionIdent implements Comparable<FunctionIdent>, Streamable {
         }
 
         FunctionIdent o = (FunctionIdent) obj;
-        return name.equalsIgnoreCase(o.name) &&
+        return Objects.equal(fqnName, o.fqnName) &&
                Objects.equal(argumentTypes, o.argumentTypes);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(name, argumentTypes);
+        return Objects.hashCode(fqnName, argumentTypes);
     }
 
     @Override
     public String toString() {
-        return MoreObjects.toStringHelper(this)
-            .add("name", name)
-            .add("argumentTypes", argumentTypes)
-            .toString();
+        return "FunctionIdent{" +
+               fqnName.toString() +
+               ", argumentTypes=" + argumentTypes +
+               '}';
     }
 
     @Override
     public int compareTo(FunctionIdent o) {
         return ComparisonChain.start()
-            .compare(name, o.name)
+            .compare(fqnName, o.fqnName)
             .compare(argumentTypes, o.argumentTypes, Ordering.<DataType>natural().lexicographical())
             .result();
     }
 
 
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        name = in.readString();
+    public FunctionIdent(StreamInput in) throws IOException {
+        fqnName = new FunctionName(in);
         int numTypes = in.readVInt();
         argumentTypes = new ArrayList<>(numTypes);
-
         for (int i = 0; i < numTypes; i++) {
             argumentTypes.add(DataTypes.fromStream(in));
         }
@@ -111,9 +112,8 @@ public class FunctionIdent implements Comparable<FunctionIdent>, Streamable {
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        out.writeString(name);
+        fqnName.writeTo(out);
         out.writeVInt(argumentTypes.size());
-
         for (DataType argumentType : argumentTypes) {
             DataTypes.toStream(argumentType, out);
         }

@@ -21,24 +21,33 @@
 
 package io.crate.plugin;
 
-
-import io.crate.blob.*;
-import io.crate.blob.v2.BlobIndexModule;
+import com.google.common.collect.ImmutableList;
+import io.crate.blob.BlobModule;
+import io.crate.blob.BlobService;
+import io.crate.blob.DeleteBlobAction;
+import io.crate.blob.PutChunkAction;
+import io.crate.blob.StartBlobAction;
+import io.crate.blob.TransportDeleteBlobAction;
+import io.crate.blob.TransportPutChunkAction;
+import io.crate.blob.TransportStartBlobAction;
 import io.crate.blob.v2.BlobIndicesModule;
-import io.crate.blob.v2.BlobShardModule;
-import io.crate.http.netty.CrateNettyHttpServerTransport;
-import org.elasticsearch.action.ActionModule;
+import io.crate.blob.v2.BlobIndicesService;
 import org.elasticsearch.common.component.LifecycleComponent;
 import org.elasticsearch.common.inject.Module;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.http.HttpServerModule;
+import org.elasticsearch.node.Node;
+import org.elasticsearch.plugins.ActionPlugin;
 import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.transport.TransportRequest;
+import org.elasticsearch.transport.TransportResponse;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
+import java.util.List;
 
-public class BlobPlugin extends Plugin {
+public class BlobPlugin extends Plugin implements ActionPlugin {
 
     private final Settings settings;
 
@@ -51,46 +60,40 @@ public class BlobPlugin extends Plugin {
     }
 
     public String description() {
-        return "plugin that adds BlOB support to crate";
+        return "Plugin that adds BLOB support to CrateDB";
     }
 
     @Override
-    public Collection<Module> nodeModules() {
-        if (settings.getAsBoolean("node.client", false)) {
-            return Collections.emptyList();
-        }
+    public Collection<Module> createGuiceModules() {
         Collection<Module> modules = new ArrayList<>(2);
         modules.add(new BlobModule());
-        modules.add(new BlobIndicesModule());
+        if (Node.NODE_DATA_SETTING.get(settings)) {
+            // the actual blob indices module is only available on data nodes. the blobservice on non data nodes will
+            // handle the requests redirection to data nodes.
+            modules.add(new BlobIndicesModule());
+        }
         return modules;
     }
 
     @Override
-    public Collection<Class<? extends LifecycleComponent>> nodeServices() {
-        // only start the service if we have a data node
-        if (settings.getAsBoolean("node.client", false)) {
-            return Collections.emptyList();
-        }
-        return Collections.<Class<? extends LifecycleComponent>>singletonList(BlobService.class);
+    public List<Setting<?>> getSettings() {
+        return Arrays.asList(
+            BlobIndicesService.SETTING_BLOBS_PATH,
+            BlobIndicesService.SETTING_INDEX_BLOBS_ENABLED,
+            BlobIndicesService.SETTING_INDEX_BLOBS_PATH
+        );
     }
 
     @Override
-    public Collection<Module> indexModules(Settings indexSettings) {
-        return Collections.<Module>singletonList(new BlobIndexModule(indexSettings));
+    public Collection<Class<? extends LifecycleComponent>> getGuiceServiceClasses() {
+        return ImmutableList.of(BlobService.class);
     }
 
     @Override
-    public Collection<Module> shardModules(Settings indexSettings) {
-        return Collections.<Module>singletonList(new BlobShardModule(indexSettings));
-    }
-
-    public void onModule(HttpServerModule module) {
-        module.setHttpServerTransport(CrateNettyHttpServerTransport.class, "crate");
-    }
-
-    public void onModule(ActionModule module) {
-        module.registerAction(PutChunkAction.INSTANCE, TransportPutChunkAction.class);
-        module.registerAction(StartBlobAction.INSTANCE, TransportStartBlobAction.class);
-        module.registerAction(DeleteBlobAction.INSTANCE, TransportDeleteBlobAction.class);
+    public List<ActionHandler<? extends TransportRequest, ? extends TransportResponse>> getActions() {
+        return Arrays.asList(
+            new ActionHandler<>(PutChunkAction.INSTANCE, TransportPutChunkAction.class),
+            new ActionHandler<>(StartBlobAction.INSTANCE, TransportStartBlobAction.class),
+            new ActionHandler<>(DeleteBlobAction.INSTANCE, TransportDeleteBlobAction.class));
     }
 }

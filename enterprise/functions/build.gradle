@@ -1,0 +1,34 @@
+apply from: "$rootDir/enterprise/enterpriseModule.gradle"
+
+archivesBaseName = 'functions'
+group = 'io.crate'
+description = 'Enterprise functions for CrateDB'
+
+configurations {
+    // export the main and test output so benchmarks (which are run as tests) can test the main output of this module
+    testOutput
+}
+
+dependencies {
+    implementation project(':sql')
+
+    testImplementation project(path: ':sql', configuration: 'testOutput')
+    testImplementation project(path: ':dex', configuration: 'testOutput')
+    testImplementation project(':integration-testing')
+    testImplementation "org.hamcrest:hamcrest:${versions.hamcrest}"
+    testImplementation("io.crate:crate-jdbc:${versions.crate_jdbc}") {
+            exclude group: 'net.java.dev.jna', module: 'jna'
+            exclude group: 'commons-logging', module: 'commons-logging'
+            exclude group: 'org.slf4j', module: 'jcl-over-slf4j'
+    }
+}
+
+task jarTest (type: Jar) {
+    from sourceSets.main.output
+    from sourceSets.test.output
+    classifier = 'enterprise-functions-main-and-tests'
+}
+
+artifacts {
+    testOutput jarTest
+}

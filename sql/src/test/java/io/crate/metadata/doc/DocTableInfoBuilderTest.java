@@ -22,57 +22,45 @@
 
 package io.crate.metadata.doc;
 
-import com.google.common.util.concurrent.MoreExecutors;
 import io.crate.Constants;
-import io.crate.exceptions.TableUnknownException;
+import io.crate.exceptions.RelationUnknown;
 import io.crate.metadata.Functions;
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.RelationName;
 import io.crate.test.integration.CrateUnitTest;
-import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.Version;
-import org.elasticsearch.action.admin.indices.template.put.TransportPutIndexTemplateAction;
 import org.elasticsearch.cluster.ClusterName;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.metadata.MetaData;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.test.cluster.NoopClusterService;
-import org.junit.Before;
 import org.junit.Test;
-import org.mockito.Mock;
 
 import java.util.Collections;
 import java.util.Locale;
-import java.util.concurrent.ExecutorService;
 
-import static org.mockito.Mockito.mock;
+import static com.carrotsearch.randomizedtesting.RandomizedTest.randomAsciiLettersOfLength;
+import static io.crate.testing.TestingHelpers.getFunctions;
+
 
 public class DocTableInfoBuilderTest extends CrateUnitTest {
 
-    private ExecutorService executorService;
-
-    @Mock
-    Functions functions;
-
-    @Before
-    public void prepare() throws Exception {
-        executorService = MoreExecutors.newDirectExecutorService();
-    }
+    private Functions functions = getFunctions();
 
     private String randomSchema() {
         if (randomBoolean()) {
             return DocSchemaInfo.NAME;
         } else {
-            return randomAsciiOfLength(3);
+            return randomAsciiLettersOfLength(3);
         }
     }
 
     @Test
     public void testNoTableInfoFromOrphanedPartition() throws Exception {
         String schemaName = randomSchema();
-        PartitionName partitionName = new PartitionName(schemaName, "test", Collections.singletonList(new BytesRef("boo")));
+        PartitionName partitionName = new PartitionName(
+            new RelationName(schemaName, "test"), Collections.singletonList("boo"));
         IndexMetaData.Builder indexMetaDataBuilder = IndexMetaData.builder(partitionName.asIndexName())
             .settings(Settings.builder().put("index.version.created", Version.CURRENT).build())
             .numberOfReplicas(0)
@@ -92,21 +80,16 @@ public class DocTableInfoBuilderTest extends CrateUnitTest {
             .put(indexMetaDataBuilder)
             .build();
 
-        NoopClusterService clusterService =
-            new NoopClusterService(ClusterState.builder(ClusterName.DEFAULT).metaData(metaData).build());
-
+        ClusterState state = ClusterState.builder(ClusterName.DEFAULT).metaData(metaData).build();
         DocTableInfoBuilder builder = new DocTableInfoBuilder(
             functions,
-            new TableIdent(schemaName, "test"),
-            clusterService,
-            new IndexNameExpressionResolver(Settings.EMPTY),
-            mock(TransportPutIndexTemplateAction.class),
-            executorService,
-            false
+            new RelationName(schemaName, "test"),
+            state,
+            new IndexNameExpressionResolver()
         );
 
-        expectedException.expect(TableUnknownException.class);
-        expectedException.expectMessage(String.format(Locale.ENGLISH, "Table '%s.test' unknown", schemaName));
+        expectedException.expect(RelationUnknown.class);
+        expectedException.expectMessage(String.format(Locale.ENGLISH, "Relation '%s.test' unknown", schemaName));
         builder.build();
     }
 }

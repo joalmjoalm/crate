@@ -21,40 +21,60 @@
 
 package io.crate.udc.ping;
 
-import com.google.common.util.concurrent.SettableFuture;
-import io.crate.ClusterId;
-import io.crate.ClusterIdService;
 import io.crate.http.HttpTestServer;
+import io.crate.license.LicenseData;
+import io.crate.license.LicenseService;
 import io.crate.monitor.ExtendedNetworkInfo;
 import io.crate.monitor.ExtendedNodeInfo;
 import io.crate.monitor.ExtendedOsInfo;
-import io.crate.test.integration.CrateUnitTest;
+import io.crate.monitor.SysInfo;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
 import org.codehaus.jackson.map.ObjectMapper;
 import org.codehaus.jackson.type.TypeReference;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.node.DiscoveryNode;
+import org.elasticsearch.common.settings.Settings;
 import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.core.Is.is;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class PingTaskTest extends CrateUnitTest {
+public class PingTaskTest extends CrateDummyClusterServiceUnitTest {
 
-    private ClusterService clusterService;
-    private ClusterIdService clusterIdService;
+    static private LicenseData LICENSE = new LicenseData(
+        System.currentTimeMillis() + TimeUnit.DAYS.toMillis(30),
+        "crate" ,
+        3
+        );
+
     private ExtendedNodeInfo extendedNodeInfo;
+    private LicenseService licenseService;
 
     private HttpTestServer testServer;
+
+    private PingTask createPingTask(String pingUrl, Settings settings) {
+        return new PingTask(
+            clusterService,
+            extendedNodeInfo,
+            pingUrl,
+            settings,
+            licenseService
+        );
+    }
+
+    private PingTask createPingTask() {
+        return createPingTask("http://dummy", Settings.EMPTY);
+    }
 
     @After
     public void cleanUp() {
@@ -65,38 +85,26 @@ public class PingTaskTest extends CrateUnitTest {
 
     @Before
     public void prepare() throws Exception {
-        clusterService = mock(ClusterService.class);
-        clusterIdService = mock(ClusterIdService.class);
-        DiscoveryNode discoveryNode = mock(DiscoveryNode.class);
-
-        SettableFuture<ClusterId> clusterIdFuture = SettableFuture.create();
-        clusterIdFuture.set(new ClusterId());
-        when(clusterIdService.clusterId()).thenReturn(clusterIdFuture);
-        when(clusterService.localNode()).thenReturn(discoveryNode);
-        when(discoveryNode.isMasterNode()).thenReturn(true);
-
         extendedNodeInfo = mock(ExtendedNodeInfo.class);
         when(extendedNodeInfo.networkInfo()).thenReturn(new ExtendedNetworkInfo(ExtendedNetworkInfo.NA_INTERFACE));
-        when(extendedNodeInfo.osInfo()).thenReturn(new ExtendedOsInfo(Collections.<String, Object>emptyMap()));
+        when(extendedNodeInfo.osInfo()).thenReturn(new ExtendedOsInfo(SysInfo.gather()));
+        licenseService = mock(LicenseService.class);
     }
 
     @Test
     public void testGetHardwareAddressMacAddrNull() throws Exception {
-        PingTask pingTask = new PingTask(
-            mock(ClusterService.class),
-            mock(ClusterIdService.class),
-            extendedNodeInfo,
-            "http://dummy");
+        PingTask pingTask = createPingTask();
         assertThat(pingTask.getHardwareAddress(), Matchers.nullValue());
     }
 
     @Test
-    public void testSuccessfulPingTaskRun() throws Exception {
+    public void testSuccessfulPingTaskRunWhenLicenseIsNotNull() throws Exception {
+        when(licenseService.currentLicense()).thenReturn(LICENSE);
+
         testServer = new HttpTestServer(18080, false);
         testServer.run();
 
-        PingTask task = new PingTask(
-            clusterService, clusterIdService, extendedNodeInfo, "http://localhost:18080/");
+        PingTask task = createPingTask("http://localhost:18080/", Settings.EMPTY);
         task.run();
         assertThat(testServer.responses.size(), is(1));
         task.run();
@@ -135,15 +143,54 @@ public class PingTaskTest extends CrateUnitTest {
             assertThat(map.get("crate_version"), is(notNullValue()));
             assertThat(map, hasKey("java_version"));
             assertThat(map.get("java_version"), is(notNullValue()));
+            assertThat(map, hasKey("license_expiry_date"));
+            assertThat(map.get("license_expiry_date"), is(String.valueOf(LICENSE.expiryDateInMs())));
+            assertThat(map, hasKey("license_issued_to"));
+            assertThat(map.get("license_issued_to"), is(LICENSE.issuedTo()));
+            assertThat(Integer.parseInt(map.get("num_processors")), greaterThan(0));
+            assertThat(map, hasKey("license_max_nodes"));
+            assertThat(map.get("license_max_nodes"), is(String.valueOf(LICENSE.maxNumberOfNodes())));
+            assertThat(map, hasKey("enterprise_edition"));
+            assertThat(map.get("enterprise_edition"), is(String.valueOf(true)));
         }
     }
 
     @Test
+    public void testSuccessfulPingTaskRunWhenLicenseIsNull() throws Exception {
+        when(licenseService.currentLicense()).thenReturn(null);
+
+        testServer = new HttpTestServer(18080, false);
+        testServer.run();
+
+        PingTask task = createPingTask("http://localhost:18080/", Settings.EMPTY);
+        task.run();
+        assertThat(testServer.responses.size(), is(1));
+        String json = testServer.responses.get(0);
+        Map<String, String> map = new HashMap<>();
+        ObjectMapper mapper = new ObjectMapper();
+        try {
+            //convert JSON string to Map
+            map = mapper.readValue(json,
+                new TypeReference<HashMap<String, String>>() {});
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        assertThat(map, not(hasKey("license_expiry_date")));
+        assertThat(map, not(hasKey("license_issued_to")));
+        assertThat(map, not(hasKey("license_max_nodes")));
+        assertThat(map, hasKey("enterprise_edition"));
+        assertThat(map.get("enterprise_edition"), is(String.valueOf(false)));
+    }
+
+    @Test
     public void testUnsuccessfulPingTaskRun() throws Exception {
+        when(licenseService.currentLicense()).thenReturn(LICENSE);
+
         testServer = new HttpTestServer(18081, true);
         testServer.run();
-        PingTask task = new PingTask(
-            clusterService, clusterIdService, extendedNodeInfo, "http://localhost:18081/");
+        PingTask task = createPingTask("http://localhost:18081/", Settings.EMPTY);
         task.run();
         assertThat(testServer.responses.size(), is(1));
         task.run();
@@ -184,6 +231,12 @@ public class PingTaskTest extends CrateUnitTest {
             assertThat(map.get("crate_version"), is(notNullValue()));
             assertThat(map, hasKey("java_version"));
             assertThat(map.get("java_version"), is(notNullValue()));
+            assertThat(map, hasKey("license_expiry_date"));
+            assertThat(map.get("license_expiry_date"), is(notNullValue()));
+            assertThat(map, hasKey("license_issued_to"));
+            assertThat(map.get("license_issued_to"), is(notNullValue()));
+            assertThat(map, hasKey("license_max_nodes"));
+            assertThat(map.get("license_max_nodes"), is(notNullValue()));
         }
     }
 }

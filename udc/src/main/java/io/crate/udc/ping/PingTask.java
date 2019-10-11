@@ -21,14 +21,16 @@
 
 package io.crate.udc.ping;
 
-import com.google.common.base.Joiner;
-import io.crate.ClusterIdService;
-import io.crate.Version;
+import io.crate.license.LicenseData;
+import io.crate.license.LicenseService;
 import io.crate.monitor.ExtendedNodeInfo;
-import org.elasticsearch.cluster.ClusterService;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.Version;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.XContentFactory;
 
@@ -39,105 +41,105 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.security.NoSuchAlgorithmException;
-import java.util.*;
-import java.util.concurrent.ExecutionException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TimerTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class PingTask extends TimerTask {
 
-    public static final TimeValue HTTP_TIMEOUT = new TimeValue(5, TimeUnit.SECONDS);
-
-    private static final ESLogger logger = Loggers.getLogger(PingTask.class);
+    private static final TimeValue HTTP_TIMEOUT = new TimeValue(5, TimeUnit.SECONDS);
+    private static final Logger LOGGER = LogManager.getLogger(PingTask.class);
 
     private final ClusterService clusterService;
-    private final ClusterIdService clusterIdService;
     private final ExtendedNodeInfo extendedNodeInfo;
     private final String pingUrl;
+    private final Settings settings;
+    private final LicenseService licenseService;
 
-    private AtomicLong successCounter = new AtomicLong(0);
-    private AtomicLong failCounter = new AtomicLong(0);
+    private final AtomicLong successCounter = new AtomicLong(0);
+    private final AtomicLong failCounter = new AtomicLong(0);
 
     public PingTask(ClusterService clusterService,
-                    ClusterIdService clusterIdService,
                     ExtendedNodeInfo extendedNodeInfo,
-                    String pingUrl) {
+                    String pingUrl,
+                    Settings settings,
+                    LicenseService licenseService) {
         this.clusterService = clusterService;
-        this.clusterIdService = clusterIdService;
-        this.extendedNodeInfo = extendedNodeInfo;
         this.pingUrl = pingUrl;
+        this.settings = settings;
+        this.extendedNodeInfo = extendedNodeInfo;
+        this.licenseService = licenseService;
     }
 
-    @SuppressWarnings("unchecked")
-    public Map<String, Object> getKernelData() {
+    private Map<String, String> getKernelData() {
         return extendedNodeInfo.osInfo().kernelData();
     }
 
-    public
-    @Nullable
-    String getClusterId() {
-        // wait until clusterId is available (master has been elected)
-        try {
-            return clusterIdService.clusterId().get().value().toString();
-        } catch (InterruptedException | ExecutionException e) {
-            if (logger.isTraceEnabled()) {
-                logger.trace("Error getting cluster id", e);
-            }
-            return null;
-        }
+    private String getClusterId() {
+        return clusterService.state().metaData().clusterUUID();
     }
 
-    public Boolean isMasterNode() {
+    private Boolean isMasterNode() {
         return clusterService.localNode().isMasterNode();
     }
 
-    public Map<String, Object> getCounters() {
-        return new HashMap<String, Object>() {{
-            put("success", successCounter.get());
-            put("failure", failCounter.get());
-        }};
+    private Map<String, Object> getCounters() {
+        return Map.of(
+            "success", successCounter.get(),
+            "failure", failCounter.get()
+        );
     }
 
     @Nullable
-    public String getHardwareAddress() {
+    String getHardwareAddress() {
         String macAddress = extendedNodeInfo.networkInfo().primaryInterface().macAddress();
-        return (macAddress == null || macAddress.equals("")) ? null : macAddress.toLowerCase(Locale.ENGLISH);
+        return macAddress.equals("") ? null : macAddress;
     }
 
-    public String getCrateVersion() {
-        return Version.CURRENT.number();
-    }
+    private URL buildPingUrl() throws URISyntaxException, IOException {
 
-    public String getJavaVersion() {
-        return System.getProperty("java.version");
-    }
+        final URI uri = new URI(this.pingUrl);
 
-    private URL buildPingUrl() throws URISyntaxException, IOException, NoSuchAlgorithmException {
-
-        URI uri = new URI(this.pingUrl);
-
-        Map<String, String> queryMap = new HashMap<>();
-        queryMap.put("cluster_id", getClusterId()); // block until clusterId is available
-        queryMap.put("kernel", XContentFactory.jsonBuilder().map(getKernelData()).string());
+        // specifying the initialCapacity based on “expected number of elements / load_factor”
+        // in this case, the "expected number of elements" = 10 while default load factor = .75
+        Map<String, String> queryMap = new HashMap<>(14);
+        queryMap.put("cluster_id", getClusterId());
+        queryMap.put("kernel", Strings.toString(XContentFactory.jsonBuilder().map(getKernelData())));
         queryMap.put("master", isMasterNode().toString());
-        queryMap.put("ping_count", XContentFactory.jsonBuilder().map(getCounters()).string());
+        queryMap.put("ping_count", Strings.toString(XContentFactory.jsonBuilder().map(getCounters())));
         queryMap.put("hardware_address", getHardwareAddress());
-        queryMap.put("crate_version", getCrateVersion());
-        queryMap.put("java_version", getJavaVersion());
+        queryMap.put("num_processors", Integer.toString(Runtime.getRuntime().availableProcessors()));
+        queryMap.put("crate_version", Version.CURRENT.externalNumber());
+        queryMap.put("java_version", System.getProperty("java.version"));
 
-        if (logger.isDebugEnabled()) {
-            logger.debug("Sending data: {}", queryMap);
+        LicenseData license = licenseService.currentLicense();
+        if (license != null) {
+            queryMap.put("enterprise_edition", String.valueOf(true));
+            queryMap.put("license_expiry_date", String.valueOf(license.expiryDateInMs()));
+            queryMap.put("license_issued_to", license.issuedTo());
+            queryMap.put("license_max_nodes", String.valueOf(license.maxNumberOfNodes()));
+        } else {
+            queryMap.put("enterprise_edition", String.valueOf(false));
         }
 
-        final Joiner joiner = Joiner.on('=');
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("Sending data: {}", queryMap);
+        }
+
         List<String> params = new ArrayList<>(queryMap.size());
         for (Map.Entry<String, String> entry : queryMap.entrySet()) {
-            if (entry.getValue() != null) {
-                params.add(joiner.join(entry.getKey(), entry.getValue()));
+            String value = entry.getValue();
+            if (value != null) {
+                params.add(entry.getKey() + '=' + value);
             }
         }
-        String query = Joiner.on('&').join(params);
+        String query = String.join("&", params);
 
         return new URI(
             uri.getScheme(), uri.getUserInfo(), uri.getHost(), uri.getPort(),
@@ -149,8 +151,8 @@ public class PingTask extends TimerTask {
     public void run() {
         try {
             URL url = buildPingUrl();
-            if (logger.isDebugEnabled()) {
-                logger.debug("Sending UDC information to {}...", url);
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("Sending UDC information to {}...", url);
             }
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout((int) HTTP_TIMEOUT.millis());
@@ -159,11 +161,11 @@ public class PingTask extends TimerTask {
             if (conn.getResponseCode() >= 300) {
                 throw new Exception(String.format(Locale.ENGLISH, "%s Responded with Code %d", url.getHost(), conn.getResponseCode()));
             }
-            if (logger.isDebugEnabled()) {
-                BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+            if (LOGGER.isDebugEnabled()) {
+                BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
                 String line = reader.readLine();
                 while (line != null) {
-                    logger.debug(line);
+                    LOGGER.debug(line);
                     line = reader.readLine();
                 }
                 reader.close();
@@ -172,8 +174,8 @@ public class PingTask extends TimerTask {
             }
             successCounter.incrementAndGet();
         } catch (Exception e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Error sending UDC information", e);
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("Error sending UDC information", e);
             }
             failCounter.incrementAndGet();
         }

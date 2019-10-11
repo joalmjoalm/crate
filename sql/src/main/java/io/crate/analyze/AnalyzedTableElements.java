@@ -23,32 +23,44 @@ package io.crate.analyze;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
-import io.crate.action.sql.SessionContext;
-import io.crate.analyze.expressions.ExpressionAnalysisContext;
-import io.crate.analyze.expressions.ExpressionAnalyzer;
 import io.crate.analyze.expressions.TableReferenceResolver;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.format.SymbolPrinter;
 import io.crate.exceptions.ColumnUnknownException;
-import io.crate.metadata.*;
-import io.crate.metadata.table.TableInfo;
-import io.crate.operation.scalar.cast.CastFunctionResolver;
+import io.crate.expression.scalar.cast.CastFunctionResolver;
+import io.crate.expression.symbol.RefVisitor;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.format.SymbolPrinter;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.FulltextAnalyzerResolver;
+import io.crate.metadata.Functions;
+import io.crate.metadata.GeneratedReference;
+import io.crate.metadata.Reference;
+import io.crate.metadata.ReferenceIdent;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.RowGranularity;
+import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.settings.Settings;
 
 import javax.annotation.Nullable;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
-public class AnalyzedTableElements {
+public class AnalyzedTableElements<T> {
 
-    List<AnalyzedColumnDefinition> partitionedByColumns = new ArrayList<>();
-    private List<AnalyzedColumnDefinition> columns = new ArrayList<>();
+    public List<AnalyzedColumnDefinition<T>> partitionedByColumns = new ArrayList<>();
+    private List<AnalyzedColumnDefinition<T>> columns = new ArrayList<>();
     private Set<ColumnIdent> columnIdents = new HashSet<>();
-    private Map<ColumnIdent, String> columnTypes = new HashMap<>();
+    private Map<ColumnIdent, DataType> columnTypes = new HashMap<>();
     private Set<String> primaryKeys;
     private Set<String> notNullColumns;
     private List<List<String>> partitionedBy;
@@ -58,60 +70,123 @@ public class AnalyzedTableElements {
     /**
      * additional primary keys that are not inline with a column definition
      */
-    private Set<String> additionalPrimaryKeys = new LinkedHashSet<>();
-    private Map<String, Set<String>> copyToMap = new HashMap<>();
+    private List<T> additionalPrimaryKeys = new ArrayList<>();
+    private Map<T, Set<String>> copyToMap = new HashMap<>();
 
+    public AnalyzedTableElements() {
+    }
 
-    public Map<String, Object> toMapping() {
-        Map<String, Object> mapping = new HashMap<>();
-        Map<String, Object> meta = new HashMap<>();
-        Map<String, Object> properties = new HashMap<>(columns.size());
+    private AnalyzedTableElements(List<AnalyzedColumnDefinition<T>> partitionedByColumns,
+                                  List<AnalyzedColumnDefinition<T>> columns,
+                                  Set<ColumnIdent> columnIdents,
+                                  Map<ColumnIdent, DataType> columnTypes,
+                                  Set<String> primaryKeys,
+                                  Set<String> notNullColumns,
+                                  List<List<String>> partitionedBy,
+                                  int numGeneratedColumns,
+                                  List<T> additionalPrimaryKeys,
+                                  Map<T, Set<String>> copyToMap) {
+        this.partitionedByColumns = partitionedByColumns;
+        this.columns = columns;
+        this.columnIdents = columnIdents;
+        this.columnTypes = columnTypes;
+        this.primaryKeys = primaryKeys;
+        this.notNullColumns = notNullColumns;
+        this.partitionedBy = partitionedBy;
+        this.numGeneratedColumns = numGeneratedColumns;
+        this.additionalPrimaryKeys = additionalPrimaryKeys;
+        this.copyToMap = copyToMap;
+    }
+
+    static Map<String, Object> toMapping(AnalyzedTableElements<Object> elements) {
+        final Map<String, Object> mapping = new HashMap<>();
+        final Map<String, Object> meta = new HashMap<>();
+        final Map<String, Object> properties = new HashMap<>(elements.columns.size());
 
         Map<String, String> generatedColumns = new HashMap<>();
         Map<String, Object> indicesMap = new HashMap<>();
-        for (AnalyzedColumnDefinition column : columns) {
-            properties.put(column.name(), column.toMapping());
-            if (column.isIndex()) {
+        for (AnalyzedColumnDefinition<Object> column : elements.columns) {
+            properties.put(column.name(), AnalyzedColumnDefinition.toMapping(column));
+            if (column.isIndexColumn()) {
                 indicesMap.put(column.name(), column.toMetaIndicesMapping());
             }
-            if (column.formattedGeneratedExpression() != null) {
-                generatedColumns.put(column.name(), column.formattedGeneratedExpression());
-            }
+            addToGeneratedColumns("", column, generatedColumns);
         }
 
-        if (!partitionedByColumns.isEmpty()) {
-            meta.put("partitioned_by", partitionedBy());
+        if (!elements.partitionedByColumns.isEmpty()) {
+            meta.put("partitioned_by", elements.partitionedBy());
         }
         if (!indicesMap.isEmpty()) {
             meta.put("indices", indicesMap);
         }
-        if (!primaryKeys().isEmpty()) {
-            meta.put("primary_keys", primaryKeys());
+        if (!primaryKeys(elements).isEmpty()) {
+            meta.put("primary_keys", primaryKeys(elements));
         }
         if (!generatedColumns.isEmpty()) {
             meta.put("generated_columns", generatedColumns);
         }
-        if (!notNullColumns().isEmpty()) {
+        if (!notNullColumns(elements).isEmpty()) {
             Map<String, Object> constraints = new HashMap<>();
-            constraints.put("not_null", notNullColumns());
+            constraints.put("not_null", notNullColumns(elements));
             meta.put("constraints", constraints);
         }
 
         mapping.put("_meta", meta);
         mapping.put("properties", properties);
-        mapping.put("_all", ImmutableMap.of("enabled", false));
 
         return mapping;
     }
 
+    private static void addToGeneratedColumns(String columnPrefix,
+                                              AnalyzedColumnDefinition<Object> column,
+                                              Map<String, String> generatedColumns) {
+        String generatedExpression = column.formattedGeneratedExpression();
+        if (generatedExpression != null) {
+            generatedColumns.put(columnPrefix + column.name(), generatedExpression);
+        }
+        for (AnalyzedColumnDefinition<Object> child : column.children()) {
+            addToGeneratedColumns(columnPrefix + column.name() + '.', child, generatedColumns);
+        }
+    }
+
+    public <U> AnalyzedTableElements<U> map(Function<? super T, ? extends U> mapper) {
+        List<U> additionalPrimaryKeys = new ArrayList<>(this.additionalPrimaryKeys.size());
+        for (T p : this.additionalPrimaryKeys) {
+            additionalPrimaryKeys.add(mapper.apply(p));
+        }
+        Map<U, Set<String>> copyToMap = new HashMap<>(this.copyToMap.size());
+        for (Map.Entry<T, Set<String>> entry : this.copyToMap.entrySet()) {
+            copyToMap.put(mapper.apply(entry.getKey()), entry.getValue());
+        }
+        List<AnalyzedColumnDefinition<U>> partitionedByColumns = new ArrayList<>(this.partitionedByColumns.size());
+        for (AnalyzedColumnDefinition<T> d : this.partitionedByColumns) {
+            partitionedByColumns.add(d.map(mapper));
+        }
+        List<AnalyzedColumnDefinition<U>> columns = new ArrayList<>(this.columns.size());
+        for (AnalyzedColumnDefinition<T> d : this.columns) {
+            columns.add(d.map(mapper));
+        }
+        return new AnalyzedTableElements<>(
+            partitionedByColumns,
+            columns,
+            columnIdents,
+            columnTypes,
+            primaryKeys,
+            notNullColumns,
+            partitionedBy,
+            numGeneratedColumns,
+            additionalPrimaryKeys,
+            copyToMap
+        );
+    }
+
+
     public List<List<String>> partitionedBy() {
         if (partitionedBy == null) {
             partitionedBy = new ArrayList<>(partitionedByColumns.size());
-            for (AnalyzedColumnDefinition partitionedByColumn : partitionedByColumns) {
+            for (AnalyzedColumnDefinition<T> partitionedByColumn : partitionedByColumns) {
                 partitionedBy.add(ImmutableList.of(
-                    partitionedByColumn.ident().fqn(),
-                    partitionedByColumn.dataType())
-                );
+                    partitionedByColumn.ident().fqn(), partitionedByColumn.typeNameForESMapping()));
             }
         }
 
@@ -119,55 +194,73 @@ public class AnalyzedTableElements {
     }
 
     private void expandColumnIdents() {
-        for (AnalyzedColumnDefinition column : columns) {
+        for (AnalyzedColumnDefinition<T> column : columns) {
             expandColumn(column);
         }
     }
 
-    private void expandColumn(AnalyzedColumnDefinition column) {
-        if (column.isIndex()) {
+    private void expandColumn(AnalyzedColumnDefinition<T> column) {
+        if (column.isIndexColumn()) {
             columnIdents.remove(column.ident());
             return;
         }
 
         columnIdents.add(column.ident());
         columnTypes.put(column.ident(), column.dataType());
-        for (AnalyzedColumnDefinition child : column.children()) {
+        for (AnalyzedColumnDefinition<T> child : column.children()) {
             expandColumn(child);
         }
     }
 
-    public Set<String> notNullColumns() {
-        if (notNullColumns == null) {
-            notNullColumns = new HashSet<>();
-            for (AnalyzedColumnDefinition column : columns) {
-                String fqn = column.ident().fqn();
-                if (column.isNotNull() && !primaryKeys().contains(fqn)) { // Columns part of pk are implicitly not null
-                    notNullColumns.add(fqn);
-                }
+    static Set<String> notNullColumns(AnalyzedTableElements<Object> elements) {
+        if (elements.notNullColumns == null) {
+            elements.notNullColumns = new HashSet<>();
+            for (AnalyzedColumnDefinition<Object> column : elements.columns) {
+                addNotNullFromChildren(column, elements);
             }
         }
-        return notNullColumns;
+        return elements.notNullColumns;
     }
 
-    public Set<String> primaryKeys() {
-        if (primaryKeys == null) {
-            primaryKeys = new LinkedHashSet<>(); // To preserve order
-            primaryKeys.addAll(additionalPrimaryKeys);
-            for (AnalyzedColumnDefinition column : columns) {
-                addPrimaryKeys(primaryKeys, column);
+    /**
+     * Recursively add all not null constraints from child columns (object columns)
+     */
+    private static void addNotNullFromChildren(AnalyzedColumnDefinition<Object> parentColumn, AnalyzedTableElements<Object> elements) {
+        LinkedList<AnalyzedColumnDefinition<Object>> childColumns = new LinkedList<>();
+        childColumns.add(parentColumn);
+
+        while (!childColumns.isEmpty()) {
+            AnalyzedColumnDefinition<Object> column = childColumns.remove();
+            String fqn = column.ident().fqn();
+            if (column.hasNotNullConstraint() && !primaryKeys(elements).contains(fqn)) { // Columns part of pk are implicitly not null
+                elements.notNullColumns.add(fqn);
+            }
+            childColumns.addAll(column.children());
+        }
+    }
+
+    public static Set<String> primaryKeys(AnalyzedTableElements<Object> elements) {
+        if (elements.primaryKeys == null) {
+            elements.primaryKeys = new LinkedHashSet<>(); // To preserve order
+            for (Object pk : elements.additionalPrimaryKeys) {
+                String pkAsString = pk.toString();
+                checkPrimaryKeyAlreadyDefined(elements.primaryKeys, pkAsString);
+                elements.primaryKeys.add(pkAsString);
+            }
+            for (AnalyzedColumnDefinition<Object> column : elements.columns) {
+                elements.addPrimaryKeys(elements.primaryKeys, column);
             }
         }
-        return primaryKeys;
+        return elements.primaryKeys;
     }
 
-    private static void addPrimaryKeys(Set<String> primaryKeys, AnalyzedColumnDefinition column) {
-        if (column.isPrimaryKey()) {
+    private void addPrimaryKeys(Set<String> primaryKeys, AnalyzedColumnDefinition<T> column) {
+        if (column.hasPrimaryKeyConstraint()) {
             String fqn = column.ident().fqn();
             checkPrimaryKeyAlreadyDefined(primaryKeys, fqn);
             primaryKeys.add(fqn);
         }
-        for (AnalyzedColumnDefinition analyzedColumnDefinition : column.children()) {
+        for (AnalyzedColumnDefinition<T> analyzedColumnDefinition : column.children()) {
             addPrimaryKeys(primaryKeys, analyzedColumnDefinition);
         }
     }
@@ -175,164 +268,213 @@ public class AnalyzedTableElements {
     private static void checkPrimaryKeyAlreadyDefined(Set<String> primaryKeys, String columnName) {
         if (primaryKeys.contains(columnName)) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "Column \"%s\" appears twice in primary key constraint", columnName));
+                                                             "Column \"%s\" appears twice in primary key constraint", columnName));
         }
     }
 
-    public void addPrimaryKey(String fqColumnName) {
-        checkPrimaryKeyAlreadyDefined(additionalPrimaryKeys, fqColumnName);
+    void addPrimaryKey(T fqColumnName) {
         additionalPrimaryKeys.add(fqColumnName);
     }
 
-    public void add(AnalyzedColumnDefinition analyzedColumnDefinition) {
+    public void add(AnalyzedColumnDefinition<T> analyzedColumnDefinition) {
         if (columnIdents.contains(analyzedColumnDefinition.ident())) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "column \"%s\" specified more than once", analyzedColumnDefinition.ident().sqlFqn()));
+                                                             "column \"%s\" specified more than once", analyzedColumnDefinition.ident().sqlFqn()));
         }
         columnIdents.add(analyzedColumnDefinition.ident());
         columns.add(analyzedColumnDefinition);
         columnTypes.put(analyzedColumnDefinition.ident(), analyzedColumnDefinition.dataType());
-        if (analyzedColumnDefinition.generatedExpression() != null) {
+        if (analyzedColumnDefinition.isGenerated()) {
             numGeneratedColumns++;
         }
+    }
+
+    public static Settings validateAndBuildSettings(AnalyzedTableElements<Object> tableElementsEvaluated,
+                                                    FulltextAnalyzerResolver fulltextAnalyzerResolver) {
+        Settings.Builder builder = Settings.builder();
+        for (AnalyzedColumnDefinition<Object> column : tableElementsEvaluated.columns) {
+            AnalyzedColumnDefinition.applyAndValidateAnalyzerSettings(column, fulltextAnalyzerResolver);
+            builder.put(column.builtAnalyzerSettings());
+        }
+        return builder.build();
+    }
+
+    public static Map<String, Object> finalizeAndValidate(RelationName relationName,
+                                                          AnalyzedTableElements<Symbol> tableElementsWithExpressionSymbols,
+                                                          AnalyzedTableElements<Object> tableElementsEvaluated,
+                                                          Functions functions) {
+        tableElementsEvaluated.expandColumnIdents();
+        validateExpressions(tableElementsWithExpressionSymbols, tableElementsEvaluated, functions);
+        for (AnalyzedColumnDefinition<Object> column : tableElementsEvaluated.columns) {
+            column.validate();
+            tableElementsEvaluated.addCopyToInfo(column);
+        }
+        validateIndexDefinitions(relationName, tableElementsEvaluated);
+        validatePrimaryKeys(relationName, tableElementsEvaluated);
+        return toMapping(tableElementsEvaluated);
+    }
+
+    private static void validateExpressions(AnalyzedTableElements<Symbol> tableElementsWithExpressionSymbols,
+                                            AnalyzedTableElements<Object> tableElementsEvaluated,
+                                            Functions functions) {
+        SymbolPrinter printer = new SymbolPrinter(functions);
+        for (int i = 0; i < tableElementsWithExpressionSymbols.columns.size(); i++) {
+            processExpressions(
+                tableElementsWithExpressionSymbols.columns.get(i),
+                tableElementsEvaluated.columns.get(i),
+                printer);
+        }
+    }
+
+    public TableReferenceResolver referenceResolver(RelationName relationName) {
+        List<Reference> tableReferences = new ArrayList<>();
+        for (AnalyzedColumnDefinition<T> columnDefinition : columns) {
+            buildReference(relationName, columnDefinition, tableReferences);
+        }
+        return new TableReferenceResolver(tableReferences, relationName);
+    }
+
+    private static void processExpressions(AnalyzedColumnDefinition<Symbol> columnDefinitionWithExpressionSymbols,
+                                           AnalyzedColumnDefinition<Object> columnDefinitionEvaluated,
+                                           SymbolPrinter printer) {
+        Symbol generatedExpression = columnDefinitionWithExpressionSymbols.generatedExpression();
+        if (generatedExpression != null) {
+            validateAndFormatExpression(
+                generatedExpression,
+                columnDefinitionWithExpressionSymbols,
+                columnDefinitionEvaluated,
+                printer,
+                columnDefinitionEvaluated::formattedGeneratedExpression);
+        }
+        Symbol defaultExpression = columnDefinitionWithExpressionSymbols.defaultExpression();
+        if (defaultExpression != null) {
+            RefVisitor.visitRefs(defaultExpression, r -> {
+                throw new UnsupportedOperationException(
+                    "Columns cannot be used in this context. " +
+                    "Maybe you wanted to use a string literal which requires single quotes: '" + r.column().sqlFqn() + "'");
+            });
+            validateAndFormatExpression(
+                defaultExpression,
+                columnDefinitionWithExpressionSymbols,
+                columnDefinitionEvaluated,
+                printer,
+                columnDefinitionEvaluated::formattedDefaultExpression);
+        }
+        for (int i = 0; i < columnDefinitionWithExpressionSymbols.children().size(); i++) {
+            processExpressions(
+                columnDefinitionWithExpressionSymbols.children().get(i),
+                columnDefinitionEvaluated.children().get(i),
+                printer
+            );
+        }
+    }
+
+    private static void validateAndFormatExpression(Symbol function,
+                                                    AnalyzedColumnDefinition<Symbol> columnDefinitionWithExpressionSymbols,
+                                                    AnalyzedColumnDefinition<Object> columnDefinitionEvaluated,
+                                                    SymbolPrinter symbolPrinter,
+                                                    Consumer<String> formattedExpressionConsumer) {
+        String formattedExpression;
+        DataType valueType = function.valueType();
+        DataType definedType = columnDefinitionWithExpressionSymbols.dataType();
+
+        // check for optional defined type and add `cast` to expression if possible
+        if (definedType != null && !definedType.equals(valueType)) {
+            final DataType columnDataType;
+            if (ArrayType.NAME.equals(columnDefinitionWithExpressionSymbols.collectionType())) {
+                columnDataType = new ArrayType(definedType);
+            } else {
+                columnDataType = definedType;
+            }
+            Preconditions.checkArgument(
+                valueType.isConvertableTo(columnDataType),
+                "expression value type '%s' not supported for conversion to '%s'",
+                valueType, columnDataType.getName());
+
+            Symbol castFunction = CastFunctionResolver.generateCastFunction(function, columnDataType, false);
+            formattedExpression = symbolPrinter.printUnqualified(castFunction);
+        } else {
+            if (valueType instanceof ArrayType) {
+                columnDefinitionEvaluated.collectionType(ArrayType.NAME);
+                columnDefinitionEvaluated.dataType(ArrayType.unnest(valueType).getName());
+            } else {
+                columnDefinitionEvaluated.dataType(valueType.getName());
+            }
+            formattedExpression = symbolPrinter.printUnqualified(function);
+        }
+        formattedExpressionConsumer.accept(formattedExpression);
     }
 
     public Settings settings() {
         Settings.Builder builder = Settings.builder();
         for (AnalyzedColumnDefinition column : columns) {
-            builder.put(column.analyzerSettings());
+            builder.put(column.builtAnalyzerSettings());
         }
         return builder.build();
     }
 
-    public void finalizeAndValidate(TableIdent tableIdent,
-                                    @Nullable TableInfo tableInfo,
-                                    AnalysisMetaData analysisMetaData,
-                                    ParameterContext parameterContext,
-                                    SessionContext sessionContext,
-                                    StmtCtx stmtCtx
-    ) {
-        expandColumnIdents();
-        validateGeneratedColumns(tableIdent, tableInfo, analysisMetaData, parameterContext, sessionContext, stmtCtx);
-        for (AnalyzedColumnDefinition column : columns) {
-            column.validate();
-            addCopyToInfo(column);
-        }
-        validateIndexDefinitions();
-        validatePrimaryKeys();
-    }
-
-    private void validateGeneratedColumns(TableIdent tableIdent,
-                                          @Nullable TableInfo tableInfo,
-                                          AnalysisMetaData analysisMetaData,
-                                          ParameterContext parameterContext,
-                                          SessionContext sessionContext,
-                                          StmtCtx stmtCtx) {
-        List<Reference> tableReferences = new ArrayList<>();
-        for (AnalyzedColumnDefinition columnDefinition : columns) {
-            buildReference(tableIdent, columnDefinition, tableReferences);
-        }
-        if (tableInfo != null) {
-            // add existing references
-            tableReferences.addAll(tableInfo.columns());
-        }
-
-        TableReferenceResolver tableReferenceResolver = new TableReferenceResolver(tableReferences);
-        ExpressionAnalyzer expressionAnalyzer = new ExpressionAnalyzer(
-            analysisMetaData, sessionContext, parameterContext, tableReferenceResolver, null);
-        SymbolPrinter printer = new SymbolPrinter(analysisMetaData.functions());
-        ExpressionAnalysisContext expressionAnalysisContext = new ExpressionAnalysisContext(stmtCtx);
-        for (AnalyzedColumnDefinition columnDefinition : columns) {
-            if (columnDefinition.generatedExpression() != null) {
-                processGeneratedExpression(expressionAnalyzer, printer, columnDefinition, expressionAnalysisContext);
-            }
-        }
-    }
-
-    private void processGeneratedExpression(ExpressionAnalyzer expressionAnalyzer,
-                                            SymbolPrinter symbolPrinter,
-                                            AnalyzedColumnDefinition columnDefinition,
-                                            ExpressionAnalysisContext expressionAnalysisContext) {
-        // validate expression
-        Symbol function = expressionAnalyzer.convert(columnDefinition.generatedExpression(), expressionAnalysisContext);
-
-        String formattedExpression;
-        DataType valueType = function.valueType();
-        DataType definedType =
-            columnDefinition.dataType() == null ? null : DataTypes.ofMappingNameSafe(columnDefinition.dataType());
-
-        // check for optional defined type and add `cast` to expression if possible
-        if (definedType != null && !definedType.equals(valueType)) {
-            Preconditions.checkArgument(valueType.isConvertableTo(definedType),
-                "generated expression value type '%s' not supported for conversion to '%s'", valueType, definedType.getName());
-
-            Function castFunction = new Function(CastFunctionResolver.functionInfo(valueType, definedType, false), Lists.newArrayList(function));
-            formattedExpression = symbolPrinter.print(castFunction, SymbolPrinter.Style.PARSEABLE_NOT_QUALIFIED); // no full qualified references here
-        } else {
-            columnDefinition.dataType(function.valueType().getName());
-            formattedExpression = symbolPrinter.print(function, SymbolPrinter.Style.PARSEABLE_NOT_QUALIFIED); // no full qualified references here
-        }
-
-        columnDefinition.formattedGeneratedExpression(formattedExpression);
-    }
-
-    private void buildReference(TableIdent tableIdent, AnalyzedColumnDefinition columnDefinition, List<Reference> references) {
+    private static <T> void buildReference(RelationName relationName,
+                                           AnalyzedColumnDefinition<T> columnDefinition,
+                                           List<Reference> references) {
         Reference reference;
-        if (columnDefinition.generatedExpression() == null) {
+        if (columnDefinition.isGenerated() == false) {
             reference = new Reference(
-                new ReferenceIdent(tableIdent, columnDefinition.ident()),
+                new ReferenceIdent(relationName, columnDefinition.ident()),
                 RowGranularity.DOC,
-                DataTypes.ofMappingNameSafe(columnDefinition.dataType()));
+                columnDefinition.dataType(),
+                columnDefinition.position,
+                null // not required in this context
+            );
         } else {
             reference = new GeneratedReference(
-                new ReferenceIdent(tableIdent, columnDefinition.ident()),
+                columnDefinition.position,
+                new ReferenceIdent(relationName, columnDefinition.ident()),
                 RowGranularity.DOC,
-                columnDefinition.dataType() ==
-                null ? DataTypes.UNDEFINED : DataTypes.ofMappingNameSafe(columnDefinition.dataType()),
+                columnDefinition.dataType() == null ? DataTypes.UNDEFINED : columnDefinition.dataType(),
                 "dummy expression, real one not needed here");
         }
         references.add(reference);
-        for (AnalyzedColumnDefinition childDefinition : columnDefinition.children()) {
-            buildReference(tableIdent, childDefinition, references);
+        for (AnalyzedColumnDefinition<T> childDefinition : columnDefinition.children()) {
+            buildReference(relationName, childDefinition, references);
         }
     }
 
-    private void addCopyToInfo(AnalyzedColumnDefinition column) {
-        if (!column.isIndex()) {
+    private void addCopyToInfo(AnalyzedColumnDefinition<T> column) {
+        if (!column.isIndexColumn()) {
             Set<String> targets = copyToMap.get(column.ident().fqn());
             if (targets != null) {
                 column.addCopyTo(targets);
             }
         }
-        for (AnalyzedColumnDefinition child : column.children()) {
+        for (AnalyzedColumnDefinition<T> child : column.children()) {
             addCopyToInfo(child);
         }
     }
 
-    private void validatePrimaryKeys() {
-        for (String additionalPrimaryKey : additionalPrimaryKeys) {
-            ColumnIdent columnIdent = ColumnIdent.fromPath(additionalPrimaryKey);
-            if (!columnIdents.contains(columnIdent)) {
-                throw new ColumnUnknownException(columnIdent.sqlFqn());
+    private static void validatePrimaryKeys(RelationName relationName, AnalyzedTableElements<Object> elements) {
+        for (Object additionalPrimaryKey : elements.additionalPrimaryKeys) {
+            ColumnIdent columnIdent = ColumnIdent.fromPath(additionalPrimaryKey.toString());
+            if (!elements.columnIdents.contains(columnIdent)) {
+                throw new ColumnUnknownException(columnIdent.sqlFqn(), relationName);
             }
         }
         // will collect both column constraint and additional defined once and check for duplicates
-        primaryKeys();
+        primaryKeys(elements);
     }
 
-    private void validateIndexDefinitions() {
-        for (Map.Entry<String, Set<String>> entry : copyToMap.entrySet()) {
-            ColumnIdent columnIdent = ColumnIdent.fromPath(entry.getKey());
-            if (!columnIdents.contains(columnIdent)) {
-                throw new ColumnUnknownException(columnIdent.sqlFqn());
+    private static void validateIndexDefinitions(RelationName relationName, AnalyzedTableElements<Object> tableElements) {
+        for (Map.Entry<Object, Set<String>> entry : tableElements.copyToMap.entrySet()) {
+            ColumnIdent columnIdent = ColumnIdent.fromPath(entry.getKey().toString());
+            if (!tableElements.columnIdents.contains(columnIdent)) {
+                throw new ColumnUnknownException(columnIdent.sqlFqn(), relationName);
             }
-            if (!columnTypes.get(columnIdent).equalsIgnoreCase("string")) {
+            if (!DataTypes.STRING.equals(tableElements.columnTypes.get(columnIdent))) {
                 throw new IllegalArgumentException("INDEX definition only support 'string' typed source columns");
             }
         }
     }
 
-    public void addCopyTo(String sourceColumn, String targetIndex) {
+    void addCopyTo(T sourceColumn, String targetIndex) {
         Set<String> targetColumns = copyToMap.get(sourceColumn);
         if (targetColumns == null) {
             targetColumns = new HashSet<>();
@@ -346,10 +488,10 @@ public class AnalyzedTableElements {
     }
 
     @Nullable
-    private AnalyzedColumnDefinition columnDefinitionByIdent(ColumnIdent ident) {
-        AnalyzedColumnDefinition result = null;
+    private static AnalyzedColumnDefinition<Object> columnDefinitionByIdent(AnalyzedTableElements<Object> elements, ColumnIdent ident) {
+        AnalyzedColumnDefinition<Object> result = null;
         ColumnIdent root = ident.getRoot();
-        for (AnalyzedColumnDefinition column : columns) {
+        for (AnalyzedColumnDefinition<Object> column : elements.columns) {
             if (column.ident().equals(root)) {
                 result = column;
                 break;
@@ -366,15 +508,15 @@ public class AnalyzedTableElements {
         return findInChildren(result, ident);
     }
 
-    private AnalyzedColumnDefinition findInChildren(AnalyzedColumnDefinition column,
-                                                    ColumnIdent ident) {
-        AnalyzedColumnDefinition result = null;
-        for (AnalyzedColumnDefinition child : column.children()) {
+    private static AnalyzedColumnDefinition<Object> findInChildren(AnalyzedColumnDefinition<Object> column,
+                                                                   ColumnIdent ident) {
+        AnalyzedColumnDefinition<Object> result = null;
+        for (AnalyzedColumnDefinition<Object> child : column.children()) {
             if (child.ident().equals(ident)) {
                 result = child;
                 break;
             }
-            AnalyzedColumnDefinition inChildren = findInChildren(child, ident);
+            AnalyzedColumnDefinition<Object> inChildren = findInChildren(child, ident);
             if (inChildren != null) {
                 return inChildren;
             }
@@ -382,47 +524,50 @@ public class AnalyzedTableElements {
         return result;
     }
 
-    public void changeToPartitionedByColumn(ColumnIdent partitionedByIdent, boolean skipIfNotFound) {
+    public static void changeToPartitionedByColumn(AnalyzedTableElements<Object> elements,
+                                                   ColumnIdent partitionedByIdent,
+                                                   boolean skipIfNotFound,
+                                                   RelationName relationName) {
         Preconditions.checkArgument(!partitionedByIdent.name().startsWith("_"),
-            "Cannot use system columns in PARTITIONED BY clause");
+                                    "Cannot use system columns in PARTITIONED BY clause");
 
         // need to call primaryKeys() before the partition column is removed from the columns list
-        if (!primaryKeys().isEmpty() && !primaryKeys().contains(partitionedByIdent.fqn())) {
+        if (!primaryKeys(elements).isEmpty() && !primaryKeys(elements).contains(partitionedByIdent.fqn())) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "Cannot use non primary key column '%s' in PARTITIONED BY clause if primary key is set on table",
-                partitionedByIdent.sqlFqn()));
+                                                             "Cannot use non primary key column '%s' in PARTITIONED BY clause if primary key is set on table",
+                                                             partitionedByIdent.sqlFqn()));
         }
 
-        AnalyzedColumnDefinition columnDefinition = columnDefinitionByIdent(partitionedByIdent);
+        AnalyzedColumnDefinition<Object> columnDefinition = columnDefinitionByIdent(elements, partitionedByIdent);
         if (columnDefinition == null) {
             if (skipIfNotFound) {
                 return;
             }
-            throw new ColumnUnknownException(partitionedByIdent.sqlFqn());
+            throw new ColumnUnknownException(partitionedByIdent.sqlFqn(), relationName);
         }
-        DataType columnType = DataTypes.ofMappingNameSafe(columnDefinition.dataType());
+        DataType columnType = columnDefinition.dataType();
         if (!DataTypes.isPrimitive(columnType)) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "Cannot use column %s of type %s in PARTITIONED BY clause",
-                columnDefinition.ident().sqlFqn(), columnDefinition.dataType()));
+                                                             "Cannot use column %s of type %s in PARTITIONED BY clause",
+                                                             columnDefinition.ident().sqlFqn(), columnDefinition.dataType()));
         }
         if (columnDefinition.isArrayOrInArray()) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "Cannot use array column %s in PARTITIONED BY clause", columnDefinition.ident().sqlFqn()));
+                                                             "Cannot use array column %s in PARTITIONED BY clause", columnDefinition.ident().sqlFqn()));
 
 
         }
-        if (columnDefinition.index().equals("analyzed")) {
+        if (columnDefinition.indexConstraint() == Reference.IndexType.ANALYZED) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "Cannot use column %s with fulltext index in PARTITIONED BY clause",
-                columnDefinition.ident().sqlFqn()));
+                                                             "Cannot use column %s with fulltext index in PARTITIONED BY clause",
+                                                             columnDefinition.ident().sqlFqn()));
         }
-        columnIdents.remove(columnDefinition.ident());
-        columnDefinition.index(Reference.IndexType.NO.toString());
-        partitionedByColumns.add(columnDefinition);
+        elements.columnIdents.remove(columnDefinition.ident());
+        columnDefinition.indexConstraint(Reference.IndexType.NO);
+        elements.partitionedByColumns.add(columnDefinition);
     }
 
-    public List<AnalyzedColumnDefinition> columns() {
+    public List<AnalyzedColumnDefinition<T>> columns() {
         return columns;
     }
 

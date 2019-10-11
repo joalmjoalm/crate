@@ -22,52 +22,50 @@
 
 package io.crate.metadata.sys;
 
-import com.google.common.collect.ImmutableList;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
+import io.crate.execution.engine.collect.files.SummitsContext;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
 import io.crate.metadata.table.ColumnRegistrar;
 import io.crate.metadata.table.StaticTableInfo;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.ClusterState;
 
-import javax.annotation.Nullable;
-import java.util.List;
+import java.util.Map;
 
-public class SysSummitsTableInfo extends StaticTableInfo {
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.GEO_POINT;
+import static io.crate.types.DataTypes.INTEGER;
+import static io.crate.types.DataTypes.STRING;
 
-    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "summits");
-    private static final List<ColumnIdent> PRIMARY_KEYS = ImmutableList.of(Columns.MOUNTAIN);
+public class SysSummitsTableInfo extends StaticTableInfo<SummitsContext> {
+
+    public static final RelationName IDENT = new RelationName(SysSchemaInfo.NAME, "summits");
     private static final RowGranularity GRANULARITY = RowGranularity.DOC;
 
-    private final ClusterService clusterService;
-
-    public static class Columns {
-        public static final ColumnIdent MOUNTAIN = new ColumnIdent("mountain");
-        public static final ColumnIdent HEIGHT = new ColumnIdent("height");
-        public static final ColumnIdent PROMINENCE = new ColumnIdent("prominence");
-        public static final ColumnIdent COORDINATES = new ColumnIdent("coordinates");
-        public static final ColumnIdent RANGE = new ColumnIdent("range");
-        public static final ColumnIdent CLASSIFICATION = new ColumnIdent("classification");
-        public static final ColumnIdent REGION = new ColumnIdent("region");
-        public static final ColumnIdent COUNTRY = new ColumnIdent("country");
-        public static final ColumnIdent FIRST_ASCENT = new ColumnIdent("first_ascent");
+    public static Map<ColumnIdent, RowCollectExpressionFactory<SummitsContext>> expressions() {
+        return columnRegistrar().expressions();
     }
 
-    SysSummitsTableInfo(ClusterService clusterService) {
-        super(IDENT, new ColumnRegistrar(IDENT, GRANULARITY)
-            .register(Columns.MOUNTAIN, DataTypes.STRING)
-            .register(Columns.HEIGHT, DataTypes.INTEGER)
-            .register(Columns.PROMINENCE, DataTypes.INTEGER)
-            .register(Columns.COORDINATES, DataTypes.GEO_POINT)
-            .register(Columns.RANGE, DataTypes.STRING)
-            .register(Columns.CLASSIFICATION, DataTypes.STRING)
-            .register(Columns.REGION, DataTypes.STRING)
-            .register(Columns.COUNTRY, DataTypes.STRING)
-            .register(Columns.FIRST_ASCENT, DataTypes.INTEGER), PRIMARY_KEYS);
-        this.clusterService = clusterService;
+    public SysSummitsTableInfo() {
+        super(IDENT, columnRegistrar(), "mountain");
+    }
+
+    private static ColumnRegistrar<SummitsContext> columnRegistrar() {
+        return new ColumnRegistrar<SummitsContext>(IDENT, GRANULARITY)
+            .register("mountain", STRING, () -> forFunction(SummitsContext::mountain))
+            .register("height", INTEGER, () -> forFunction(SummitsContext::height))
+            .register("prominence", INTEGER, () -> forFunction(SummitsContext::prominence))
+            .register("coordinates", GEO_POINT, () -> forFunction(SummitsContext::coordinates))
+            .register("range", STRING, () -> forFunction(SummitsContext::range))
+            .register("classification", STRING, () -> forFunction(SummitsContext::classification))
+            .register("region", STRING, () -> forFunction(SummitsContext::region))
+            .register("country", STRING, () -> forFunction(SummitsContext::country))
+            .register("first_ascent", INTEGER, () -> forFunction(SummitsContext::firstAscent));
     }
 
     @Override
@@ -76,7 +74,11 @@ public class SysSummitsTableInfo extends StaticTableInfo {
     }
 
     @Override
-    public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return Routing.forTableOnSingleNode(IDENT, clusterService.localNode().id());
+    public Routing getRouting(ClusterState clusterState,
+                              RoutingProvider routingProvider,
+                              WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
+        return Routing.forTableOnSingleNode(IDENT, clusterState.getNodes().getLocalNodeId());
     }
 }

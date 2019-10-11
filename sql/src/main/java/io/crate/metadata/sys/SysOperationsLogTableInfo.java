@@ -21,49 +21,47 @@
 
 package io.crate.metadata.sys;
 
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
+import io.crate.expression.reference.sys.operation.OperationContextLog;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
 import io.crate.metadata.table.ColumnRegistrar;
 import io.crate.metadata.table.StaticTableInfo;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
+import org.elasticsearch.cluster.ClusterState;
 
-import javax.annotation.Nullable;
-import java.util.Collections;
+import java.util.Map;
 
-@Singleton
-public class SysOperationsLogTableInfo extends StaticTableInfo {
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.LONG;
+import static io.crate.types.DataTypes.STRING;
+import static io.crate.types.DataTypes.TIMESTAMPZ;
 
-    private final ClusterService clusterService;
+public class SysOperationsLogTableInfo extends StaticTableInfo<OperationContextLog> {
 
-    public static class Columns {
-        public static final ColumnIdent ID = new ColumnIdent("id");
-        public static final ColumnIdent JOB_ID = new ColumnIdent("job_id");
-        public static final ColumnIdent NAME = new ColumnIdent("name");
-        public static final ColumnIdent STARTED = new ColumnIdent("started");
-        public static final ColumnIdent ENDED = new ColumnIdent("ended");
-        public static final ColumnIdent USED_BYTES = new ColumnIdent("used_bytes");
-        public static final ColumnIdent ERROR = new ColumnIdent("error");
+    public static final RelationName IDENT = new RelationName(SysSchemaInfo.NAME, "operations_log");
+
+    public static Map<ColumnIdent, RowCollectExpressionFactory<OperationContextLog>> expressions() {
+        return columnRegistrar().expressions();
     }
 
-    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "operations_log");
+    private static ColumnRegistrar<OperationContextLog> columnRegistrar() {
+        return new ColumnRegistrar<OperationContextLog>(IDENT, RowGranularity.DOC)
+            .register("id", STRING, () -> forFunction(l -> String.valueOf(l.id())))
+            .register("job_id", STRING, () -> forFunction(l -> l.jobId().toString()))
+            .register("name", STRING, () -> forFunction(OperationContextLog::name))
+            .register("started", TIMESTAMPZ, () -> forFunction(OperationContextLog::started))
+            .register("ended", TIMESTAMPZ, () -> forFunction(OperationContextLog::ended))
+            .register("used_bytes", LONG, () -> forFunction(OperationContextLog::usedBytes))
+            .register("error", STRING, () -> forFunction(OperationContextLog::errorMessage));
+    }
 
-    @Inject
-    protected SysOperationsLogTableInfo(ClusterService clusterService) {
-        super(IDENT, new ColumnRegistrar(IDENT, RowGranularity.DOC)
-            .register(Columns.ID, DataTypes.STRING)
-            .register(Columns.JOB_ID, DataTypes.STRING)
-            .register(Columns.NAME, DataTypes.STRING)
-            .register(Columns.STARTED, DataTypes.TIMESTAMP)
-            .register(Columns.ENDED, DataTypes.TIMESTAMP)
-            .register(Columns.USED_BYTES, DataTypes.LONG)
-            .register(Columns.ERROR, DataTypes.STRING), Collections.<ColumnIdent>emptyList());
-        this.clusterService = clusterService;
+    SysOperationsLogTableInfo() {
+        super(IDENT, columnRegistrar());
     }
 
     @Override
@@ -72,12 +70,16 @@ public class SysOperationsLogTableInfo extends StaticTableInfo {
     }
 
     @Override
-    public TableIdent ident() {
+    public RelationName ident() {
         return IDENT;
     }
 
     @Override
-    public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return Routing.forTableOnAllNodes(IDENT, clusterService.state().nodes());
+    public Routing getRouting(ClusterState clusterState,
+                              RoutingProvider routingProvider,
+                              WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
+        return Routing.forTableOnAllNodes(IDENT, clusterState.getNodes());
     }
 }

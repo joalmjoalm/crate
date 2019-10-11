@@ -23,43 +23,48 @@
 package io.crate.plugin;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
 import io.crate.Plugin;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.xbean.finder.ResourceFinder;
 import org.elasticsearch.bootstrap.JarHell;
 import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.Strings;
-import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.common.component.LifecycleComponent;
 import org.elasticsearch.common.inject.Module;
 import org.elasticsearch.common.io.PathUtils;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.plugins.PluginInfo;
 
-import java.io.Closeable;
 import java.io.File;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.elasticsearch.common.io.FileSystemUtils.isAccessibleDirectory;
 
 public class PluginLoader {
 
+    static final Setting<String> SETTING_CRATE_PLUGINS_PATH = Setting.simpleString(
+        "path.crate_plugins", Setting.Property.NodeScope);
+
     private static final String RESOURCE_PATH = "META-INF/services/";
+    private static final String ENTERPRISE_FOLDER_NAME = "enterprise";
 
     private final Settings settings;
-    private final ImmutableMap<Plugin, List<OnModuleReference>> onModuleReferences;
-    private final ESLogger logger;
+    private final Logger logger;
 
     @VisibleForTesting
     final List<Plugin> plugins;
@@ -69,48 +74,28 @@ public class PluginLoader {
     PluginLoader(Settings settings) {
         this.settings = settings;
 
-        String pluginFolder = settings.get("path.crate_plugins");
-        if (pluginFolder == null) {
-            pluginsPath = PathUtils.get(Strings.cleanPath(settings.get("path.home"))).resolve("plugins");
+        String pluginFolder = SETTING_CRATE_PLUGINS_PATH.get(settings);
+        if (pluginFolder.isEmpty()) {
+            pluginsPath = PathUtils.get(settings.get("path.home")).normalize().resolve("plugins");
         } else {
-            pluginsPath = PathUtils.get(Strings.cleanPath(pluginFolder));
+            pluginsPath = PathUtils.get(pluginFolder).normalize();
         }
-        logger = Loggers.getLogger(getClass().getPackage().getName(), settings);
+        logger = LogManager.getLogger(getClass().getPackage().getName());
 
         Collection<Class<? extends Plugin>> implementations = findImplementations();
 
-        MapBuilder<Plugin, List<OnModuleReference>> onModuleReferences = MapBuilder.newMapBuilder();
         ImmutableList.Builder<Plugin> builder = ImmutableList.builder();
         for (Class<? extends Plugin> pluginClass : implementations) {
-            Plugin plugin;
             try {
-                plugin = loadPlugin(pluginClass);
+                builder.add(loadPlugin(pluginClass));
             } catch (Throwable t) {
                 logger.error("error loading plugin:  " + pluginClass.getSimpleName(), t);
-                continue;
             }
-            try {
-                List<OnModuleReference> onModuleReferenceList = loadModuleReferences(plugin);
-                if (!onModuleReferenceList.isEmpty()) {
-                    onModuleReferences.put(plugin, onModuleReferenceList);
-                }
-            } catch (Throwable t) {
-                logger.error("error loading moduleReferences from plugin: " + plugin.name(), t);
-                continue;
-            }
-
-            builder.add(plugin);
         }
         plugins = builder.build();
-        this.onModuleReferences = onModuleReferences.immutableMap();
 
         if (logger.isInfoEnabled()) {
-            logger.info("plugins loaded: {} ", Lists.transform(plugins, new Function<Plugin, String>() {
-                @Override
-                public String apply(Plugin input) {
-                    return input.name();
-                }
-            }));
+            logger.info("plugins loaded: {} ", plugins.stream().map(Plugin::name).collect(Collectors.toList()));
         }
     }
 
@@ -119,13 +104,25 @@ public class PluginLoader {
             return Collections.emptyList();
         }
 
-        File[] plugins = pluginsPath.toFile().listFiles();
+        final File[] plugins = pluginsPath.toFile()
+            .listFiles(file -> !file.getName().equals(ENTERPRISE_FOLDER_NAME));
+
         if (plugins == null) {
             return Collections.emptyList();
         }
 
+        final File[] allPlugins;
+        File enterprisePluginDir = new File(pluginsPath.toFile(), ENTERPRISE_FOLDER_NAME);
+        File[] enterpriseFiles = enterprisePluginDir.listFiles();
+        if (enterpriseFiles != null) {
+            allPlugins = Arrays.copyOf(plugins, plugins.length + enterpriseFiles.length);
+            System.arraycopy(enterpriseFiles, 0, allPlugins, plugins.length, enterpriseFiles.length);
+        } else {
+            allPlugins = plugins;
+        }
+
         Collection<Class<? extends Plugin>> allImplementations = new ArrayList<>();
-        for (File plugin : plugins) {
+        for (File plugin : allPlugins) {
             if (!plugin.canRead()) {
                 logger.debug("[{}] is not readable.", plugin.getAbsolutePath());
                 continue;
@@ -159,7 +156,7 @@ public class PluginLoader {
 
                 if (!plugin.isFile()) {
                     // gather files to add
-                    List<File> libFiles = Lists.newArrayList();
+                    List<File> libFiles = new ArrayList<>();
                     File[] pluginFiles = plugin.listFiles();
                     if (pluginFiles != null) {
                         libFiles.addAll(Arrays.asList(pluginFiles));
@@ -198,7 +195,7 @@ public class PluginLoader {
             Collection<Class<? extends Plugin>> implementations = findImplementations(pluginUrls);
             if (implementations == null || implementations.isEmpty()) {
                 String msg = String.format(Locale.ENGLISH,
-                    "Path [%s] does not contain a valid Crate or Elasticsearch plugin", plugin.getAbsolutePath());
+                    "Path [%s] does not contain a valid CrateDB plugin", plugin.getAbsolutePath());
                 RuntimeException e = new RuntimeException(msg);
                 logger.error(msg, e);
                 throw e;
@@ -252,107 +249,44 @@ public class PluginLoader {
 
     }
 
-    private List<OnModuleReference> loadModuleReferences(Plugin plugin) {
-        List<OnModuleReference> list = Lists.newArrayList();
-        for (Method method : plugin.getClass().getDeclaredMethods()) {
-            if (!method.getName().equals("onModule")) {
-                continue;
-            }
-            if (method.getParameterTypes().length == 0 || method.getParameterTypes().length > 1) {
-                logger.warn("Plugin: {} implementing onModule with no parameters or more than one parameter", plugin.name());
-                continue;
-            }
-            Class moduleClass = method.getParameterTypes()[0];
-            if (!Module.class.isAssignableFrom(moduleClass)) {
-                logger.warn("Plugin: {} implementing onModule by the type is not of Module type {}", plugin.name(), moduleClass);
-                continue;
-            }
-            method.setAccessible(true);
-            //noinspection unchecked
-            list.add(new OnModuleReference(moduleClass, method));
-        }
-
-        return list;
-    }
-
-    Collection<Module> nodeModules() {
-        List<Module> modules = Lists.newArrayList();
+    Collection<Module> createGuiceModules() {
+        List<Module> modules = new ArrayList<>();
         for (Plugin plugin : plugins) {
-            modules.addAll(plugin.nodeModules());
+            modules.addAll(plugin.createGuiceModules());
         }
         return modules;
     }
 
-    Collection<Class<? extends LifecycleComponent>> nodeServices() {
-        List<Class<? extends LifecycleComponent>> services = Lists.newArrayList();
+    Collection<Class<? extends LifecycleComponent>> getGuiceServiceClasses() {
+        List<Class<? extends LifecycleComponent>> services = new ArrayList<>();
         for (Plugin plugin : plugins) {
-            services.addAll(plugin.nodeServices());
-        }
-        return services;
-    }
-
-    Collection<Module> indexModules(Settings indexSettings) {
-        List<Module> modules = Lists.newArrayList();
-        for (Plugin plugin : plugins) {
-            modules.addAll(plugin.indexModules(indexSettings));
-        }
-        return modules;
-    }
-
-    Collection<Class<? extends Closeable>> indexServices() {
-        List<Class<? extends Closeable>> services = Lists.newArrayList();
-        for (Plugin plugin : plugins) {
-            services.addAll(plugin.indexServices());
-        }
-        return services;
-    }
-
-    Collection<Module> shardModules(Settings indexSettings) {
-        List<Module> modules = Lists.newArrayList();
-        for (Plugin plugin : plugins) {
-            modules.addAll(plugin.shardModules(indexSettings));
-        }
-        return modules;
-    }
-
-    Collection<Class<? extends Closeable>> shardServices() {
-        List<Class<? extends Closeable>> services = Lists.newArrayList();
-        for (Plugin plugin : plugins) {
-            services.addAll(plugin.shardServices());
+            services.addAll(plugin.getGuiceServiceClasses());
         }
         return services;
     }
 
     Settings additionalSettings() {
-        Settings.Builder builder = Settings.settingsBuilder();
+        Settings.Builder builder = Settings.builder();
         for (Plugin plugin : plugins) {
             builder.put(plugin.additionalSettings());
         }
         return builder.build();
     }
 
-    public void processModule(Module module) {
+    List<Setting<?>> getSettings() {
+        List<Setting<?>> settings = new ArrayList<>();
         for (Plugin plugin : plugins) {
-            // see if there are onModule references
-            List<OnModuleReference> references = onModuleReferences.get(plugin);
-            if (references != null) {
-                for (OnModuleReference reference : references) {
-                    if (reference.moduleClass.isAssignableFrom(module.getClass())) {
-                        try {
-                            reference.onModuleMethod.invoke(plugin, module);
-                        } catch (Exception e) {
-                            logger.warn("Plugin {}, failed to invoke custom onModule method", e, plugin.name());
-                        }
-                    }
-                }
-            }
+            settings.addAll(plugin.getSettings());
         }
+        return settings;
     }
 
+
     private void checkJarHell(URL url) throws Exception {
-        final List<URL> loadedJars = new ArrayList<>(Arrays.asList(JarHell.parseClassPath()));
-        loadedJars.addAll(jarsToLoad);
-        loadedJars.add(url);
-        JarHell.checkJarHell(loadedJars.toArray(new URL[0]));
+        Set<URL> jarHellSet = new HashSet<>();
+        jarHellSet.addAll(JarHell.parseClassPath());
+        jarHellSet.addAll(jarsToLoad);
+        jarHellSet.add(url);
+        JarHell.checkJarHell(jarHellSet, output -> {});
     }
 }

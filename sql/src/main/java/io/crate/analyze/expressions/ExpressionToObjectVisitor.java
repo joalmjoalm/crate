@@ -22,8 +22,21 @@
 package io.crate.analyze.expressions;
 
 
-import io.crate.core.collections.Row;
-import io.crate.sql.tree.*;
+import io.crate.data.Row;
+import io.crate.sql.tree.ArrayLiteral;
+import io.crate.sql.tree.AstVisitor;
+import io.crate.sql.tree.BooleanLiteral;
+import io.crate.sql.tree.DoubleLiteral;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.LongLiteral;
+import io.crate.sql.tree.NegativeExpression;
+import io.crate.sql.tree.Node;
+import io.crate.sql.tree.NullLiteral;
+import io.crate.sql.tree.ObjectLiteral;
+import io.crate.sql.tree.ParameterExpression;
+import io.crate.sql.tree.QualifiedNameReference;
+import io.crate.sql.tree.StringLiteral;
+import io.crate.sql.tree.SubscriptExpression;
 
 import java.util.HashMap;
 import java.util.Locale;
@@ -31,13 +44,13 @@ import java.util.Map;
 
 public class ExpressionToObjectVisitor extends AstVisitor<Object, Row> {
 
-    private final static ExpressionToObjectVisitor INSTANCE = new ExpressionToObjectVisitor();
+    private static final ExpressionToObjectVisitor INSTANCE = new ExpressionToObjectVisitor();
 
     private ExpressionToObjectVisitor() {
     }
 
     public static Object convert(Node node, Row parameters) {
-        return INSTANCE.process(node, parameters);
+        return node.accept(INSTANCE, parameters);
     }
 
     @Override
@@ -77,7 +90,9 @@ public class ExpressionToObjectVisitor extends AstVisitor<Object, Row> {
 
     @Override
     protected String visitSubscriptExpression(SubscriptExpression node, Row context) {
-        return String.format(Locale.ENGLISH, "%s.%s", process(node.name(), context), process(node.index(), context));
+        return String.format(Locale.ENGLISH, "%s.%s",
+                             node.name().accept(this, context),
+                             node.index().accept(this, context));
     }
 
     @Override
@@ -106,15 +121,8 @@ public class ExpressionToObjectVisitor extends AstVisitor<Object, Row> {
 
     @Override
     protected Object visitNegativeExpression(NegativeExpression node, Row context) {
-        Object o = process(node.getValue(), context);
-        if (o instanceof Long) {
-            return -1L * (Long) o;
-        } else if (o instanceof Double) {
-            return -1 * (Double) o;
-        } else {
-            throw new UnsupportedOperationException(
-                String.format(Locale.ENGLISH, "Can't handle negative of %s.", node.getValue()));
-        }
+        Object o = node.getValue().accept(this, context);
+        return NegativeExpression.negate(o);
     }
 
     @Override

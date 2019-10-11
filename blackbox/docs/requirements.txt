@@ -1,2 +1,0 @@
-crate-docs-theme
-sphinx-csv-filter

@@ -37,13 +37,39 @@ public enum JoinType {
             return LEFT;
         }
     },
-    FULL;
+    FULL,
+    SEMI {
+        @Override
+        public JoinType invert() {
+            throw new UnsupportedOperationException("Tables of a SEMI Join cannot be inverted");
+        }
+
+        @Override
+        public boolean supportsInversion() {
+            return false;
+        }
+    },
+    ANTI {
+        @Override
+        public JoinType invert() {
+            throw new UnsupportedOperationException("Tables of a ANTI Join cannot be inverted");
+        }
+
+        @Override
+        public boolean supportsInversion() {
+            return false;
+        }
+    };
 
     public JoinType invert() {
         return this;
     }
 
+    public boolean supportsInversion() {
+        return true;
+    }
+
     public boolean isOuter() {
-        return ordinal() > INNER.ordinal();
+        return ordinal() > INNER.ordinal() && ordinal() <= FULL.ordinal();
     }
 }

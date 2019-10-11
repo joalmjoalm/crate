@@ -21,44 +21,46 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Optional;
+import io.crate.analyze.expressions.ExpressionAnalysisContext;
+import io.crate.analyze.expressions.ExpressionAnalyzer;
+import io.crate.analyze.relations.FieldProvider;
+import io.crate.exceptions.RelationAlreadyExists;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
-import io.crate.sql.tree.ClusteredBy;
 import io.crate.sql.tree.CreateBlobTable;
-import org.elasticsearch.cluster.metadata.IndexMetaData;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.ParameterExpression;
 
-class CreateBlobTableAnalyzer {
+import java.util.function.Function;
 
-    private static final TablePropertiesAnalyzer TABLE_PROPERTIES_ANALYZER = new TablePropertiesAnalyzer();
+public class CreateBlobTableAnalyzer {
+
     private final Schemas schemas;
-    private final NumberOfShards numberOfShards;
+    private final Functions functions;
 
-    CreateBlobTableAnalyzer(Schemas schemas, NumberOfShards numberOfShards) {
+    public CreateBlobTableAnalyzer(Schemas schemas, Functions functions) {
         this.schemas = schemas;
-        this.numberOfShards = numberOfShards;
+        this.functions = functions;
     }
 
-    public CreateBlobTableAnalyzedStatement analyze(CreateBlobTable node, ParameterContext parameterContext) {
-        CreateBlobTableAnalyzedStatement statement = new CreateBlobTableAnalyzedStatement();
-        TableIdent tableIdent = BlobTableAnalyzer.tableToIdent(node.name());
-        statement.table(tableIdent, schemas);
+    public AnalyzedCreateBlobTable analyze(CreateBlobTable<Expression> node,
+                                           Function<ParameterExpression, Symbol> convertParamFunction,
+                                           CoordinatorTxnCtx txnCtx) {
+        var exprAnalyzerWithoutFields = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.UNSUPPORTED, null);
+        var exprCtx = new ExpressionAnalysisContext();
 
-        int numShards;
-        Optional<ClusteredBy> clusteredBy = node.clusteredBy();
-        if (clusteredBy.isPresent()) {
-            numShards = numberOfShards.fromClusteredByClause(clusteredBy.get(), parameterContext.parameters());
-        } else {
-            numShards = numberOfShards.defaultNumberOfShards();
+        CreateBlobTable<Symbol> createBlobTable = node.map(x -> exprAnalyzerWithoutFields.convert(x, exprCtx));
+
+        RelationName relationName = RelationName.fromBlobTable(createBlobTable.name());
+        relationName.ensureValidForRelationCreation();
+        if (schemas.tableExists(relationName)) {
+            throw new RelationAlreadyExists(relationName);
         }
-        statement.tableParameter().settingsBuilder().put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, numShards);
 
-        // apply default in case it is not specified in the genericProperties,
-        // if it is it will get overwritten afterwards.
-        TABLE_PROPERTIES_ANALYZER.analyze(
-            statement.tableParameter(), new BlobTableParameterInfo(),
-            node.genericProperties(), parameterContext.parameters(), true);
-
-        return statement;
+        return new AnalyzedCreateBlobTable(relationName, createBlobTable);
     }
 }

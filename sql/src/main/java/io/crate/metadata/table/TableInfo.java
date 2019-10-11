@@ -21,16 +21,18 @@
 
 package io.crate.metadata.table;
 
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
-import io.crate.metadata.*;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.Reference;
+import io.crate.metadata.RelationInfo;
+import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
+import org.elasticsearch.cluster.ClusterState;
 
 import javax.annotation.Nullable;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
-public interface TableInfo extends Iterable<Reference> {
+public interface TableInfo extends RelationInfo {
 
     /**
      * returns information about a column with the given ident.
@@ -40,28 +42,15 @@ public interface TableInfo extends Iterable<Reference> {
     Reference getReference(ColumnIdent columnIdent);
 
     /**
-     * returns the top level columns of this table with predictable order
-     */
-    Collection<Reference> columns();
-
-    RowGranularity rowGranularity();
-
-    TableIdent ident();
-
-    /**
      * Retrieve the routing for the table
+     *
      * <p>
-     * The result of this method is non-deterministic for two reasons:
+     *   Multiple calls to this method return the same routing as long as the same arguments are provided.
      * <p>
-     * 1. Shard selection is randomized for load distribution.
-     * <p>
-     * 2. The underlying clusterState might change between calls.
      */
-    Routing getRouting(WhereClause whereClause, @Nullable String preference);
-
-    List<ColumnIdent> primaryKey();
-
-    Map<String, Object> tableParameters();
-
-    Set<Operation> supportedOperations();
+    Routing getRouting(ClusterState state,
+                       RoutingProvider routingProvider,
+                       WhereClause whereClause,
+                       RoutingProvider.ShardSelection shardSelection,
+                       SessionContext sessionContext);
 }

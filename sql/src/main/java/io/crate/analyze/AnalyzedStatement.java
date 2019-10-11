@@ -21,6 +21,10 @@
 
 package io.crate.analyze;
 
+import io.crate.expression.symbol.Symbol;
+
+import java.util.function.Consumer;
+
 public interface AnalyzedStatement {
 
     <C, R> R accept(AnalyzedStatementVisitor<C, R> analyzedStatementVisitor, C context);
@@ -34,4 +38,22 @@ public interface AnalyzedStatement {
      * </p>
      */
     boolean isWriteOperation();
+
+    /**
+     * Calls the consumer for all top-level symbols within the statement.
+     * Implementations must not traverse into sub-relations.
+     *
+     * Use {@link Relations#traverseDeepSymbols(AnalyzedStatement, Consumer)}
+     * For a variant that traverses into sub-relations.
+     */
+    default void visitSymbols(Consumer<? super Symbol> consumer) {
+    }
+
+    /**
+     * Defines if an unbound analyzed statement (no parameter are bound yet) can be used
+     * to create execution plans.
+     */
+    default boolean isUnboundPlanningSupported() {
+        return false;
+    }
 }

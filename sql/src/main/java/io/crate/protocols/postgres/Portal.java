@@ -22,35 +22,78 @@
 
 package io.crate.protocols.postgres;
 
-import com.google.common.util.concurrent.ListenableFuture;
-import io.crate.action.sql.ResultReceiver;
-import io.crate.analyze.symbol.Field;
-import io.crate.operation.collect.StatsTables;
-import io.crate.planner.Planner;
-import io.crate.sql.tree.Statement;
-import io.crate.types.DataType;
+import io.crate.action.sql.PreparedStmt;
+import io.crate.action.sql.RowConsumerToResultReceiver;
+import io.crate.analyze.AnalyzedStatement;
 
 import javax.annotation.Nullable;
 import java.util.List;
 
-public interface Portal {
+public final class Portal {
 
-    String name();
+    private String portalName;
+    private final PreparedStmt preparedStmt;
+    private final List<Object> params;
+    private final AnalyzedStatement boundOrUnboundStatement;
 
-    FormatCodes.FormatCode[] getLastResultFormatCodes();
+    @Nullable
+    private final FormatCodes.FormatCode[] resultFormatCodes;
 
-    List<? extends DataType> getLastOutputTypes();
+    private RowConsumerToResultReceiver consumer;
 
-    String getLastQuery();
+    public Portal(String portalName,
+                  PreparedStmt preparedStmt,
+                  List<Object> params,
+                  AnalyzedStatement boundOrUnboundStatement,
+                  @Nullable FormatCodes.FormatCode[] resultFormatCodes) {
+        this.portalName = portalName;
+        this.preparedStmt = preparedStmt;
+        this.params = params;
+        this.boundOrUnboundStatement = boundOrUnboundStatement;
+        this.resultFormatCodes = resultFormatCodes;
+    }
 
-    Portal bind(String statementName, String query, Statement statement,
-                List<Object> params, @Nullable FormatCodes.FormatCode[] resultFormatCodes);
+    public String name() {
+        return portalName;
+    }
 
-    List<Field> describe();
+    public PreparedStmt preparedStmt() {
+        return preparedStmt;
+    }
 
-    void execute(ResultReceiver resultReceiver, int maxRows);
+    public List<Object> params() {
+        return params;
+    }
 
-    ListenableFuture<?> sync(Planner planner, StatsTables statsTables);
+    @Nullable
+    public FormatCodes.FormatCode[] resultFormatCodes() {
+        return resultFormatCodes;
+    }
 
-    void close();
+    public AnalyzedStatement boundOrUnboundStatement() {
+        return boundOrUnboundStatement;
+    }
+
+    public void setActiveConsumer(RowConsumerToResultReceiver consumer) {
+        this.consumer = consumer;
+    }
+
+    @Nullable
+    public RowConsumerToResultReceiver activeConsumer() {
+        return consumer;
+    }
+
+    public void closeActiveConsumer() {
+        if (consumer != null) {
+            consumer.closeAndFinishIfSuspended();
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "Portal{" +
+               "portalName=" + portalName +
+               ", preparedStmt=" + preparedStmt.rawStatement() +
+               '}';
+    }
 }

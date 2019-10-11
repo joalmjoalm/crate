@@ -21,8 +21,7 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLResponse;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.SQLResponse;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -38,7 +37,6 @@ import static org.hamcrest.core.Is.is;
  * the contract of having the same value of the routing field on only one shard. So in Crate the behaviour is
  * different and is asserted via tests in this class.
  */
-@UseJdbc
 public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTest {
 
     @Rule
@@ -108,7 +106,6 @@ public class EmptyStringRoutingIntegrationTest extends SQLTransportIntegrationTe
     }
 
     @Test
-    @UseJdbc(false) // copy has no rowcount
     public void testCopyFromEmptyStringRouting() throws Exception {
         execute("create table t (i int primary key, c string primary key, a int) clustered by (c)");
         ensureYellow();

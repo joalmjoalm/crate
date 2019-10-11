@@ -21,17 +21,14 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.MoreObjects;
-import com.google.common.base.Objects;
-import com.google.common.base.Optional;
-
-import javax.annotation.Nullable;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
-public class QuerySpecification
-    extends QueryBody {
+public class QuerySpecification extends QueryBody {
     private final Select select;
     private final List<Relation> from;
     private final Optional<Expression> where;
@@ -40,13 +37,15 @@ public class QuerySpecification
     private final List<SortItem> orderBy;
     private final Optional<Expression> limit;
     private final Optional<Expression> offset;
+    private final Map<String, Window> windows;
 
     public QuerySpecification(
         Select select,
-        @Nullable List<Relation> from,
+        List<Relation> from,
         Optional<Expression> where,
         List<Expression> groupBy,
         Optional<Expression> having,
+        Map<String, Window> windows,
         List<SortItem> orderBy,
         Optional<Expression> limit,
         Optional<Expression> offset) {
@@ -63,6 +62,7 @@ public class QuerySpecification
         this.where = where;
         this.groupBy = groupBy;
         this.having = having;
+        this.windows = windows;
         this.orderBy = orderBy;
         this.limit = limit;
         this.offset = offset;
@@ -100,6 +100,10 @@ public class QuerySpecification
         return offset;
     }
 
+    public Map<String, Window> getWindows() {
+        return windows;
+    }
+
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitQuerySpecification(this, context);
@@ -107,39 +111,41 @@ public class QuerySpecification
 
     @Override
     public String toString() {
-        return MoreObjects.toStringHelper(this)
-            .add("select", select)
-            .add("from", from)
-            .add("where", where.orNull())
-            .add("groupBy", groupBy)
-            .add("having", having.orNull())
-            .add("orderBy", orderBy)
-            .add("limit", limit.orNull())
-            .add("offset", offset.orNull())
-            .toString();
+        return "QuerySpecification{" +
+               "select=" + select +
+               ", from=" + from +
+               ", where=" + where +
+               ", groupBy=" + groupBy +
+               ", having=" + having +
+               ", orderBy=" + orderBy +
+               ", limit=" + limit +
+               ", offset=" + offset +
+               ", windows=" + windows +
+               '}';
     }
 
     @Override
-    public boolean equals(Object obj) {
-        if (this == obj) {
+    public boolean equals(Object o) {
+        if (this == o) {
             return true;
         }
-        if ((obj == null) || (getClass() != obj.getClass())) {
+        if (o == null || getClass() != o.getClass()) {
             return false;
         }
-        QuerySpecification o = (QuerySpecification) obj;
-        return Objects.equal(select, o.select) &&
-               Objects.equal(from, o.from) &&
-               Objects.equal(where, o.where) &&
-               Objects.equal(groupBy, o.groupBy) &&
-               Objects.equal(having, o.having) &&
-               Objects.equal(orderBy, o.orderBy) &&
-               Objects.equal(limit, o.limit) &&
-               Objects.equal(offset, o.offset);
+        QuerySpecification that = (QuerySpecification) o;
+        return Objects.equals(select, that.select) &&
+               Objects.equals(from, that.from) &&
+               Objects.equals(where, that.where) &&
+               Objects.equals(groupBy, that.groupBy) &&
+               Objects.equals(having, that.having) &&
+               Objects.equals(orderBy, that.orderBy) &&
+               Objects.equals(limit, that.limit) &&
+               Objects.equals(offset, that.offset) &&
+               Objects.equals(windows, that.windows);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(select, from, where, groupBy, having, orderBy, limit, offset);
+        return Objects.hash(select, from, where, groupBy, having, orderBy, limit, offset, windows);
     }
 }

@@ -21,50 +21,59 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.Objects;
-
-import java.util.Locale;
+import java.util.function.Function;
 
 /**
  * columntype that contains many values of a single type
  */
-public class CollectionColumnType extends ColumnType {
+public class CollectionColumnType<T> extends ColumnType<T> {
 
-    private final ColumnType innerType;
+    private final ColumnType<T> innerType;
 
-    public static CollectionColumnType array(ColumnType innerType) {
-        return new CollectionColumnType(innerType, Type.ARRAY);
-    }
-
-    public static CollectionColumnType set(ColumnType innerType) {
-        return new CollectionColumnType(innerType, Type.SET);
-    }
-
-    private CollectionColumnType(ColumnType innerType, Type type) {
-        super(type.name().toUpperCase(Locale.ENGLISH), type);
+    public CollectionColumnType(ColumnType<T> innerType) {
+        super("ARRAY");
         this.innerType = innerType;
     }
 
-    public ColumnType innerType() {
+    public ColumnType<T> innerType() {
         return innerType;
     }
 
     @Override
-    public int hashCode() {
-        return Objects.hashCode(name, type, innerType);
+    public <U> ColumnType<U> map(Function<? super T, ? extends U> mapper) {
+        return new CollectionColumnType<>(innerType.map(mapper));
+    }
+
+    @Override
+    public <U> ColumnType<U> mapExpressions(ColumnType<U> mappedType,
+                                            Function<? super T, ? extends U> mapper) {
+        CollectionColumnType<U> collectionColumnType = (CollectionColumnType<U>) mappedType;
+        return new CollectionColumnType<>(
+            innerType.mapExpressions(collectionColumnType.innerType, mapper));
     }
 
     @Override
     public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        if (!super.equals(o)) return false;
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
 
         CollectionColumnType that = (CollectionColumnType) o;
 
-        if (!innerType.equals(that.innerType)) return false;
+        return innerType.equals(that.innerType);
+    }
 
-        return true;
+    @Override
+    public int hashCode() {
+        int result = super.hashCode();
+        result = 31 * result + innerType.hashCode();
+        return result;
     }
 
     @Override

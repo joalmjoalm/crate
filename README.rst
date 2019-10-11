@@ -1,20 +1,11 @@
-.. image:: https://cdn.crate.io/web/2.0/img/crate-logo_330x72.png
-    :width: 165px
-    :alt: Crate
-    :target: https://crate.io
+.. image:: docs/_static/crate-logo.png
+    :alt: CrateDB
+    :target: https://crate.io/
 
-=================================
-CRATE: Put data to work. Simply.
-=================================
+----
 
-
-    Crate allows to query and compute data with SQL in real time by providing a
-    distributed aggregation engine, native search and super simple scalability.
-
-**https://crate.io**
-
-.. image:: https://travis-ci.org/crate/crate.svg?branch=master
-    :target: https://travis-ci.org/crate/crate
+.. image:: https://dev.azure.com/cratedb/cratedb/_apis/build/status/crate.crate
+    :target: https://dev.azure.com/cratedb/cratedb/_build/latest?definitionId=1
 
 .. image:: https://img.shields.io/badge/docs-latest-brightgreen.svg
     :target: https://crate.io/docs/en/latest/
@@ -22,125 +13,73 @@ CRATE: Put data to work. Simply.
 .. image:: https://img.shields.io/badge/container-docker-green.svg
     :target: https://hub.docker.com/_/crate/
 
-Features include
-----------------
+.. image:: https://img.shields.io/lgtm/grade/java/g/crate/crate.svg?logo=lgtm&logoWidth=18
+    :target: https://lgtm.com/projects/g/crate/crate/
 
-Familiar SQL syntax:
+.. image:: https://img.shields.io/lgtm/alerts/g/crate/crate.svg?logo=lgtm&logoWidth=18
+    :target: https://lgtm.com/projects/g/crate/crate/alerts/
 
-::
+|
 
-    select * from users;
-    insert into users (name) values ('Arthur');
+CrateDB is a distributed SQL database that makes it simple to store and analyze massive amounts of machine data in real-time.
 
-Semi-structured data::
+Features of CrateDB:
 
-    create table demo (
-        name string,
-        obj object (dynamic) as (
-            age int
-        ),
-        tags array (string)
-    );
+- Standard SQL plus dynamic schemas, queryable objects, geospatial features, time series data, first-class BLOB support, and realtime full-text search.
+- Horizontally scalable, highly available, and fault tolerant clusters that run very well in virtualized and containerised environments.
+- Extremely fast distributed query execution.
+- Auto-partitioning, auto-sharding, and auto-replication.
+- Self-healing and auto-rebalancing.
 
-::
+CrateDB offers the scalability and flexibility typically associated with a NoSQL database and is designed to run on inexpensive commodity servers and can be deployed and run across any sort of network. From personal computers to multi-region hybrid clouds.
 
-    insert into demo (name, obj, tags) values
-        ('Trillian',
-         {age = 39, gender='female'}, // Note that gender wasn't defined in the schema!
-         ['mathematician', 'astrophysicist']);
+The smallest CrateDB clusters can easily ingest tens of thousands of records per second. And this data can be queried, ad-hoc, in parallel across the whole cluster in real time.
 
-::
+Screenshots
+===========
 
-    select * from demo where obj['gender'] = 'female';
+CrateDB provides an admin UI:
 
-::
+.. image:: crate-admin.gif
+    :alt: Screenshots of the CrateDB admin UI
+    :target: http://play.crate.io/
 
-    select * from demo where 'mathematician'= any (tags);
+Try CrateDB
+===========
 
+The fastest way to try CrateDB out is by running::
 
-High availability, resiliency, and scalability in a distributed design::
+    $ bash -c "$(curl -L try.crate.io)"
 
-    create table t (string name)
-    clustered into 5 shards with (number_of_replicas = 1); // this is actually the default!
+Or spin up the official `Docker image`_::
 
-::
+    $ docker run -p 4200:4200 crate
 
-    select count(*) from sys.nodes;
-    select table_name, count(*) from sys.shards group by 1;
+Visit the `getting started`_ page to see all the available download and install options.
 
-Powerful Lucene based full-text search::
+Once you're up and running, head on over to `the introductory docs`_.
 
-    select title from wikipedia where match((title 1.5, text 1.0), 'Hitchhiker')
+Contributing
+============
 
+This project is primarily maintained by Crate.io_, but we welcome community
+contributions!
 
-Getting Started
-===============
+See the `developer docs`_ and the `contribution docs`_ for more information.
 
-Get Crate
----------
+Help
+====
 
-There are many ways to install Crate. The fastest way to try it out is just one command-line::
+Looking for more help?
 
-    bash -c "$(curl -L try.crate.io)"
+- Read `the project documentation`_
+- Check out our `support channels`_
 
-Or with docker::
-
-    docker pull crate && docker run -p 4200:4200 crate
-
-Visit our `getting started`_ page to see all available download and install options.
-
-
-Use Crate
----------
-
-Crate includes an Administration UI that is available under http://localhost:4200/admin/.
-
-It also ships with a CLI called ``crash`` that can be used to run queries in a
-shell.
-
-Next steps
-----------
-
-Start some more server to form a cluster and take a look at the documentation_
-to learn more.
-
-Especially the `crate introduction`_ is a great place to start learning more.
-
-
-Are you a Developer?
-====================
-
-Clone the repository::
-
-    git clone https://github.com/crate/crate.git
-    cd crate
-    git submodule update --init
-
-And build it with gradle::
-
-    ./gradlew compileJava
-
-Develop in IntelliJ::
-
-    ./gradlew idea
-
-Run tests::
-
-    ./gradlew test
-
-Refer to ``DEVELOP.rst`` and ``CONTRIBUTING.rst`` for further information.
-
-Help & Contact
-==============
-
-Do you have any questions? Or suggestions? We would be very happy
-to help you. So, feel free to to contact us on Slack_.
-
-.. _Slack: https://crate.io/docs/support/slackin/
-
-Or for further information and official contact please
-visit `https://crate.io/ <https://crate.io/>`_.
-
-.. _documentation: https://crate.io/docs/stable/installation.html
-.. _getting started: https://crate.io/docs/getting-started
-.. _crate introduction: https://crate.io/docs/stable/hello.html
+.. _contribution docs: CONTRIBUTING.rst
+.. _Crate.io: http://crate.io/
+.. _developer docs: devs/docs/index.rst
+.. _Docker image: https://hub.docker.com/_/crate/
+.. _getting started: https://crate.io/docs/getting-started/
+.. _support channels: https://crate.io/support/
+.. _the introductory docs: https://crate.io/docs/crate/getting-started/en/latest/first-use/index.html
+.. _the project documentation: https://crate.io/docs/

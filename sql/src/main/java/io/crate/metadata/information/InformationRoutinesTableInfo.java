@@ -21,40 +21,40 @@
 
 package io.crate.metadata.information;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSortedMap;
-import io.crate.metadata.*;
-import io.crate.types.DataType;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.RoutineInfo;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
+import io.crate.metadata.table.ColumnRegistrar;
 
-public class InformationRoutinesTableInfo extends InformationTableInfo {
+import java.util.Map;
+import static io.crate.types.DataTypes.STRING;
+import static io.crate.types.DataTypes.BOOLEAN;
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+
+public class InformationRoutinesTableInfo extends InformationTableInfo<RoutineInfo> {
 
     public static final String NAME = "routines";
-    public static final TableIdent IDENT = new TableIdent(InformationSchemaInfo.NAME, NAME);
+    public static final RelationName IDENT = new RelationName(InformationSchemaInfo.NAME, NAME);
 
-    public static class Columns {
-        public static final ColumnIdent ROUTINE_NAME = new ColumnIdent("routine_name");
-        public static final ColumnIdent ROUTINE_TYPE = new ColumnIdent("routine_type");
+    private static ColumnRegistrar<RoutineInfo> columnRegistrar() {
+        return new ColumnRegistrar<RoutineInfo>(IDENT, RowGranularity.DOC)
+            .register("routine_name", STRING, () -> forFunction(RoutineInfo::name))
+            .register("routine_type", STRING, () -> forFunction(RoutineInfo::type))
+            .register("routine_schema", STRING, () -> forFunction(RoutineInfo::schema))
+            .register("specific_name", STRING, () -> forFunction(RoutineInfo::specificName))
+            .register("routine_body", STRING, () -> forFunction(RoutineInfo::body))
+            .register("routine_definition", STRING, () -> forFunction(RoutineInfo::definition))
+            .register("data_type", STRING, () -> forFunction(RoutineInfo::dataType))
+            .register("is_deterministic", BOOLEAN, () -> forFunction(RoutineInfo::isDeterministic));
     }
 
-    public static class References {
-        public static final Reference ROUTINE_NAME = info(Columns.ROUTINE_NAME, DataTypes.STRING);
-        public static final Reference ROUTINE_TYPE = info(Columns.ROUTINE_TYPE, DataTypes.STRING);
+    static Map<ColumnIdent, RowCollectExpressionFactory<RoutineInfo>> expressions() {
+        return columnRegistrar().expressions();
     }
 
-    private static Reference info(ColumnIdent columnIdent, DataType dataType) {
-        return new Reference(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
-    }
-
-    protected InformationRoutinesTableInfo(ClusterService clusterService) {
-        super(clusterService,
-            IDENT,
-            ImmutableList.<ColumnIdent>of(),
-            ImmutableSortedMap.<ColumnIdent, Reference>naturalOrder()
-                .put(Columns.ROUTINE_NAME, References.ROUTINE_NAME)
-                .put(Columns.ROUTINE_TYPE, References.ROUTINE_TYPE)
-                .build()
-        );
+    InformationRoutinesTableInfo() {
+        super(IDENT, columnRegistrar());
     }
 }

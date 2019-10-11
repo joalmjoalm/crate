@@ -22,217 +22,215 @@
 package io.crate.analyze;
 
 import com.google.common.collect.ImmutableMap;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Symbol;
 import io.crate.exceptions.ColumnUnknownException;
 import io.crate.exceptions.ColumnValidationException;
 import io.crate.exceptions.InvalidColumnNameException;
+import io.crate.exceptions.OperationOnInaccessibleRelationException;
 import io.crate.exceptions.ValidationException;
-import io.crate.metadata.*;
-import io.crate.metadata.sys.MetaDataSysModule;
-import io.crate.metadata.table.ColumnPolicy;
-import io.crate.metadata.table.SchemaInfo;
-import io.crate.metadata.table.TableInfo;
-import io.crate.metadata.table.TestingTableInfo;
-import io.crate.operation.predicate.PredicateModule;
-import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.operation.scalar.arithmetic.AddFunction;
-import io.crate.testing.MockedClusterServiceModule;
+import io.crate.expression.scalar.arithmetic.ArithmeticFunctions;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.PartitionName;
+import io.crate.metadata.RelationName;
+import io.crate.sql.parser.ParsingException;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.SQLExecutor;
 import io.crate.types.DataTypes;
-import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.collect.MapBuilder;
-import org.elasticsearch.common.inject.Module;
+import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.Mock;
 
-import java.util.*;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
-import static io.crate.testing.TestingHelpers.*;
-import static org.hamcrest.Matchers.*;
+import static io.crate.analyze.TableDefinitions.USER_TABLE_IDENT;
+import static io.crate.testing.SymbolMatchers.isFunction;
+import static io.crate.testing.SymbolMatchers.isLiteral;
+import static io.crate.testing.SymbolMatchers.isReference;
+import static org.hamcrest.Matchers.arrayContaining;
+import static org.hamcrest.Matchers.arrayContainingInAnyOrder;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.hasEntry;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.core.Is.is;
-import static org.mockito.Mockito.when;
 
-public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
+public class InsertFromValuesAnalyzerTest extends CrateDummyClusterServiceUnitTest {
 
-    private static final TableIdent TEST_ALIAS_TABLE_IDENT = new TableIdent(null, "alias");
-    private static final TableInfo TEST_ALIAS_TABLE_INFO = new TestingTableInfo.Builder(
-        TEST_ALIAS_TABLE_IDENT, new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()))
-        .add("bla", DataTypes.STRING, null)
-        .isAlias(true).build();
-
-    private static final TableIdent NESTED_CLUSTERED_TABLE_IDENT = new TableIdent(null, "nested_clustered");
-    private static final TableInfo NESTED_CLUSTERED_TABLE_INFO = new TestingTableInfo.Builder(
-        NESTED_CLUSTERED_TABLE_IDENT, new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()))
-        .add("o", DataTypes.OBJECT, null)
-        .add("o", DataTypes.STRING, Arrays.asList("c"))
-        .clusteredBy("o.c")
-        .build();
-
-    private TableInfo generatedColumnTableInfo;
-    private TableInfo generatedPkColumnTableInfo;
-    private TableInfo generatedNestedClusteredByInfo;
-    private TableInfo generatedClusteredByInfo;
-
-    @Mock
-    private SchemaInfo schemaInfo;
-
-    class TestMetaDataModule extends MetaDataModule {
-        @Override
-        protected void bindSchemas() {
-            super.bindSchemas();
-            when(schemaInfo.getTableInfo(USER_TABLE_IDENT.name())).thenReturn(USER_TABLE_INFO);
-            when(schemaInfo.getTableInfo(TEST_ALIAS_TABLE_IDENT.name())).thenReturn(TEST_ALIAS_TABLE_INFO);
-            when(schemaInfo.getTableInfo(NESTED_PK_TABLE_IDENT.name())).thenReturn(NESTED_PK_TABLE_INFO);
-            when(schemaInfo.getTableInfo(TEST_PARTITIONED_TABLE_IDENT.name()))
-                .thenReturn(TEST_PARTITIONED_TABLE_INFO);
-            when(schemaInfo.getTableInfo(TEST_NESTED_PARTITIONED_TABLE_IDENT.name()))
-                .thenReturn(TEST_NESTED_PARTITIONED_TABLE_INFO);
-            when(schemaInfo.getTableInfo(DEEPLY_NESTED_TABLE_IDENT.name()))
-                .thenReturn(DEEPLY_NESTED_TABLE_INFO);
-            when(schemaInfo.getTableInfo(NESTED_CLUSTERED_TABLE_IDENT.name()))
-                .thenReturn(NESTED_CLUSTERED_TABLE_INFO);
-            schemaBinder.addBinding(Schemas.DEFAULT_SCHEMA_NAME).toInstance(schemaInfo);
-        }
-    }
-
-    @Override
-    protected List<Module> getModules() {
-        List<Module> modules = super.getModules();
-        modules.addAll(Arrays.<Module>asList(
-            new MockedClusterServiceModule(),
-            new TestMetaDataModule(),
-            new MetaDataSysModule(),
-            new ScalarFunctionModule(),
-            new PredicateModule()
-        ));
-        return modules;
-    }
+    private SQLExecutor e;
 
     @Before
-    public void bindGeneratedColumnTable() {
-        TableIdent generatedColumnTableIdent = new TableIdent(null, "generated_column");
-        generatedColumnTableInfo = new TestingTableInfo.Builder(
-            generatedColumnTableIdent, new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()))
-            .add("ts", DataTypes.TIMESTAMP, null)
-            .add("user", DataTypes.OBJECT, null)
-            .add("user", DataTypes.STRING, Arrays.asList("name"))
-            .addGeneratedColumn("day", DataTypes.TIMESTAMP, "date_trunc('day', ts)", false)
-            .addGeneratedColumn("name", DataTypes.STRING, "concat(user['name'], 'bar')", false)
-            .build(injector.getInstance(Functions.class));
-        when(schemaInfo.getTableInfo(generatedColumnTableIdent.name()))
-            .thenReturn(generatedColumnTableInfo);
+    public void prepare() throws IOException {
+        SQLExecutor.Builder executorBuilder = SQLExecutor.builder(clusterService)
+            .enableDefaultTables()
+            .addTable(
+                "create table doc.nested_clustered (" +
+                "  o object as (c text)," +
+                "  o2 object as (p text)," +
+                "  k integer" +
+                ")" +
+                " clustered by (o['c'])")
+            .addTable(
+                "create table doc.three_pk (" +
+                "  a int," +
+                "  b int," +
+                "  c int," +
+                "  d int," +
+                "  primary key (a, b, c)" +
+                ")")
+            .addTable(
+                "create table doc.not_null_column (" +
+                "  id int," +
+                "  name text not null" +
+                ")")
+            .addTable(
+                "create table doc.generated_column (" +
+                "  ts timestamp with time zone," +
+                "  \"user\" object as (name text)," +
+                "  day timestamp with time zone generated always as date_trunc('day', ts)," +
+                "  name text generated always as concat(\"user\"['name'], 'bar')" +
+                ")")
+            .addTable(
+                "create table generated_pk_column (" +
+                "  serial_no int," +
+                "  product_no int," +
+                "  color text," +
+                "  id int generated always as serial_no + 1," +
+                "  id2 int generated always as product_no + 1," +
+                "  primary key(id, id2)" +
+                ")")
+            .addPartitionedTable(
+                "create table generated_pk_parted_column (" +
+                "  ts timestamp with time zone," +
+                "  value int," +
+                "  part_key__generated long generated always as date_trunc('day', ts)," +
+                "  primary key (value, part_key__generated)" +
+                ")" +
+                " partitioned by (part_key__generated)")
+            .addTable(
+                "create table doc.default_column (" +
+                "  id int," +
+                "  owner text default 'crate'" +
+                ")")
+            .addTable(
+                "create table doc.default_column_nested (" +
+                "  id int," +
+                "  obj object as (x int default 1, y int)" +
+                ")")
+            .addTable(
+                "create table doc.default_column_pk (" +
+                "  id int primary key," +
+                "  owner text default 'crate' primary key" +
+                ")")
+            .addTable(
+                "create table doc.default_column_clustered_by (" +
+                "  id int," +
+                "  two int default 1+1" +
+                ")" +
+                " clustered by (two)")
+            .addTable(
+                "create table generated_clustered_by_column(" +
+                "  serial_no int," +
+                "  color text," +
+                "  routing_col int generated always as serial_no + 1" +
+                ")" +
+                " clustered by (routing_col)")
+            .addTable(
+                "create table generated_nested_clustered_by (" +
+                "  o object as (" +
+                "    serial_number int" +
+                "  )," +
+                "  color text," +
+                "  routing_col int generated always as o['serial_number'] + 1" +
+                ")" +
+                " clustered by (routing_col)");
 
-        TableIdent generatedPkColumnTableIdent = new TableIdent(null, "generated_pk_column");
-        generatedPkColumnTableInfo = new TestingTableInfo.Builder(
-            generatedColumnTableIdent, SHARD_ROUTING)
-            .add("serial_no", DataTypes.INTEGER, null)
-            .add("product_no", DataTypes.INTEGER, null)
-            .add("color", DataTypes.STRING, null)
-            .addGeneratedColumn("id", DataTypes.INTEGER, "serial_no + 1", false)
-            .addGeneratedColumn("id2", DataTypes.INTEGER, "product_no + 1", false)
-            .addPrimaryKey("id")
-            .addPrimaryKey("id2")
-            .build(injector.getInstance(Functions.class));
-        when(schemaInfo.getTableInfo(generatedPkColumnTableIdent.name()))
-            .thenReturn(generatedPkColumnTableInfo);
-
-        TableIdent generatedClusteredByTableIdent = new TableIdent(null, "generated_clustered_by_column");
-        generatedClusteredByInfo = new TestingTableInfo.Builder(
-            generatedClusteredByTableIdent, SHARD_ROUTING)
-            .add("serial_no", DataTypes.INTEGER, null)
-            .add("color", DataTypes.STRING, null)
-            .addGeneratedColumn("routing_col", DataTypes.INTEGER, "serial_no + 1", false)
-            .clusteredBy("routing_col")
-            .build(injector.getInstance(Functions.class));
-        when(schemaInfo.getTableInfo(generatedClusteredByTableIdent.name()))
-            .thenReturn(generatedClusteredByInfo);
-
-        TableIdent generatedNestedClusteredByTableIdent = new TableIdent(null, "generated_nested_clustered_by");
-        generatedNestedClusteredByInfo = new TestingTableInfo.Builder(
-            generatedNestedClusteredByTableIdent, SHARD_ROUTING)
-            .add("o", DataTypes.OBJECT, null, ColumnPolicy.DYNAMIC)
-            .add("o", DataTypes.INTEGER, Arrays.asList("serial_number"))
-            .addGeneratedColumn("routing_col", DataTypes.INTEGER, "o['serial_number'] + 1", false)
-            .clusteredBy("routing_col")
-            .build(injector.getInstance(Functions.class));
-        when(schemaInfo.getTableInfo(generatedNestedClusteredByTableIdent.name()))
-            .thenReturn(generatedNestedClusteredByInfo);
+        e = executorBuilder.build();
     }
 
     @Test
     public void testInsertWithColumns() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name) values (1, 'Trillian')");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, name) values (1, 'Trillian')");
         assertThat(analysis.tableInfo().ident(), is(USER_TABLE_IDENT));
         assertThat(analysis.columns().size(), is(2));
 
-        assertThat(analysis.columns().get(0).ident().columnIdent().name(), is("id"));
+        assertThat(analysis.columns().get(0).column().name(), is("id"));
         assertEquals(DataTypes.LONG, analysis.columns().get(0).valueType());
 
-        assertThat(analysis.columns().get(1).ident().columnIdent().name(), is("name"));
+        assertThat(analysis.columns().get(1).column().name(), is("name"));
         assertEquals(DataTypes.STRING, analysis.columns().get(1).valueType());
 
         assertThat(analysis.sourceMaps().size(), is(1));
         assertThat(analysis.sourceMaps().get(0).length, is(2));
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(1L));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[1], is(new BytesRef("Trillian")));
+        assertThat(analysis.sourceMaps().get(0)[0], is(1L));
+        assertThat(analysis.sourceMaps().get(0)[1], is("Trillian"));
     }
 
     @Test
     public void testInsertWithTwistedColumns() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (name, id) values ('Trillian', 2)");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (name, id) values ('Trillian', 2)");
         assertThat(analysis.tableInfo().ident(), is(USER_TABLE_IDENT));
         assertThat(analysis.columns().size(), is(2));
 
-        assertThat(analysis.columns().get(0).ident().columnIdent().name(), is("name"));
+        assertThat(analysis.columns().get(0).column().name(), is("name"));
         assertEquals(DataTypes.STRING, analysis.columns().get(0).valueType());
 
-        assertThat(analysis.columns().get(1).ident().columnIdent().name(), is("id"));
+        assertThat(analysis.columns().get(1).column().name(), is("id"));
         assertEquals(DataTypes.LONG, analysis.columns().get(1).valueType());
 
         assertThat(analysis.sourceMaps().size(), is(1));
         assertThat(analysis.sourceMaps().get(0).length, is(2));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[0], is(new BytesRef("Trillian")));
-        assertThat((Long) analysis.sourceMaps().get(0)[1], is(2L));
+        assertThat(analysis.sourceMaps().get(0)[0], is("Trillian"));
+        assertThat(analysis.sourceMaps().get(0)[1], is(2L));
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testInsertWithColumnsAndTooManyValues() throws Exception {
-        analyze("insert into users (name, id) values ('Trillian', 2, true)");
+        e.analyze("insert into users (name, id) values ('Trillian', 2, true)");
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testInsertWithColumnsAndTooLessValues() throws Exception {
-        analyze("insert into users (name, id) values ('Trillian')");
+        e.analyze("insert into users (name, id) values ('Trillian')");
     }
 
     @Test(expected = ValidationException.class)
     public void testInsertWithWrongType() throws Exception {
-        analyze("insert into users (name, id) values (1, 'Trillian')");
+        e.analyze("insert into users (name, id) values (1, 'Trillian')");
     }
 
     @Test
-    public void testInsertWithNumericTypeOutOfRange() throws Exception {
+    public void testInsertWithNumericTypeOutOfRange() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for bytes: 1234 cannot be cast to type byte");
-        analyze("insert into users (name, id, bytes) values ('Trillian', 4, 1234)");
+        expectedException.expectMessage("Validation failed for bytes: Cannot cast 1234 to type char");
+        e.analyze("insert into users (name, id, bytes) values ('Trillian', 4, 1234)");
     }
 
 
     @Test(expected = ValidationException.class)
     public void testInsertWithWrongParameterType() throws Exception {
-        analyze("insert into users (name, id) values (?, ?)", new Object[]{1, true});
+        e.analyze("insert into users (name, id) values (?, ?)", new Object[]{1, true});
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testInsertSameReferenceRepeated() throws Exception {
-        analyze("insert into users (name, name) values ('Trillian', 'Ford')");
+        e.analyze("insert into users (name, name) values ('Trillian', 'Ford')");
     }
 
     @Test
     public void testInsertWithConvertedTypes() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name, awesome) values ($1, 'Trillian', $2)", new Object[]{1.0f, "true"});
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into users (id, name, awesome) values ($1, 'Trillian', $2)", new Object[]{1.0f, "true"});
 
         assertEquals(DataTypes.LONG, analysis.columns().get(0).valueType());
         assertEquals(DataTypes.BOOLEAN, analysis.columns().get(2).valueType());
@@ -244,51 +242,51 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testInsertWithFunction() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name) values (ABS(-1), 'Trillian')");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, name) values (ABS(-1), 'Trillian')");
         assertThat(analysis.tableInfo().ident(), is(USER_TABLE_IDENT));
         assertThat(analysis.columns().size(), is(2));
 
-        assertThat(analysis.columns().get(0).ident().columnIdent().name(), is("id"));
+        assertThat(analysis.columns().get(0).column().name(), is("id"));
         assertEquals(DataTypes.LONG, analysis.columns().get(0).valueType());
 
-        assertThat(analysis.columns().get(1).ident().columnIdent().name(), is("name"));
+        assertThat(analysis.columns().get(1).column().name(), is("name"));
         assertEquals(DataTypes.STRING, analysis.columns().get(1).valueType());
 
         assertThat(analysis.sourceMaps().size(), is(1));
         assertThat(analysis.sourceMaps().get(0).length, is(2));
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(1L));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[1], is(new BytesRef("Trillian")));
+        assertThat(analysis.sourceMaps().get(0)[0], is(1L));
+        assertThat(analysis.sourceMaps().get(0)[1], is("Trillian"));
     }
 
     @Test
     public void testInsertWithoutColumns() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users values (1, 1, 'Trillian')");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, other_id, name) values (1, 1, 'Trillian')");
         assertThat(analysis.tableInfo().ident(), is(USER_TABLE_IDENT));
         assertThat(analysis.columns().size(), is(3));
 
-        assertThat(analysis.columns().get(0).ident().columnIdent().name(), is("id"));
+        assertThat(analysis.columns().get(0).column().name(), is("id"));
         assertEquals(DataTypes.LONG, analysis.columns().get(0).valueType());
 
-        assertThat(analysis.columns().get(1).ident().columnIdent().name(), is("other_id"));
+        assertThat(analysis.columns().get(1).column().name(), is("other_id"));
         assertEquals(DataTypes.LONG, analysis.columns().get(1).valueType());
 
-        assertThat(analysis.columns().get(2).ident().columnIdent().name(), is("name"));
+        assertThat(analysis.columns().get(2).column().name(), is("name"));
         assertEquals(DataTypes.STRING, analysis.columns().get(2).valueType());
 
         assertThat(analysis.sourceMaps().size(), is(1));
         assertThat(analysis.sourceMaps().get(0).length, is(3));
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(1L));
-        assertThat((Long) analysis.sourceMaps().get(0)[1], is(1L));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[2], is(new BytesRef("Trillian")));
+        assertThat(analysis.sourceMaps().get(0)[0], is(1L));
+        assertThat(analysis.sourceMaps().get(0)[1], is(1L));
+        assertThat(analysis.sourceMaps().get(0)[2], is("Trillian"));
     }
 
     @Test
     public void testInsertWithoutColumnsAndOnlyOneColumn() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users values (1)");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id) values (1)");
         assertThat(analysis.tableInfo().ident(), is(USER_TABLE_IDENT));
         assertThat(analysis.columns().size(), is(1));
 
-        assertThat(analysis.columns().get(0).ident().columnIdent().name(), is("id"));
+        assertThat(analysis.columns().get(0).column().name(), is("id"));
         assertEquals(DataTypes.LONG, analysis.columns().get(0).valueType());
 
         assertThat(analysis.sourceMaps().size(), is(1));
@@ -296,32 +294,35 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
         assertThat((Long) analysis.sourceMaps().get(0)[0], is(1L));
     }
 
-    @Test(expected = UnsupportedOperationException.class)
-    public void testInsertIntoSysTable() throws Exception {
-        analyze("insert into sys.nodes (id, name) values (666, 'evilNode')");
+    @Test
+    public void testInsertWithInvalidColumnReference() throws Exception {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("invalid table column reference 'a'");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users ('a') values (1)");
     }
 
     @Test
-    public void testInsertIntoAliasTable() throws Exception {
-        expectedException.expect(UnsupportedOperationException.class);
-        expectedException.expectMessage("alias is an alias. Write, Drop or Alter operations are not supported");
-        analyze("insert into alias (bla) values ('blubb')");
+    public void testInsertIntoSysTable() throws Exception {
+        expectedException.expect(OperationOnInaccessibleRelationException.class);
+        expectedException.expectMessage("The relation \"sys.nodes\" doesn't support or allow INSERT " +
+                                        "operations, as it is read-only.");
+        e.analyze("insert into sys.nodes (id, name) values (666, 'evilNode')");
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testInsertWithoutPrimaryKey() throws Exception {
-        analyze("insert into users (name) values ('Trillian')");
+        e.analyze("insert into users (name) values ('Trillian')");
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testNullPrimaryKey() throws Exception {
-        analyze("insert into users (id) values (?)",
+        e.analyze("insert into users (id) values (?)",
             new Object[]{null});
     }
 
     @Test
     public void testNullLiterals() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name, awesome, details) values (?, ?, ?, ?)",
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, name, awesome, details) values (?, ?, ?, ?)",
             new Object[]{1, null, null, null});
         assertThat(analysis.sourceMaps().get(0).length, is(4));
         assertNull(analysis.sourceMaps().get(0)[1]);
@@ -331,7 +332,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testObjectLiterals() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name, awesome, details) values (?, ?, ?, ?)",
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, name, awesome, details) values (?, ?, ?, ?)",
             new Object[]{1, null, null, new HashMap<String, Object>() {{
                 put("new_col", "new value");
             }}});
@@ -343,7 +344,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     @Test(expected = ColumnValidationException.class)
     public void testInsertArrays() throws Exception {
         // error because in the schema are non-array types:
-        analyze("insert into users (id, name, awesome, details) values (?, ?, ?, ?)",
+        e.analyze("insert into users (id, name, awesome, details) values (?, ?, ?, ?)",
             new Object[]{
                 new Long[]{1l, 2l},
                 new String[]{"Karl Liebknecht", "Rosa Luxemburg"},
@@ -356,9 +357,15 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
         );
     }
 
+    public void testInsertNotNullConstraintAbsentColumn() throws Exception {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Cannot insert null value for column 'name'");
+        e.analyze("insert into not_null_column (id) values (1)");
+    }
+
     @Test
     public void testInsertObjectArrayParameter() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, friends) values(?, ?)",
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, friends) values(?, ?)",
             new Object[]{0, new Map[]{
                 new HashMap<String, Object>() {{
                     put("name", "Jeltz");
@@ -369,19 +376,19 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
             }
             });
         assertThat(analysis.sourceMaps().get(0).length, is(2));
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(0L));
-        assertArrayEquals(
-            (Object[]) analysis.sourceMaps().get(0)[1],
-            new Object[]{
+        assertThat(analysis.sourceMaps().get(0)[0], is(0L));
+        assertThat(
+            (List<Map>) analysis.sourceMaps().get(0)[1],
+            contains(
                 new MapBuilder<String, Object>().put("name", "Jeltz").map(),
-                new MapBuilder<String, Object>().put("name", "Prosser").map(),
-            }
+                new MapBuilder<String, Object>().put("name", "Prosser").map()
+            )
         );
     }
 
     @Test(expected = ColumnValidationException.class)
     public void testInsertInvalidObjectArrayParameter1() throws Exception {
-        analyze("insert into users (id, friends) values(?, ?)",
+        e.analyze("insert into users (id, friends) values(?, ?)",
             new Object[]{0, new Map[]{
                 new HashMap<String, Object>() {{
                     put("id", "Jeltz");
@@ -392,7 +399,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test(expected = ColumnValidationException.class)
     public void testInsertInvalidObjectArrayParameter2() throws Exception {
-        analyze("insert into users (id, friends) values(?, ?)",
+        e.analyze("insert into users (id, friends) values(?, ?)",
             new Object[]{0, new Map[]{
                 new HashMap<String, Object>() {{
                     put("id", 1L);
@@ -405,18 +412,18 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     @Test
     public void testInsertInvalidObjectArrayInObject() throws Exception {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for details: invalid value for object array type");
-        analyze("insert into deeply_nested (details) " +
+        expectedException.expectMessage("Validation failed for details: Invalid value '{\"arguments\"=[1, 2, 3], \"awesome\"=true}' in insert statement");
+        e.analyze("insert into deeply_nested (details) " +
                 "values (" +
                 "  {awesome=true, arguments=[1,2,3]}" +
                 ")");
     }
 
     @Test
-    public void testInsertInvalidObjectArrayFieldInObjectArray() throws Exception {
+    public void testInsertInvalidObjectArrayFieldInObjectArray() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for tags['metadata']['id']: Invalid long");
-        analyze("insert into deeply_nested (tags) " +
+        expectedException.expectMessage("Validation failed for tags['metadata']['id']: Invalid bigint");
+        e.analyze("insert into deeply_nested (tags) " +
                 "values (" +
                 "  [" +
                 "    {name='right', metadata=[{id=1}, {id=2}]}," +
@@ -427,97 +434,97 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testInsertNestedObjectLiteral() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into deeply_nested (tags) " +
             "values ([" +
             "           {\"name\"='cool', \"metadata\"=[{\"id\"=0}, {\"id\"=1}]}, " +
             "           {\"name\"='fancy', \"metadata\"=[{\"id\"='2'}, {\"id\"=3}]}" +
             "         ])");
         assertThat(analysis.sourceMaps().size(), is(1));
-        Object[] arrayValue = (Object[]) analysis.sourceMaps().get(0)[0];
-        assertThat(arrayValue.length, is(2));
-        assertThat(arrayValue[0], instanceOf(Map.class));
-        assertThat((BytesRef) ((Map) arrayValue[0]).get("name"), is(new BytesRef("cool")));
-        assertThat((BytesRef) ((Map) arrayValue[1]).get("name"), is(new BytesRef("fancy")));
-        assertThat(Arrays.toString(((Object[]) ((Map) arrayValue[0]).get("metadata"))), is("[{id=0}, {id=1}]"));
-        assertThat(Arrays.toString(((Object[]) ((Map) arrayValue[1]).get("metadata"))), is("[{id=2}, {id=3}]"));
+        List<Object> arrayValue = (List<Object>) analysis.sourceMaps().get(0)[0];
+        assertThat(arrayValue.size(), is(2));
+        assertThat(arrayValue.get(0), instanceOf(Map.class));
+        assertThat(((Map) arrayValue.get(0)).get("name"), is("cool"));
+        assertThat(((Map) arrayValue.get(1)).get("name"), is("fancy"));
+        assertThat(((Map) arrayValue.get(0)).get("metadata").toString(), is("[{id=0}, {id=1}]"));
+        assertThat(((Map) arrayValue.get(1)).get("metadata").toString(), is("[{id=2}, {id=3}]"));
     }
 
     @Test
     public void testInsertEmptyObjectArrayParameter() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, friends) values(?, ?)",
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, friends) values(?, ?)",
             new Object[]{0, new Map[0]});
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(0L));
-        assertThat(((Object[]) analysis.sourceMaps().get(0)[1]).length, is(0));
+        assertThat(analysis.sourceMaps().get(0)[0], is(0L));
+        assertThat(((List) analysis.sourceMaps().get(0)[1]).size(), is(0));
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test(expected = InvalidColumnNameException.class)
     public void testInsertSystemColumn() throws Exception {
-        analyze("insert into users (id, _id) values (?, ?)",
+        e.analyze("insert into users (id, _id) values (?, ?)",
             new Object[]{1, "1"});
     }
 
     @Test
     public void testNestedPk() throws Exception {
         // FYI: insert nested clustered by test here too
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into nested_pk (id, o) values (?, ?)",
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into nested_pk (id, o) values (?, ?)",
             new Object[]{1, new MapBuilder<String, Object>().put("b", 4).map()});
         assertThat(analysis.ids().size(), is(1));
         assertThat(analysis.ids().get(0),
-            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("o.b")), Arrays.asList(new BytesRef("1"), new BytesRef("4")), new ColumnIdent("o.b"))));
+            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("o.b")), Arrays.asList("1", "4"), new ColumnIdent("o.b"))));
     }
 
     @Test
     public void testNestedPkAllColumns() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into nested_pk values (?, ?)",
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into nested_pk values (?, ?)",
             new Object[]{1, new MapBuilder<String, Object>().put("b", 4).map()});
         assertThat(analysis.ids().size(), is(1));
         assertThat(analysis.ids().get(0),
-            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("o.b")), Arrays.asList(new BytesRef("1"), new BytesRef("4")), new ColumnIdent("o.b"))));
+            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("o.b")), Arrays.asList("1", "4"), new ColumnIdent("o.b"))));
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testMissingNestedPk() throws Exception {
-        analyze("insert into nested_pk (id) values (?)", new Object[]{1});
+        e.analyze("insert into nested_pk (id) values (?)", new Object[]{1});
     }
 
     @Test(expected = IllegalArgumentException.class)
     public void testMissingNestedPkInMap() throws Exception {
-        analyze("insert into nested_pk (id, o) values (?, ?)", new Object[]{1, new HashMap<String, Object>()});
+        e.analyze("insert into nested_pk (id, o) values (?, ?)", new Object[]{1, new HashMap<String, Object>()});
     }
 
     @Test
     public void testTwistedNestedPk() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into nested_pk (o, id) values (?, ?)",
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into nested_pk (o, id) values (?, ?)",
             new Object[]{new MapBuilder<String, Object>().put("b", 4).map(), 1});
         assertThat(analysis.ids().get(0),
-            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("o.b")), Arrays.asList(new BytesRef("1"), new BytesRef("4")), new ColumnIdent("o.b"))));
+            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("o.b")), Arrays.asList("1", "4"), new ColumnIdent("o.b"))));
 
     }
 
-    private String generateId(List<ColumnIdent> pkColumns, List<BytesRef> pkValues, ColumnIdent clusteredBy) {
+    private String generateId(List<ColumnIdent> pkColumns, List<String> pkValues, ColumnIdent clusteredBy) {
         return Id.compileWithNullValidation(pkColumns, clusteredBy).apply(pkValues);
     }
 
     @Test
     public void testInsertMultipleValues() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into users (id, name, awesome) values (?, ?, ?), (?, ?, ?)",
             new Object[]{99, "Marvin", true, 42, "Deep Thought", false});
         assertThat(analysis.sourceMaps().size(), is(2));
 
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(99L));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[1], is(new BytesRef("Marvin")));
-        assertThat((Boolean) analysis.sourceMaps().get(0)[2], is(true));
+        assertThat(analysis.sourceMaps().get(0)[0], is(99L));
+        assertThat(analysis.sourceMaps().get(0)[1], is("Marvin"));
+        assertThat(analysis.sourceMaps().get(0)[2], is(true));
 
-        assertThat((Long) analysis.sourceMaps().get(1)[0], is(42L));
-        assertThat((BytesRef) analysis.sourceMaps().get(1)[1], is(new BytesRef("Deep Thought")));
-        assertThat((Boolean) analysis.sourceMaps().get(1)[2], is(false));
+        assertThat(analysis.sourceMaps().get(1)[0], is(42L));
+        assertThat(analysis.sourceMaps().get(1)[1], is("Deep Thought"));
+        assertThat(analysis.sourceMaps().get(1)[2], is(false));
     }
 
     @Test
     public void testInsertPartitionedTable() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into parted (id, name, date) " +
             "values (?, ?, ?)", new Object[]{0, "Trillian", 0L});
         assertThat(analysis.sourceMaps().size(), is(1));
@@ -529,7 +536,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testInsertIntoPartitionedTableOnlyPartitionColumns() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into parted (date) " +
             "values (?)", new Object[]{0L});
         assertThat(analysis.sourceMaps().size(), is(1));
@@ -542,7 +549,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     @Test
     public void bulkIndexPartitionedTable() throws Exception {
         // multiple values
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into parted (id, name, date) " +
             "values (?, ?, ?), (?, ?, ?), (?, ?, ?)",
             new Object[]{
@@ -552,7 +559,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
             });
         validateBulkIndexPartitionedTableAnalysis(analysis);
         // bulk args
-        analysis = analyze("insert into parted (id, name, date) " +
+        analysis = e.analyze("insert into parted (id, name, date) " +
                            "values (?, ?, ?)",
             new Object[][]{
                 new Object[]{1, "Trillian", 13963670051500L},
@@ -564,22 +571,20 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     private void validateBulkIndexPartitionedTableAnalysis(InsertFromValuesAnalyzedStatement analysis) {
         assertThat(analysis.generatePartitions(), contains(
-            new PartitionName("parted", Arrays.asList(new BytesRef("13963670051500"))).asIndexName(),
-            new PartitionName("parted", Arrays.asList(new BytesRef("0"))).asIndexName(),
-            new PartitionName("parted", new ArrayList<BytesRef>() {{
-                add(null);
-            }}).asIndexName()
-        ));
+            new PartitionName(new RelationName("doc", "parted"), Arrays.asList("13963670051500")).asIndexName(),
+            new PartitionName(new RelationName("doc", "parted"), Arrays.asList("0")).asIndexName(),
+            new PartitionName(new RelationName("doc", "parted"), Collections.singletonList(null)).asIndexName())
+        );
         assertThat(analysis.sourceMaps().size(), is(3));
 
-        assertThat((Integer) analysis.sourceMaps().get(0)[0], is(1));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[1], is(new BytesRef("Trillian")));
+        assertThat(analysis.sourceMaps().get(0)[0], is(1));
+        assertThat(analysis.sourceMaps().get(0)[1], is("Trillian"));
 
-        assertThat((Integer) analysis.sourceMaps().get(1)[0], is(2));
-        assertThat((BytesRef) analysis.sourceMaps().get(1)[1], is(new BytesRef("Ford")));
+        assertThat(analysis.sourceMaps().get(1)[0], is(2));
+        assertThat(analysis.sourceMaps().get(1)[1], is("Ford"));
 
-        assertThat((Integer) analysis.sourceMaps().get(2)[0], is(3));
-        assertThat((BytesRef) analysis.sourceMaps().get(2)[1], is(new BytesRef("Zaphod")));
+        assertThat(analysis.sourceMaps().get(2)[0], is(3));
+        assertThat(analysis.sourceMaps().get(2)[1], is("Zaphod"));
 
         assertThat(analysis.partitionMaps().size(), is(3));
         assertThat(analysis.partitionMaps().get(0),
@@ -595,22 +600,22 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     public void testInsertWithMatchPredicateInValues() throws Exception {
         expectedException.expect(ColumnValidationException.class);
         expectedException.expectMessage("Validation failed for awesome: " +
-                                        "Invalid value 'match({\"name\"=NULL}, 'bar', 'best_fields', {})' in insert statement");
-        analyze("insert into users (id, awesome) values (1, match(name, 'bar'))");
+                                        "Invalid value 'MATCH((name), 'bar') USING best_fields' in insert statement");
+        e.analyze("insert into users (id, awesome) values (1, match(name, 'bar'))");
     }
 
     @Test
     public void testInsertNestedPartitionedColumn() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
-            "insert into nested_parted (id, date, obj)" +
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into multi_parted (id, date, obj)" +
             "values (?, ?, ?), (?, ?, ?)",
             new Object[]{
                 1, "1970-01-01", new MapBuilder<String, Object>().put("name", "Zaphod").map(),
                 2, "2014-05-21", new MapBuilder<String, Object>().put("name", "Arthur").map()
             });
         assertThat(analysis.generatePartitions(), contains(
-            new PartitionName("nested_parted", Arrays.asList(new BytesRef("0"), new BytesRef("Zaphod"))).asIndexName(),
-            new PartitionName("nested_parted", Arrays.asList(new BytesRef("1400630400000"), new BytesRef("Arthur"))).asIndexName()
+            new PartitionName(new RelationName("doc", "multi_parted"), Arrays.asList("0", "Zaphod")).asIndexName(),
+            new PartitionName(new RelationName("doc", "multi_parted"), Arrays.asList("1400630400000", "Arthur")).asIndexName()
 
         ));
         assertThat(analysis.sourceMaps().size(), is(2));
@@ -619,7 +624,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     @Test
     public void testInsertWithBulkArgs() throws Exception {
         InsertFromValuesAnalyzedStatement analysis;
-        analysis = analyze(
+        analysis = e.analyze(
             "insert into users (id, name) values (?, ?)",
             new Object[][]{
                 new Object[]{1, "foo"},
@@ -634,7 +639,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     public void testInsertWithBulkArgsMultiValue() throws Exception {
         // should be equal to testInsertWithBulkArgs()
         InsertFromValuesAnalyzedStatement analysis;
-        analysis = analyze(
+        analysis = e.analyze(
             "insert into users (id, name) values (?, ?), (?, ?)",
             new Object[][]{
                 {1, "foo", 2, "bar"}  // one bulk row
@@ -645,10 +650,10 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     }
 
     @Test
-    public void testInsertWithBulkArgsTypeMissMatch() throws Exception {
+    public void testInsertWithBulkArgsTypeMissMatch() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for id: '11!' cannot be cast to type long");
-        analyze("insert into users (id, name) values (?, ?)",
+        expectedException.expectMessage("Validation failed for id: Cannot cast '11!' to type bigint");
+        e.analyze("insert into users (id, name) values (?, ?)",
             new Object[][]{
                 new Object[]{10, "foo"},
                 new Object[]{"11!", "bar"}
@@ -660,7 +665,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     public void testInsertWithBulkArgsMixedLength() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("mixed number of arguments inside bulk arguments");
-        analyze("insert into users (id, name) values (?, ?)",
+        e.analyze("insert into users (id, name) values (?, ?)",
             new Object[][]{
                 new Object[]{10, "foo"},
                 new Object[]{"11"}
@@ -671,21 +676,21 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     @Test
     public void testInsertWithBulkArgsNullValues() throws Exception {
         InsertFromValuesAnalyzedStatement analysis;
-        analysis = analyze("insert into users (id, name) values (?, ?)",
+        analysis = e.analyze("insert into users (id, name) values (?, ?)",
             new Object[][]{
                 new Object[]{10, "foo"},
                 new Object[]{11, null}
             });
 
         assertThat(analysis.sourceMaps().size(), is(2));
-        assertEquals(analysis.sourceMaps().get(0)[1], new BytesRef("foo"));
+        assertEquals(analysis.sourceMaps().get(0)[1], "foo");
         assertEquals(analysis.sourceMaps().get(1)[1], null);
     }
 
     @Test
     public void testInsertWithBulkArgsNullValuesFirst() throws Exception {
         InsertFromValuesAnalyzedStatement analysis;
-        analysis = analyze("insert into users (id, name) values (?, ?)",
+        analysis = e.analyze("insert into users (id, name) values (?, ?)",
             new Object[][]{
                 new Object[]{12, null},
                 new Object[]{13, "foo"},
@@ -693,21 +698,21 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
         assertThat(analysis.sourceMaps().size(), is(2));
         assertEquals(analysis.sourceMaps().get(0)[1], null);
-        assertEquals(analysis.sourceMaps().get(1)[1], new BytesRef("foo"));
+        assertEquals(analysis.sourceMaps().get(1)[1], "foo");
     }
 
     @Test
     public void testInsertWithBulkArgsArrayNullValuesFirst() throws Exception {
         InsertFromValuesAnalyzedStatement analysis;
-        analysis = analyze("insert into users (id, new_col) values (?, ?)",
+        analysis = e.analyze("insert into users (id, new_col) values (?, ?)",
             new Object[][]{
                 new Object[]{12, new String[]{null}},
                 new Object[]{13, new String[]{"foo"}},
             });
 
         assertThat(analysis.sourceMaps().size(), is(2));
-        assertThat((Object[]) analysis.sourceMaps().get(0)[1], arrayContaining((Object) null));
-        assertThat((Object[]) analysis.sourceMaps().get(1)[1], arrayContaining((Object) new BytesRef("foo")));
+        assertThat((List<Object>) analysis.sourceMaps().get(0)[1], contains((Object) null));
+        assertThat((List<Object>) analysis.sourceMaps().get(1)[1], contains((Object) "foo"));
     }
 
     @Test
@@ -718,7 +723,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
             Matchers.endsWith("that couldn't be recognized")
         ));
 
-        analyze("insert into users (id, name) values (?, ?)", new Object[][]{
+        e.analyze("insert into users (id, name) values (?, ?)", new Object[][]{
             new Object[]{new Foo()},
         });
     }
@@ -731,7 +736,7 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
             Matchers.endsWith("that couldn't be recognized")
         ));
 
-        analyze("insert into users (id, name) values (?, ?)", new Object[][]{
+        e.analyze("insert into users (id, name) values (?, ?)", new Object[][]{
             new Object[]{1, "Arthur"},
             new Object[]{new Foo(), "Ford"},
         });
@@ -744,36 +749,38 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     public void testInsertWithTooFewArguments() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Tried to resolve a parameter but the arguments provided with the SQLRequest don't contain a parameter at position 1");
-        analyze("insert into users (id, name) values (?, ?)", new Object[]{1});
+        e.analyze("insert into users (id, name) values (?, ?)", new Object[]{1});
     }
 
     @Test
     public void testInsertWithTooFewBulkArguments() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Tried to resolve a parameter but the arguments provided with the SQLRequest don't contain a parameter at position 0");
-        analyze("insert into users (id, name) values (?, ?)", new Object[][]{
+        e.analyze("insert into users (id, name) values (?, ?)", new Object[][]{
             new Object[]{},
             new Object[]{}
         });
     }
 
     @Test
-    public void testInvalidTypeParamLiteral() throws Exception {
+    public void testInvalidTypeParamLiteral() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for tags: [['the', 'answer'], ['what''s', 'the', " +
-                                        "'question', '?']] cannot be cast to type string_array");
+        expectedException.expectMessage("Validation failed for tags: Cannot cast " +
+                                        "[['the', 'answer'], ['what''s', 'the', 'question', '?']] " +
+                                        "to type text_array");
 
-        analyze("insert into users (id, name, tags) values (42, 'Deep Thought', [['the', 'answer'], ['what''s', 'the', 'question', '?']])");
+        e.analyze("insert into users (id, name, tags) values (42, 'Deep Thought', [['the', 'answer'], ['what''s', 'the', 'question', '?']])");
 
     }
 
     @Test
-    public void testInvalidTypeParam() throws Exception {
+    public void testInvalidTypeParam() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for tags: [['the', 'answer'], ['what''s', 'the', " +
-                                        "'question', '?']] cannot be cast to type string_array");
+        expectedException.expectMessage("Validation failed for tags: Cannot cast " +
+                                        "[['the', 'answer'], ['what''s', 'the', 'question', '?']] " +
+                                        "to type text_array");
 
-        analyze("insert into users (id, name, tags) values (42, 'Deep Thought', ?)", new Object[]{
+        e.analyze("insert into users (id, name, tags) values (42, 'Deep Thought', ?)", new Object[]{
             new String[][]{
                 new String[]{"the", "answer"},
                 new String[]{"what's", "the", "question", "?"}
@@ -783,12 +790,13 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     }
 
     @Test
-    public void testInvalidTypeBulkParam() throws Exception {
+    public void testInvalidTypeBulkParam() {
         expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for tags: [['the', 'answer'], ['what''s', 'the', " +
-                                        "'question', '?']] cannot be cast to type string_array");
+        expectedException.expectMessage("Validation failed for tags: Cannot cast " +
+                                        "[['the', 'answer'], ['what''s', 'the', 'question', '?']] " +
+                                        "to type text_array");
 
-        analyze("insert into users (id, name, tags) values (42, 'Deep Thought', ?)", new Object[][]{
+        e.analyze("insert into users (id, name, tags) values (42, 'Deep Thought', ?)", new Object[][]{
             new Object[]{
                 new String[][]{
                     new String[]{"the", "answer"},
@@ -800,139 +808,226 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testDynamicNestedArrayParamLiteral() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name, theses) " +
+        InsertFromValuesAnalyzedStatement analysis = e.analyze("insert into users (id, name, theses) " +
                                                              "values (1, 'Marx', [['string1', 'string2']])");
-        assertThat(analysis.sourceMaps().size(), is(1));
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(1L));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[1], is(new BytesRef("Marx")));
-        assertThat((Object[]) ((Object[]) analysis.sourceMaps().get(0)[2])[0],
-            arrayContaining(new Object[]{new BytesRef("string1"), new BytesRef("string2")}));
+        assertThat(analysis.sourceMaps(), contains(
+            arrayContaining(
+                1L,
+                "Marx",
+                List.of(List.of("string1", "string2")))));
     }
 
     @Test
     public void testDynamicNestedArrayParam() throws Exception {
-        analyze("insert into users (id, name, theses) values (1, 'Marx', ?)", new Object[]{
-            new String[][]{
-                new String[]{"string1"},
-                new String[]{"string2"}
-            }
-        });
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name, theses) " +
-                                                             "values (1, 'Marx', [['string1', 'string2']])");
-        assertThat(analysis.sourceMaps().size(), is(1));
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(1L));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[1], is(new BytesRef("Marx")));
-        assertThat((Object[]) ((Object[]) analysis.sourceMaps().get(0)[2])[0],
-            arrayContaining(new Object[]{new BytesRef("string1"), new BytesRef("string2")}));
-    }
-
-    @Test
-    public void testDynamicNestedArrayBulkParam() throws Exception {
-        analyze("insert into users (id, name, theses) values (1, 'Marx', ?)", new Object[][]{
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into users (id, name, theses) values (1, 'Marx', ?)",
             new Object[]{
                 new String[][]{
                     new String[]{"string1"},
                     new String[]{"string2"}
                 }
-            }
         });
-        InsertFromValuesAnalyzedStatement analysis = analyze("insert into users (id, name, theses) " +
-                                                             "values (1, 'Marx', [['string1', 'string2']])");
-        assertThat(analysis.sourceMaps().size(), is(1));
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(1L));
-        assertThat((BytesRef) analysis.sourceMaps().get(0)[1], is(new BytesRef("Marx")));
-        assertThat((Object[]) ((Object[]) analysis.sourceMaps().get(0)[2])[0],
-            arrayContaining(new Object[]{new BytesRef("string1"), new BytesRef("string2")}));
+        assertThat(analysis.sourceMaps(), contains(
+            arrayContaining(
+                is(1L),
+                is("Marx"),
+                is(List.of(List.of("string1"), List.of("string2")))
+            )
+        ));
     }
 
     @Test
     public void testInvalidColumnName() throws Exception {
         expectedException.expect(InvalidColumnNameException.class);
-        expectedException.expectMessage("column name \"newCol[\" is invalid");
-        analyze("insert into users (\"newCol[\") values(test)");
+        expectedException.expectMessage(
+            "\"newCol['a']\" conflicts with subscript pattern");
+        e.analyze("insert into users (\"newCol['a']\") values(test)");
     }
 
     @Test
     public void testInsertIntoTableWithNestedObjectPrimaryKeyAndNullInsert() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Primary key value must not be NULL");
-        analyze("insert into nested_pk (o) values (null)");
+        e.analyze("insert into nested_pk (o) values (null)");
     }
 
     @Test
     public void testNestedPrimaryKeyColumnMustNotBeNull() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Primary key value must not be NULL");
-        analyze("insert into nested_pk (o) values ({b=null})");
+        e.analyze("insert into nested_pk (o) values ({b=null})");
     }
 
     @Test
     public void testNestedClusteredByColumnMustNotBeNull() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Clustered by value must not be NULL");
-        analyze("insert into nested_clustered (o) values ({c=null})");
+        e.analyze("insert into nested_clustered (o, o2) values ({c=null}, {p=1})");
     }
 
     @Test
     public void testNestedClusteredByColumnMustNotBeNullWholeObject() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Clustered by value must not be NULL");
-        analyze("insert into nested_clustered (o) values (null)");
+        e.analyze("insert into nested_clustered (o, o2) values (null, {p=1})");
     }
 
     @Test
     public void testInsertIntoTableWithNestedPartitionedByColumnAndNullValue() throws Exception {
         // caused an AssertionError before... now there should be an entry with value null in the partition map
-        InsertFromValuesAnalyzedStatement statement = analyze(
-            "insert into nested_parted (obj) values (null)");
+        InsertFromValuesAnalyzedStatement statement = e.analyze(
+            "insert into multi_parted (obj) values (null)");
         assertThat(statement.partitionMaps().get(0).containsKey("obj.name"), is(true));
         assertThat(statement.partitionMaps().get(0).get("obj.name"), nullValue());
     }
 
     @Test
-    public void testInsertFromValuesWithOnDuplicateKey() throws Exception {
-        InsertFromValuesAnalyzedStatement statement = analyze(
-            "insert into users (id, name, other_id) values (1, 'Arthur', 10) " +
-            "on duplicate key update name = substr(values (name), 1, 2), " +
-            "other_id = other_id + 100");
+    public void testInsertFromValuesWithOnDuplicateKey() {
+        var insert = "insert into users (id, name, other_id) values (1, 'Arthur', 10) " +
+            "on conflict (id) do update set name = substr(excluded.name, 1, 2), " +
+            "other_id = other_id + 100";
+
+        InsertFromValuesAnalyzedStatement statement = e.analyze(insert);
         assertThat(statement.onDuplicateKeyAssignments().size(), is(1));
 
         Symbol[] assignments = statement.onDuplicateKeyAssignments().get(0);
         assertThat(assignments.length, is(2));
         assertThat(assignments[0], isLiteral("Ar"));
-        assertThat(assignments[1], isFunction(AddFunction.NAME));
+        assertThat(assignments[1], isFunction(ArithmeticFunctions.Names.ADD));
         Function function = (Function) assignments[1];
         assertThat(function.arguments().get(0), isReference("other_id"));
+    }
+
+    @Test
+    public void testInsertFromValuesWithOnConflictAndMultiplePKs() {
+        String insertStatement = "insert into three_pk (a, b, c) values (1, 2, 3) on conflict (a, b, c) do update set d = 1";
+        InsertFromValuesAnalyzedStatement statement = e.analyze(insertStatement);
+        assertThat(statement.onDuplicateKeyAssignments().size(), is(1));
+        assertThat(statement.onDuplicateKeyAssignmentsColumns().size(), is(1));
+
+        String[] cols = statement.onDuplicateKeyAssignmentsColumns().get(0);
+        assertThat(cols[0], is("d"));
+        Symbol[] assignments = statement.onDuplicateKeyAssignments().get(0);
+        assertThat(assignments.length, is(1));
+        assertThat(assignments[0], isLiteral(1));
+    }
+
+    @Test
+    public void testInsertFromValuesWithOnConflictAndNestedColumn() throws Exception {
+        SQLExecutor e = SQLExecutor.builder(clusterService)
+            .addTable("create table nested_on_conflict (" +
+                      "  o object as (c text)," +
+                      "  o2 object as (p text)," +
+                      "  k integer," +
+                      "  primary key (o2['p'])" +
+                      ")")
+            .build();
+        String insertStatement = "insert into nested_on_conflict (o, o2) values ({c=1}, {p=1}) on conflict (o2.p) do update set k = 1";
+        InsertFromValuesAnalyzedStatement statement = e.analyze(insertStatement);
+        assertThat(statement.onDuplicateKeyAssignments().size(), is(1));
+        assertThat(statement.onDuplicateKeyAssignmentsColumns().size(), is(1));
+
+        String[] cols = statement.onDuplicateKeyAssignmentsColumns().get(0);
+        assertThat(cols[0], is("k"));
+        Symbol[] assignments = statement.onDuplicateKeyAssignments().get(0);
+        assertThat(assignments.length, is(1));
+        assertThat(assignments[0], isLiteral(1));
     }
 
     @Test
     public void testInsertFromValuesWithOnDuplicateKeyInvalidColumnInValues() throws Exception {
         expectedException.expect(ColumnUnknownException.class);
         expectedException.expectMessage("Column does_not_exist unknown");
-        analyze("insert into users (id, name) values (1, 'Arthur') " +
-                "on duplicate key update name = values (does_not_exist)");
+        e.analyze("insert into users (id, name) values (1, 'Arthur') " +
+                "on conflict (id) do update set name = values (does_not_exist)");
     }
 
     @Test
-    public void testInsertFromValuesWithOnDuplicateKeyFunctionInValues() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        expectedException.expectMessage(
-            "Argument to VALUES expression must reference a column that is part of the INSERT statement. random() is invalid");
-        analyze("insert into users (id, name) values (1, 'Arthur') " +
-                "on duplicate key update name = values (random())");
+    public void testInsertFromValuesWithOnConflictDoUpdateInvalidColumnInExcluded() {
+        expectedException.expect(ColumnUnknownException.class);
+        expectedException.expectMessage("Column does_not_exist unknown");
+        e.analyze("insert into users (id, name) values (1, 'Arthur') " +
+                  "on conflict (id) do update set name = excluded.does_not_exist");
+    }
+
+    @Test
+    public void testInsertFromValuesWithOnConflictDoUpdateAndValueUsage() {
+        expectedException.expect(UnsupportedOperationException.class);
+        expectedException.expectMessage("unknown function: values(text)");
+        e.analyze("insert into users (id, name) values (1, 'Arthur') " +
+                  "on conflict (id) do update set name = values (name)");
     }
 
     @Test
     public void testInsertFromValuesWithOnDupKeyValuesWithNotInsertedColumnRef() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Referenced column 'name' isn't part of the column list of the INSERT statement");
-        analyze("insert into users (id) values (1) on duplicate key update name = values(name)");
+        e.analyze("insert into users (id) values (1) on conflict (id) do update set name = excluded.name");
+    }
+
+    @Test
+    public void testInsertFromValuesWithOnConflictUpdateExcludedWithNotInsertedColumnRef() throws Exception {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Referenced column 'name' isn't part of the column list of the INSERT statement");
+        e.analyze("insert into users (id) values (1) on conflict (id) do update set name = excluded.name");
+    }
+
+    @Test
+    public void testInsertFromValuesWithInvalidConflictTarget() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Conflict target ([id2]) did not match the primary key columns ([id])");
+        e.analyze("insert into users (id) values (1) on conflict (id2) do update set name = excluded.name");
+    }
+
+    @Test
+    public void testInsertFromValuesWithConflictTargetNotMatchingPK() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Number of conflict targets ([id, id2]) did not match the number of primary key columns ([id])");
+        e.analyze("insert into users (id) values (1) on conflict (id, id2) do update set name = excluded.name");
+    }
+
+    @Test
+    public void testInsertFromValuesWithConflictTargetNotMatchingMultiplePKs() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Number of conflict targets ([a, b]) did not match the number of primary key columns ([a, b, c])");
+        e.analyze("insert into three_pk (a, b, c) values (1, 2, 3) " +
+                  "on conflict (a, b) do update set d = 1");
+    }
+
+    @Test
+    public void testInsertFromValuesWithInvalidConflictTargetDoNothing() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Conflict target ([id2]) did not match the primary key columns ([id])");
+        e.analyze("insert into users (id) values (1) on conflict (id2) DO NOTHING");
+    }
+
+    @Test
+    public void testInsertFromValuesWithConflictTargetDoNothingNotMatchingPK() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Number of conflict targets ([id, id2]) did not match the number of primary key columns ([id])");
+        e.analyze("insert into users (id) values (1) on conflict (id, id2) DO NOTHING");
+    }
+
+    @Test
+    public void testInsertFromValuesWithConflictTargetDoNothingNotMatchingMultiplePKs() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Number of conflict targets ([a, b]) did not match the number of primary key columns ([a, b, c])");
+        e.analyze("insert into three_pk (a, b, c) values (1, 2, 3) " +
+                  "on conflict (a, b) DO NOTHING");
+    }
+
+
+    @Test
+    public void testInsertFromValuesWithMissingConflictTarget() {
+        expectedException.expect(ParsingException.class);
+        expectedException.expectMessage("line 1:50: mismatched input 'update' expecting 'NOTHING'");
+        e.analyze("insert into users (id) values (1) on conflict do update set name = excluded.name");
     }
 
     @Test
     public void testInsertFromValuesWithOnDupKeyValuesWithReferenceToNull() throws Exception {
-        InsertFromValuesAnalyzedStatement statement = analyze(
-            "insert into users (id, name) values (1, null) on duplicate key update name = values(name)");
+        var insert = "insert into users (id, name) values (1, null) on conflict (id) do update set name = excluded.name";
+        InsertFromValuesAnalyzedStatement statement = e.analyze(insert);
         assertThat(statement.onDuplicateKeyAssignments().size(), is(1));
         Symbol[] assignments = statement.onDuplicateKeyAssignments().get(0);
         assertThat(assignments.length, is(1));
@@ -941,9 +1036,8 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testInsertFromValuesWithOnDupKeyValuesWithParams() throws Exception {
-        InsertFromValuesAnalyzedStatement statement = analyze(
-            "insert into users (id, name) values (1, ?) on duplicate key update name = values(name)",
-            new Object[]{"foobar"});
+        String insert = "insert into users (id, name) values (1, ?) on conflict (id) do update set name = excluded.name";
+        InsertFromValuesAnalyzedStatement statement = e.analyze(insert, new Object[]{"foobar"});
         assertThat(statement.onDuplicateKeyAssignments().size(), is(1));
         Symbol[] assignments = statement.onDuplicateKeyAssignments().get(0);
         assertThat(assignments.length, is(1));
@@ -952,19 +1046,20 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testInsertFromValuesWithOnDuplicateWithTwoRefsAndDifferentTypes() throws Exception {
-        InsertFromValuesAnalyzedStatement statement = analyze(
+        InsertFromValuesAnalyzedStatement statement = e.analyze(
             "insert into users (id, name) values (1, 'foobar') " +
-            "on duplicate key update name = awesome");
+            "on conflict (id) do update set name = awesome");
         assertThat(statement.onDuplicateKeyAssignments().size(), is(1));
         Symbol symbol = statement.onDuplicateKeyAssignments().get(0)[0];
-        assertThat(symbol, isFunction("to_string"));
+        assertThat(symbol, isFunction("to_text"));
     }
 
     @Test
     public void testInsertFromMultipleValuesWithOnDuplicateKey() throws Exception {
-        InsertFromValuesAnalyzedStatement statement = analyze(
-            "insert into users (id, name) values (1, 'Arthur'), (2, 'Trillian') " +
-            "on duplicate key update name = substr(values (name), 1, 1)");
+        var insert = "insert into users (id, name) values (1, 'Arthur'), (2, 'Trillian') " +
+                     "on conflict (id) do update set name = substr(excluded.name, 1, 1)";
+
+        InsertFromValuesAnalyzedStatement statement = e.analyze(insert);
         assertThat(statement.onDuplicateKeyAssignments().size(), is(2));
 
         Symbol[] assignments = statement.onDuplicateKeyAssignments().get(0);
@@ -978,8 +1073,8 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testOnDuplicateKeyUpdateOnObjectColumn() throws Exception {
-        InsertFromValuesAnalyzedStatement statement = analyze(
-            "insert into users (id) values (1) on duplicate key update details['foo'] = 'foobar'");
+        var insert = "insert into users (id) values (1) on conflict (id) do update set details['foo'] = 'foobar'";
+        InsertFromValuesAnalyzedStatement statement = e.analyze(insert);
         assertThat(statement.onDuplicateKeyAssignments().size(), is(1));
         Symbol[] assignments = statement.onDuplicateKeyAssignments().get(0);
         assertThat(assignments.length, is(1));
@@ -988,45 +1083,185 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testInvalidLeftSideExpressionInOnDuplicateKey() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        analyze("insert into users (id, name) values (1, 'Arthur') on duplicate key update [1, 2] = 1");
+        try {
+            e.analyze("insert into users (id, name) values (1, 'Arthur') on conflict (id) do update set [1, 2] = 1");
+            fail("Analyze passed without a failure.");
+        } catch (IllegalArgumentException e) {
+            // this is what we want
+        }
     }
 
     @Test
-    public void testUpdateOnPartitionedColumnShouldRaiseAnError() throws Exception {
+    public void testUpdateOnPartitionedColumnShouldRaiseAnError() {
         expectedException.expect(ColumnValidationException.class);
         expectedException.expectMessage("Validation failed for date: Updating a partitioned-by column is not supported");
-        analyze("insert into parted (id) values (1) on duplicate key update date = 0");
-    }
-
-    @Test
-    public void testUpdateOnPrimaryKeyColumnShouldRaiseAnError() throws Exception {
-        expectedException.expect(ColumnValidationException.class);
-        expectedException.expectMessage("Validation failed for id: Updating a primary key is not supported");
-        analyze("insert into nested_pk (id, o) values (1, {b=1}) on duplicate key update id = 10");
+        e.analyze("update parted set date = 1");
     }
 
     @Test
     public void testUpdateOnClusteredByColumnShouldRaiseAnError() throws Exception {
         expectedException.expect(ColumnValidationException.class);
         expectedException.expectMessage("Validation failed for id: Updating a clustered-by column is not supported");
-        analyze("insert into users (id) values (1) on duplicate key update id = 10");
+        e.analyze("update users_clustered_by_only set id = 10");
+    }
+
+    @Test
+    public void testUpdateOnConflictDoNothingProducesEmptyUpdateAssignments() {
+        InsertFromValuesAnalyzedStatement statement =
+            e.analyze("insert into users (id, name) values (1, 'Jon') on conflict (id) DO NOTHING");
+        assertThat(statement.isIgnoreDuplicateKeys(), is(true));
+        assertThat(statement.onDuplicateKeyAssignments(), is(empty()));
+        // also test without the optional conflict target
+        statement =
+            e.analyze("insert into users (id, name) values (1, 'Jon') on conflict DO NOTHING");
+        assertThat(statement.isIgnoreDuplicateKeys(), is(true));
+        assertThat(statement.onDuplicateKeyAssignments(), is(empty()));
+    }
+
+    @Test
+    public void testInsertColumnsWithDefaultExpression() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column (id) values (?)",
+            new Object[]{1});
+        assertThat(analysis.sourceMaps(), hasSize(1));
+
+        var res = analysis.sourceMaps().get(0);
+        assertThat(res.length, is(2));
+        assertThat(res[0], is(1));
+        assertThat(res[1], is("crate"));
+    }
+
+    @Test
+    public void testInsertColumnsWithDefaultExpressionNoColumnsSpecified() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column values (?)",
+            new Object[]{1});
+        assertThat(analysis.sourceMaps().size(), is(1));
+
+        var res = analysis.sourceMaps().get(0);
+        assertThat(res.length, is(2));
+        assertThat(res[0], is(1));
+    }
+
+    @Test
+    public void testInsertMultipleValuesWithDefaultExpressionColumns()  {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column (id) values (?), (?)",
+            new Object[]{10, 20});
+
+        assertThat(analysis.columns(), hasSize(2));
+        assertThat(analysis.columns(), containsInAnyOrder(isReference("id"), isReference("owner")));
+        assertThat(analysis.sourceMaps(), hasSize(2));
+
+        Matcher<Object[]> firstRow = arrayContainingInAnyOrder(10, "crate");
+        Matcher<Object[]> secondRow = arrayContainingInAnyOrder(20, "crate");
+        assertThat(analysis.sourceMaps(), contains(firstRow, secondRow));
+    }
+
+    @Test
+    public void testInsertColumnsWithDefaultAllValuesGiven() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column (id, owner) values (?, ?)",
+            new Object[]{10, "cr8"});
+        assertThat(analysis.sourceMaps(), hasSize(1));
+
+        var res = analysis.sourceMaps().get(0);
+        assertThat(res.length, is(2));
+        assertThat(res[0], is(10));
+        assertThat(res[1], is("cr8"));
+    }
+
+    @Test
+    public void testInsertColumnsWithDefaultValuesGivenNoColumnsSpecified() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column values (?, ?)",
+            new Object[]{1, "cr8"});
+        assertThat(analysis.sourceMaps(), hasSize(1));
+
+        var res = analysis.sourceMaps().get(0);
+        assertThat(res.length, is(2));
+        assertThat(res[0], is(1));
+        assertThat(res[1], is("cr8"));
+    }
+
+    @Test
+    public void testInsertMultipleValuesWithDefaultAllValuesGiven() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column (id, owner) values (?, ?), (?, ?)",
+            new Object[]{10, "cr8", 20, "cr9"});
+        assertThat(analysis.sourceMaps(), hasSize(2));
+
+        Matcher<Object[]> firstRow = arrayContainingInAnyOrder(10, "cr8");
+        Matcher<Object[]> secondRow = arrayContainingInAnyOrder(20, "cr9");
+        assertThat(analysis.sourceMaps(), contains(firstRow, secondRow));
+    }
+
+
+    @Test
+    public void testInsertColumnsWithDefaultExpressionPKIsGiven() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column_pk (id, owner) values (?, ?)",
+            new Object[]{1, "crate"});
+        assertThat(analysis.sourceMaps(), hasSize(1));
+
+        var res = analysis.sourceMaps().get(0);
+        assertThat(res.length, is(2));
+        assertThat(res[0], is(1));
+        assertThat(res[1], is("crate"));
+    }
+
+    @Test
+    public void testInsertColumnsWithDefaultExpressionPartOfPKIsMissing() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column_pk (id) values (?)",
+            new Object[]{1});
+        assertThat(analysis.sourceMaps(), hasSize(1));
+
+        var res = analysis.sourceMaps().get(0);
+        assertThat(res.length, is(2));
+        assertThat(res[0], is(1));
+        assertThat(res[1], is("crate"));
+    }
+
+    @Test
+    public void testInsertColumnsWithDefaultExpressionPKIsGivenNull() {
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("Primary key value must not be NULL");
+        e.analyze(
+            "insert into default_column_pk (id, owner) values (?, ?)",
+            new Object[]{1, null});
+    }
+
+    @Test
+    public void testInsertColumnsWithDefaultExpressionClusterByNotGiven() {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "insert into default_column_clustered_by (id) values (?)",
+            new Object[]{1});
+        assertThat(analysis.sourceMaps(), hasSize(1));
+
+        var res = analysis.sourceMaps().get(0);
+        assertThat(res.length, is(2));
+        assertThat(res[0], is(1));
+        assertThat(res[1], is(2));
+
+        assertThat(analysis.routingValues(), contains(is("2")));
+
     }
 
     @Test
     public void testInsertWithGeneratedColumn() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into generated_column (ts) values (?)",
             new Object[]{"2015-11-18T11:11:00"});
         assertThat(analysis.sourceMaps().size(), is(1));
 
-        assertThat((Long) analysis.sourceMaps().get(0)[0], is(1447845060000L));
-        assertThat((Long) analysis.sourceMaps().get(0)[1], is(1447804800000L));
+        assertThat(analysis.sourceMaps().get(0)[0], is(1447845060000L));
+        assertThat(analysis.sourceMaps().get(0)[2], is(1447804800000L));
     }
 
     @Test
     public void testInsertWithGeneratedColumnReferenceValueNullOrNotGiven() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into generated_column (ts) values (?)",
             new Object[]{null});
         assertThat(analysis.sourceMaps().size(), is(1));
@@ -1035,15 +1270,15 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
         assertThat(values.length, is(3));
 
         assertThat(values[0], nullValue());
-        // generated column 'day'
-        assertThat(values[1], nullValue());
         // generated column 'name'
-        assertThat((BytesRef) values[2], is(new BytesRef("bar")));
+        assertThat(values[1], is("bar"));
+        // generated column 'day'
+        assertThat(values[2], nullValue());
     }
 
     @Test
     public void testInsertWithGeneratedColumnWithValueGiven() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into generated_column (ts, day) values (?, ?)",
             new Object[]{"2015-11-18T11:11:00", 1447804800000L});
         assertThat(analysis.sourceMaps().size(), is(1));
@@ -1056,13 +1291,13 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
     public void testInsertWithGeneratedColumnWithInvalidValueGiven() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Given value 1449999900000 for generated column does not match defined generated expression value 1447804800000");
-        analyze("insert into generated_column (ts, day) values (?, ?)",
+       e.analyze("insert into generated_column (ts, day) values (?, ?)",
             new Object[]{"2015-11-18T11:11:00", 1449999900000L});
     }
 
     @Test
     public void testInsertNullValueWithGeneratedColumn() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "insert into generated_column (day) values (?)",
             new Object[]{null});
         assertThat(analysis.sourceMaps().size(), is(1));
@@ -1071,99 +1306,169 @@ public class InsertFromValuesAnalyzerTest extends BaseAnalyzerTest {
 
     @Test
     public void testInsertMultipleValuesWithGeneratedColumn() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
-            "INSERT INTO generated_column (ts, user) values ('1970-01-01', {name='Johnny'}), ('1989-11-09T08:30:00', {name='Egon'})");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "INSERT INTO generated_column (ts, \"user\") values ('1970-01-01', {name='Johnny'}), ('1989-11-09T08:30:00', {name='Egon'})");
         assertThat(analysis.columns(), hasSize(4));
-        assertThat(analysis.columns(), contains(isReference("ts"), isReference("user"), isReference("day"), isReference("name")));
+        assertThat(analysis.columns(), containsInAnyOrder(isReference("ts"), isReference("user"), isReference("day"), isReference("name")));
         assertThat(analysis.sourceMaps(), hasSize(2));
-        assertThat(analysis.sourceMaps(), contains(
-            Matchers.arrayContaining(0L, ImmutableMap.<String, Object>of("name", new BytesRef("Johnny")), 0L, new BytesRef("Johnnybar")),
-            Matchers.arrayContaining(626603400000L, ImmutableMap.<String, Object>of("name", new BytesRef("Egon")), 626572800000L, new BytesRef("Egonbar"))));
+        Matcher<Object[]> firstRow = arrayContainingInAnyOrder(0L, ImmutableMap.<String, Object>of("name", "Johnny"), 0L, "Johnnybar");
+        Matcher<Object[]> secondRow = arrayContainingInAnyOrder(626603400000L, ImmutableMap.<String, Object>of("name", "Egon"), 626572800000L, "Egonbar");
+        assertThat(analysis.sourceMaps(), contains(firstRow, secondRow));
     }
 
     @Test
     public void testInsertMultipleValuesWithGeneratedColumnGiven() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
-            "INSERT INTO generated_column (ts, user, day) values ('1970-01-01', {name='Johnny'}, '1970-01-01'), ('1989-11-09T08:30:00', {name='Egon'}, '1989-11-09')");
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "INSERT INTO generated_column (ts, \"user\", day) values ('1970-01-01', {name='Johnny'}, '1970-01-01'), ('1989-11-09T08:30:00', {name='Egon'}, '1989-11-09')");
         assertThat(analysis.columns(), hasSize(4));
         assertThat(analysis.columns(), contains(isReference("ts"), isReference("user"), isReference("day"), isReference("name")));
         assertThat(analysis.sourceMaps(), hasSize(2));
-        assertThat(analysis.sourceMaps(), contains(
-            Matchers.arrayContaining(0L, ImmutableMap.<String, Object>of("name", new BytesRef("Johnny")), 0L, new BytesRef("Johnnybar")),
-            Matchers.arrayContaining(626603400000L, ImmutableMap.<String, Object>of("name", new BytesRef("Egon")), 626572800000L, new BytesRef("Egonbar"))));
+        Matcher<Object[]> firstRow = arrayContaining(0L, ImmutableMap.<String, Object>of("name", "Johnny"), 0L, "Johnnybar");
+        Matcher<Object[]> secondRow = arrayContaining(626603400000L, ImmutableMap.<String, Object>of("name", "Egon"), 626572800000L, "Egonbar");
+        assertThat(analysis.sourceMaps(), contains(firstRow, secondRow));
     }
 
     @Test
     public void testInsertGeneratedPrimaryKeyColumn() throws Exception {
-        InsertFromValuesAnalyzedStatement analysis = analyze(
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
             "INSERT INTO generated_pk_column (serial_no, product_no) values (1, 1)"
         );
         assertThat(analysis.routingValues(), contains("AgEyATI="));
         assertThat(analysis.ids().get(0),
-            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("id2")), Arrays.asList(new BytesRef("2"), new BytesRef("2")), new ColumnIdent("id"))));
+            is(generateId(Arrays.asList(new ColumnIdent("id"), new ColumnIdent("id2")), Arrays.asList("2", "2"), new ColumnIdent("id"))));
+    }
+
+    @Test
+    public void testInsertGeneratedPrimaryKeyColumnWithMultiValues() throws Exception {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "INSERT INTO generated_pk_column (serial_no, product_no) values (1, 1), (2, 2)"
+        );
+        assertThat(analysis.routingValues(), contains("AgEyATI=", "AgEzATM="));
+        assertThat(analysis.ids(), contains(
+            is(generateId(
+                Arrays.asList(new ColumnIdent("id"), new ColumnIdent("id2")),
+                Arrays.asList("2", "2"), new ColumnIdent("id"))),
+            is(generateId(
+                Arrays.asList(new ColumnIdent("id"), new ColumnIdent("id2")),
+                Arrays.asList("3", "3"), new ColumnIdent("id")))
+        ));
+    }
+
+    @Test
+    public void testInsertGeneratedPrimaryKeyAndPartedColumn() throws Exception {
+        InsertFromValuesAnalyzedStatement analysis = e.analyze(
+            "INSERT INTO generated_pk_parted_column (ts, value) VALUES (1508848674000, 1)");
+        assertThat(analysis.ids().size(), is(1));
+        assertThat(analysis.ids().get(0),
+            is(generateId(
+                Arrays.asList(new ColumnIdent("value"), new ColumnIdent("part_key__generated")),
+                Arrays.asList("1", "1508803200000"),
+                null)));
+        assertThat(analysis.generatePartitions().size(), is(1));
     }
 
     @Test
     public void testInsertMultipleValuesTooManyValues() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("INSERT statement contains a VALUES clause with too many elements (3), expected (2)");
-        analyze("INSERT INTO users (id, name) values (1, 'Johnny'), (2, 'Egon', 1234)");
+        e.analyze("INSERT INTO users (id, name) values (1, 'Johnny'), (2, 'Egon', 1234)");
     }
 
     @Test
     public void testInsertMultipleValuesWithGeneratedColumnAndTooFewValuesInSecondValues() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Invalid number of values: Got 2 columns specified but 1 values");
-        analyze("INSERT INTO generated_column (ts, user) values ('1970-01-01', {name='Johnny'}), ('1989-11-09T08:30:00')");
+        e.analyze("INSERT INTO generated_column (ts, \"user\") values ('1970-01-01', {name='Johnny'}), ('1989-11-09T08:30:00')");
     }
 
     @Test
     public void testGeneratedPrimaryKeyMissing() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Primary key is required but is missing from the insert statement");
-        analyze("INSERT INTO generated_pk_column (color) values ('green')");
+        e.analyze("INSERT INTO generated_pk_column (color) values ('green')");
     }
 
     @Test
     public void testGeneratedKeyPrimaryKeyPartMissing() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Primary key value must not be NULL");
-        analyze("INSERT INTO generated_pk_column (serial_no) values (1)");
+        e.analyze("INSERT INTO generated_pk_column (serial_no) values (1)");
     }
 
     @Test
     public void testGeneratedClusteredByMissing() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Clustered by value is required but is missing from the insert statement");
-        analyze("INSERT INTO generated_clustered_by_column (color) values ('black')");
+        e.analyze("INSERT INTO generated_clustered_by_column (color) values ('black')");
     }
 
     @Test
     public void testNestedGeneratedClusteredByMissing() throws Exception {
         expectedException.expect(IllegalArgumentException.class);
         expectedException.expectMessage("Clustered by value is required but is missing from the insert statement");
-        analyze("INSERT INTO generated_nested_clustered_by (name) values ('kill-o-zap blaster pistol')");
+        e.analyze("INSERT INTO generated_nested_clustered_by (color) values ('kill-o-zap blaster pistol')");
     }
 
     @Test
     public void testNestedGeneratedClusteredBy() throws Exception {
         InsertFromValuesAnalyzedStatement statement =
-            analyze("INSERT INTO generated_nested_clustered_by (o) values ({serial_number=1})");
+            e.analyze("INSERT INTO generated_nested_clustered_by (o) values ({serial_number=1})");
         assertThat(statement.routingValues(), contains(is("2")));
     }
 
     @Test
     public void testInsertArrayLiteralWithOneNullValue() throws Exception {
-        InsertFromValuesAnalyzedStatement stmt = analyze("insert into users (id, tags) values (1, ['foo', 'bar', null])");
-        assertThat(stmt.sourceMaps().get(0), is(new Object[]{1L, new Object[]{new BytesRef("foo"), new BytesRef("bar"), null}}));
+        InsertFromValuesAnalyzedStatement stmt = e.analyze("insert into users (id, tags) values (1, ['foo', 'bar', null])");
+        assertThat(stmt.sourceMaps().get(0), arrayContaining(
+            1L,
+            Arrays.asList("foo", "bar", null)
+        ));
 
-        stmt = analyze("insert into users (id, tags) values (1, [null, 'foo', 'bar'])");
-        assertThat(stmt.sourceMaps().get(0), is(new Object[]{1L, new Object[]{null, new BytesRef("foo"), new BytesRef("bar")}}));
+        stmt = e.analyze("insert into users (id, tags) values (1, [null, 'foo', 'bar'])");
+        assertThat(stmt.sourceMaps().get(0), arrayContaining(
+            1L,
+            Arrays.asList(null, "foo", "bar")
+       ));
     }
 
     @Test
     public void testInsertArrayLiteralWithOnlyNullValues() throws Exception {
-        InsertFromValuesAnalyzedStatement stmt = analyze("insert into users (id, tags) values (1, [null, null])");
-        assertThat(stmt.sourceMaps().get(0), is(new Object[]{1L, new Object[]{null, null}}));
+        InsertFromValuesAnalyzedStatement stmt = e.analyze("insert into users (id, tags) values (1, [null, null])");
+        assertThat(
+            stmt.sourceMaps().get(0),
+            arrayContaining(
+                1L,
+                Arrays.asList(null, null)
+            )
+        );
+    }
+
+    @Test
+    public void testIdGenerationDoesNotDependOnPrimaryKeyInsertOrder() throws Exception {
+        InsertFromValuesAnalyzedStatement stmt1 = e.analyze("insert into three_pk (a, b, c) values (1, 2, 3)");
+        InsertFromValuesAnalyzedStatement stmt2 = e.analyze("insert into three_pk (c, b, a) values (3, 2, 1)");
+        assertThat(stmt1.ids().get(0), is(stmt2.ids().get(0)));
+    }
+
+    @Test
+    public void test_nested_default_column_is_generated_if_not_provided_by_user() {
+        InsertFromValuesAnalyzedStatement stmt = e.analyze(
+            "insert into default_column_nested (obj) values ({y=2})");
+
+        assertThat(stmt.columns, contains(isReference("obj")));
+
+        Object[] values = stmt.sourceMaps().get(0);
+        assertThat(values[0], is(Map.of("x", 1, "y", 2)));
+    }
+
+    @Test
+    public void test_nested_default_column_is_not_overridden_if_provided_by_user() {
+        InsertFromValuesAnalyzedStatement stmt = e.analyze(
+            "insert into default_column_nested (obj) values ({x=5, y=2})");
+
+        assertThat(stmt.columns, contains(isReference("obj")));
+
+        Object[] values = stmt.sourceMaps().get(0);
+        assertThat(values[0], is(Map.of("x", 5, "y", 2)));
     }
 }

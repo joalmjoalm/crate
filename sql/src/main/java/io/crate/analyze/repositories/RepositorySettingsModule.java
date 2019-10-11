@@ -22,17 +22,22 @@
 
 package io.crate.analyze.repositories;
 
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableMap;
-import io.crate.metadata.settings.*;
-import io.crate.sql.tree.Expression;
 import io.crate.sql.tree.GenericProperties;
 import io.crate.sql.tree.GenericProperty;
 import org.elasticsearch.common.inject.AbstractModule;
 import org.elasticsearch.common.inject.multibindings.MapBinder;
+import org.elasticsearch.common.settings.Setting;
+import org.elasticsearch.repositories.azure.AzureRepository;
+import org.elasticsearch.repositories.fs.FsRepository;
+import org.elasticsearch.repositories.s3.S3Repository;
+import org.elasticsearch.repositories.url.URLRepository;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class RepositorySettingsModule extends AbstractModule {
 
@@ -40,77 +45,71 @@ public class RepositorySettingsModule extends AbstractModule {
     private static final String URL = "url";
     private static final String HDFS = "hdfs";
     private static final String S3 = "s3";
+    private static final String AZURE = "azure";
 
-    static final TypeSettings FS_SETTINGS = new TypeSettings(
-        ImmutableMap.<String, SettingsApplier>of("location", new SettingsAppliers.StringSettingsApplier(new StringSetting("location", true))),
-        ImmutableMap.<String, SettingsApplier>of(
-            "compress", new SettingsAppliers.BooleanSettingsApplier(new BoolSetting("compress", true, true)),
-            "chunk_size", new SettingsAppliers.ByteSizeSettingsApplier(new ByteSizeSetting("chunk_size", null, true))
-        ));
+    private static final TypeSettings FS_SETTINGS = new TypeSettings(
+        groupSettingsByKey(FsRepository.mandatorySettings()),
+        groupSettingsByKey(FsRepository.optionalSettings())
+    );
 
-    static final TypeSettings URL_SETTINGS = new TypeSettings(
-        ImmutableMap.<String, SettingsApplier>of("url", new SettingsAppliers.StringSettingsApplier(new StringSetting("url", true))),
-        Collections.<String, SettingsApplier>emptyMap());
+    private static final TypeSettings URL_SETTINGS = new TypeSettings(
+        groupSettingsByKey(URLRepository.mandatorySettings()),
+        Map.of()
+    );
 
-
-    static final TypeSettings HDFS_SETTINGS = new TypeSettings(
-        Collections.<String, SettingsApplier>emptyMap(),
-        ImmutableMap.<String, SettingsApplier>builder()
-            .put("uri", new SettingsAppliers.StringSettingsApplier(new StringSetting("uri", true)))
-            .put("user", new SettingsAppliers.StringSettingsApplier(new StringSetting("user", true)))
-            .put("path", new SettingsAppliers.StringSettingsApplier(new StringSetting("path", true)))
-            .put("load_defaults", new SettingsAppliers.BooleanSettingsApplier(new BoolSetting("load_defaults", true, true)))
-            .put("conf_location", new SettingsAppliers.StringSettingsApplier(new StringSetting("conf_location", true)))
-            .put("concurrent_streams", new SettingsAppliers.IntSettingsApplier(new IntSetting("concurrent_streams", 5, true)))
-            .put("compress", new SettingsAppliers.BooleanSettingsApplier(new BoolSetting("compress", true, true)))
-            .put("chunk_size", new SettingsAppliers.ByteSizeSettingsApplier(new ByteSizeSetting("chunk_size", null, true)))
+    private static final TypeSettings HDFS_SETTINGS = new TypeSettings(
+        Collections.emptyMap(),
+        ImmutableMap.<String, Setting<?>>builder()
+            .put("uri", Setting.simpleString("uri", Setting.Property.NodeScope))
+            .put("security.principal", Setting.simpleString("security.principal", Setting.Property.NodeScope))
+            .put("path", Setting.simpleString("path", Setting.Property.NodeScope))
+            .put("load_defaults", Setting.boolSetting("load_defaults", true, Setting.Property.NodeScope))
+            .put("compress", Setting.boolSetting("compress", true, Setting.Property.NodeScope))
+            // We cannot use a ByteSize setting as it doesn't support NULL and it must be NULL as default to indicate to
+            // not override the default behaviour.
+            .put("chunk_size", Setting.simpleString("chunk_size"))
             .build()) {
 
         @Override
-        public Optional<GenericProperties> dynamicProperties(Optional<GenericProperties> genericProperties) {
-            if (!genericProperties.isPresent()) {
+        public GenericProperties<?> dynamicProperties(GenericProperties<?> genericProperties) {
+            if (genericProperties.isEmpty()) {
                 return genericProperties;
             }
-            GenericProperties dynamicProperties = null;
-            Map<String, Expression> properties = genericProperties.get().properties();
-            for (Map.Entry<String, Expression> entry : properties.entrySet()) {
+            GenericProperties<?> dynamicProperties = new GenericProperties<>();
+            for (Map.Entry<String, ?> entry : genericProperties.properties().entrySet()) {
                 String key = entry.getKey();
                 if (key.startsWith("conf.")) {
-                    if (dynamicProperties == null) {
-                        dynamicProperties = new GenericProperties();
-                    }
                     dynamicProperties.add(new GenericProperty(key, entry.getValue()));
                 }
             }
-            return Optional.fromNullable(dynamicProperties);
+            return dynamicProperties;
         }
     };
 
-    static final TypeSettings S3_SETTINGS = new TypeSettings(Collections.<String, SettingsApplier>emptyMap(),
-        ImmutableMap.<String, SettingsApplier>builder()
-            .put("access_key", new SettingsAppliers.StringSettingsApplier(new StringSetting("access_key", null, true)))
-            .put("base_path", new SettingsAppliers.StringSettingsApplier(new StringSetting("base_path", null, true)))
-            .put("bucket", new SettingsAppliers.StringSettingsApplier(new StringSetting("bucket", null, true)))
-            .put("buffer_size", new SettingsAppliers.IntSettingsApplier(new IntSetting("buffer_size", null, true)))
-            .put("canned_acl", new SettingsAppliers.StringSettingsApplier(new StringSetting("canned_acl", null, true)))
-            .put("chunk_size", new SettingsAppliers.IntSettingsApplier(new IntSetting("chunk_size", null, true)))
-            .put("compress", new SettingsAppliers.BooleanSettingsApplier(new BoolSetting("compress", true, true)))
-            .put("concurrent_streams", new SettingsAppliers.IntSettingsApplier(new IntSetting("concurrent_streams", null, true)))
-            .put("endpoint", new SettingsAppliers.StringSettingsApplier(new StringSetting("endpoint", null, true)))
-            .put("max_retries", new SettingsAppliers.IntSettingsApplier(new IntSetting("max_retries", null, true)))
-            .put("protocol", new SettingsAppliers.StringSettingsApplier(new StringSetting("protocol", null, true)))
-            .put("region", new SettingsAppliers.StringSettingsApplier(new StringSetting("region", null, true)))
-            .put("secret_key", new SettingsAppliers.StringSettingsApplier(new StringSetting("secret_key", null, true)))
-            .put("server_side_encryption", new SettingsAppliers.BooleanSettingsApplier(new BoolSetting("server_side_encryption", false, true))).build());
+    private static final TypeSettings S3_SETTINGS = new TypeSettings(
+        groupSettingsByKey(S3Repository.mandatorySettings()),
+        groupSettingsByKey(S3Repository.optionalSettings())
+    );
 
-    private MapBinder<String, TypeSettings> typeSettingsBinder;
+    private static final TypeSettings AZURE_SETTINGS = new TypeSettings(
+        groupSettingsByKey(AzureRepository.mandatorySettings()),
+        groupSettingsByKey(AzureRepository.optionalSettings())
+    );
 
     @Override
     protected void configure() {
-        typeSettingsBinder = MapBinder.newMapBinder(binder(), String.class, TypeSettings.class);
+        MapBinder<String, TypeSettings> typeSettingsBinder = MapBinder.newMapBinder(
+            binder(),
+            String.class,
+            TypeSettings.class);
         typeSettingsBinder.addBinding(FS).toInstance(FS_SETTINGS);
         typeSettingsBinder.addBinding(URL).toInstance(URL_SETTINGS);
         typeSettingsBinder.addBinding(HDFS).toInstance(HDFS_SETTINGS);
         typeSettingsBinder.addBinding(S3).toInstance(S3_SETTINGS);
+        typeSettingsBinder.addBinding(AZURE).toInstance(AZURE_SETTINGS);
+    }
+
+    private static Map<String, Setting<?>> groupSettingsByKey(List<Setting<?>> settings) {
+        return settings.stream().collect(Collectors.toMap(Setting::getKey, Function.identity()));
     }
 }

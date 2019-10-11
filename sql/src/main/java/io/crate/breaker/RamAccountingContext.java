@@ -21,15 +21,19 @@
 
 package io.crate.breaker;
 
-import io.crate.planner.node.ExecutionPhase;
+import io.crate.execution.dsl.phases.ExecutionPhase;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
+import org.apache.logging.log4j.LogManager;
 
-import java.util.Locale;
+import javax.annotation.concurrent.ThreadSafe;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class RamAccountingContext {
+@ThreadSafe
+public class RamAccountingContext implements RamAccounting {
 
+    // this must not be final so tests could adjust it
     // Flush every 2mb
     public static long FLUSH_BUFFER_SIZE = 1024 * 1024 * 2;
 
@@ -41,9 +45,10 @@ public class RamAccountingContext {
     private volatile boolean closed = false;
     private volatile boolean tripped = false;
 
+    private static final Logger LOGGER = LogManager.getLogger(RamAccountingContext.class);
+
     public static RamAccountingContext forExecutionPhase(CircuitBreaker breaker, ExecutionPhase executionPhase) {
-        String ramAccountingContextId = String.format(Locale.ENGLISH, "%s: %d",
-            executionPhase.name(), executionPhase.executionPhaseId());
+        String ramAccountingContextId = executionPhase.name() + ": " + executionPhase.phaseId();
         return new RamAccountingContext(ramAccountingContextId, breaker);
     }
 
@@ -55,19 +60,34 @@ public class RamAccountingContext {
     /**
      * Add bytes to the context and maybe break
      *
-     * @param bytes bytes to be added to
-     * @throws CircuitBreakingException
+     * @param bytes bytes to be added
+     * @throws CircuitBreakingException in case the breaker tripped
      */
+    @Override
     public void addBytes(long bytes) throws CircuitBreakingException {
-        if (closed) {
-            return;
-        }
-        if (bytes == 0) {
+        addBytes(bytes, true);
+    }
+
+    /**
+     * Add bytes to the context without breaking
+     *
+     * @param bytes bytes to be added
+     */
+    public void addBytesWithoutBreaking(long bytes) {
+        addBytes(bytes, false);
+    }
+
+    private void addBytes(long bytes, boolean shouldBreak) throws CircuitBreakingException {
+        if (closed || bytes == 0) {
             return;
         }
         long currentFlushBuffer = flushBuffer.addAndGet(bytes);
         if (currentFlushBuffer >= FLUSH_BUFFER_SIZE) {
-            flush(currentFlushBuffer);
+            if (shouldBreak) {
+                flush(currentFlushBuffer);
+            } else {
+                flushWithoutBreaking(currentFlushBuffer);
+            }
         }
     }
 
@@ -76,7 +96,7 @@ public class RamAccountingContext {
      * bytes and adjusting the buffer.
      *
      * @param bytes long value of bytes to be flushed to the breaker
-     * @throws CircuitBreakingException
+     * @throws CircuitBreakingException in case the breaker tripped
      */
     private void flush(long bytes) throws CircuitBreakingException {
         if (bytes == 0) {
@@ -98,10 +118,29 @@ public class RamAccountingContext {
     }
 
     /**
+     * Flush the {@code bytes} to the breaker, incrementing the total
+     * bytes and adjusting the buffer.
+     *
+     * @param bytes long value of bytes to be flushed to the breaker
+     */
+    private void flushWithoutBreaking(long bytes) {
+        if (bytes == 0) {
+            return;
+        }
+        breaker.addWithoutBreaking(bytes);
+        if (exceededBreaker()) {
+            tripped = true;
+        }
+        totalBytes.addAndGet(bytes);
+        flushBuffer.addAndGet(-bytes);
+    }
+
+    /**
+     * Returns bytes from the buffer + bytes that have already been flushed to the breaker.
      * @return the total number of bytes that have been aggregated
      */
     public long totalBytes() {
-        return totalBytes.get();
+        return flushBuffer.get() + totalBytes.get();
     }
 
     /**
@@ -109,15 +148,38 @@ public class RamAccountingContext {
      * A remaining flush buffer will not be flushed to avoid breaking on close.
      * (all ram operations expected to be finished at this point)
      */
+    @Override
     public void close() {
         if (closed) {
             return;
         }
         closed = true;
         if (totalBytes.get() != 0) {
+            if (LOGGER.isTraceEnabled() && totalBytes() > FLUSH_BUFFER_SIZE) {
+                LOGGER.trace("context: {} bytes; breaker: {} of {} bytes", totalBytes(), breaker.getUsed(), breaker.getLimit());
+            }
             breaker.addWithoutBreaking(-totalBytes.get());
         }
         totalBytes.addAndGet(flushBuffer.getAndSet(0));
+    }
+
+    /**
+     * Release all the bytes that have been flushed to the breaker so far, and the bytes that are in the buffer "to be
+     * flushed" are not accounted for in the breaker anymore.
+     * <p>
+     * The purpose of this method is to substract everything that this context added to the breaker so far in order
+     * to be reused in a multi-phase operation where a subsequent phase needs to make decisions based on the available
+     * memory after the previous phase completed (and needs to be unloaded/released from the breaker)
+     */
+    @Override
+    public void release() {
+        if (totalBytes.get() != 0) {
+            if (LOGGER.isTraceEnabled() && totalBytes() > FLUSH_BUFFER_SIZE) {
+                LOGGER.trace("context: {} bytes; breaker: {} of {} bytes", totalBytes(), breaker.getUsed(), breaker.getLimit());
+            }
+            breaker.addWithoutBreaking(-totalBytes.getAndSet(0));
+        }
+        flushBuffer.getAndSet(0);
     }
 
     /**
@@ -125,6 +187,14 @@ public class RamAccountingContext {
      */
     public boolean trippedBreaker() {
         return tripped;
+    }
+
+    /**
+     * Returns true if the limit of the breaker was already reached
+     * but the breaker did not trip (e.g. when adding bytes without breaking)
+     */
+    public boolean exceededBreaker() {
+        return breaker.getUsed() >= breaker.getLimit();
     }
 
     /**

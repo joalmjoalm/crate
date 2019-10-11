@@ -21,107 +21,62 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Function;
 import io.crate.analyze.expressions.ExpressionAnalysisContext;
 import io.crate.analyze.expressions.ExpressionAnalyzer;
-import io.crate.analyze.relations.*;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.Symbols;
-import io.crate.analyze.where.WhereClauseAnalyzer;
-import io.crate.exceptions.UnsupportedFeatureException;
-import io.crate.metadata.doc.DocSysColumns;
+import io.crate.analyze.expressions.SubqueryAnalyzer;
+import io.crate.analyze.relations.AnalyzedRelation;
+import io.crate.analyze.relations.DocTableRelation;
+import io.crate.analyze.relations.FullQualifiedNameFieldProvider;
+import io.crate.analyze.relations.RelationAnalysisContext;
+import io.crate.analyze.relations.RelationAnalyzer;
+import io.crate.analyze.relations.StatementAnalysisContext;
+import io.crate.expression.eval.EvaluatingNormalizer;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
+import io.crate.metadata.RowGranularity;
 import io.crate.metadata.table.Operation;
-import io.crate.sql.tree.DefaultTraversalVisitor;
 import io.crate.sql.tree.Delete;
-import io.crate.sql.tree.ParameterExpression;
 
-class DeleteAnalyzer {
+final class DeleteAnalyzer {
 
-    private static final String VERSION_SEARCH_EX_MSG =
-        "_version is not allowed in delete queries without specifying a primary key";
-    private static final UnsupportedFeatureException VERSION_SEARCH_EX = new UnsupportedFeatureException(
-        VERSION_SEARCH_EX_MSG);
+    private final Functions functions;
+    private final RelationAnalyzer relationAnalyzer;
 
-
-    private static final DefaultTraversalVisitor<Void, InnerAnalysisContext> INNER_ANALYZER =
-        new DefaultTraversalVisitor<Void, InnerAnalysisContext>() {
-            @Override
-            public Void visitDelete(Delete node, InnerAnalysisContext context) {
-                WhereClause whereClause = context.whereClauseAnalyzer.analyze(
-                    context.expressionAnalyzer.generateWhereClause(node.getWhere(), context.expressionAnalysisContext),
-                    context.expressionAnalysisContext.statementContext());
-                if (!whereClause.docKeys().isPresent() &&
-                    Symbols.containsColumn(whereClause.query(), DocSysColumns.VERSION)) {
-                    throw VERSION_SEARCH_EX;
-                }
-                context.deleteAnalyzedStatement.whereClauses.add(whereClause);
-                return null;
-            }
-        };
-
-    private AnalysisMetaData analysisMetaData;
-    private RelationAnalyzer relationAnalyzer;
-
-    DeleteAnalyzer(AnalysisMetaData analysisMetaData, RelationAnalyzer relationAnalyzer) {
-        this.analysisMetaData = analysisMetaData;
+    DeleteAnalyzer(Functions functions, RelationAnalyzer relationAnalyzer) {
+        this.functions = functions;
         this.relationAnalyzer = relationAnalyzer;
     }
 
-    private static class InnerAnalysisContext {
-        private final ExpressionAnalyzer expressionAnalyzer;
-        private final ExpressionAnalysisContext expressionAnalysisContext;
-        private final DeleteAnalyzedStatement deleteAnalyzedStatement;
-        private final WhereClauseAnalyzer whereClauseAnalyzer;
+    public AnalyzedDeleteStatement analyze(Delete delete, ParamTypeHints typeHints, CoordinatorTxnCtx txnContext) {
+        StatementAnalysisContext stmtCtx = new StatementAnalysisContext(typeHints, Operation.DELETE, txnContext);
+        final RelationAnalysisContext relationCtx = stmtCtx.startRelation();
+        AnalyzedRelation relation = relationAnalyzer.analyze(delete.getRelation(), stmtCtx);
+        stmtCtx.endRelation();
 
-        InnerAnalysisContext(ExpressionAnalyzer expressionAnalyzer,
-                             ExpressionAnalysisContext expressionAnalysisContext,
-                             DeleteAnalyzedStatement deleteAnalyzedStatement,
-                             WhereClauseAnalyzer whereClauseAnalyzer
-        ) {
-            this.expressionAnalyzer = expressionAnalyzer;
-            this.expressionAnalysisContext = expressionAnalysisContext;
-            this.deleteAnalyzedStatement = deleteAnalyzedStatement;
-            this.whereClauseAnalyzer = whereClauseAnalyzer;
+        MaybeAliasedStatement maybeAliasedStatement = MaybeAliasedStatement.analyze(relation);
+        relation = maybeAliasedStatement.nonAliasedRelation();
+
+        if (!(relation instanceof DocTableRelation)) {
+            throw new UnsupportedOperationException("Cannot delete from relations other than base tables");
         }
-    }
-
-    public AnalyzedStatement analyze(Delete node, Analysis analysis) {
-        int numNested = 1;
-
-        Function<ParameterExpression, Symbol> convertParamFunction = analysis.parameterContext();
-        StatementAnalysisContext statementAnalysisContext = new StatementAnalysisContext(
-            analysis.sessionContext(),
-            convertParamFunction,
-            analysis.statementContext(),
-            analysisMetaData,
-            Operation.DELETE);
-        RelationAnalysisContext relationAnalysisContext = statementAnalysisContext.startRelation();
-        AnalyzedRelation analyzedRelation = relationAnalyzer.analyze(node.getRelation(), statementAnalysisContext);
-
-        assert analyzedRelation instanceof DocTableRelation;
-        DocTableRelation docTableRelation = (DocTableRelation) analyzedRelation;
-        DeleteAnalyzedStatement deleteAnalyzedStatement = new DeleteAnalyzedStatement(docTableRelation);
-        InnerAnalysisContext innerAnalysisContext = new InnerAnalysisContext(
-            new ExpressionAnalyzer(
-                analysisMetaData,
-                analysis.sessionContext(),
-                convertParamFunction,
-                new FullQualifedNameFieldProvider(relationAnalysisContext.sources()),
-                docTableRelation),
-            new ExpressionAnalysisContext(analysis.statementContext()),
-            deleteAnalyzedStatement,
-            new WhereClauseAnalyzer(analysisMetaData, deleteAnalyzedStatement.analyzedRelation())
+        DocTableRelation table = (DocTableRelation) relation;
+        EvaluatingNormalizer normalizer = new EvaluatingNormalizer(functions, RowGranularity.CLUSTER, null, table);
+        ExpressionAnalyzer expressionAnalyzer = new ExpressionAnalyzer(
+            functions,
+            txnContext,
+            typeHints,
+            new FullQualifiedNameFieldProvider(
+                relationCtx.sources(),
+                relationCtx.parentSources(),
+                txnContext.sessionContext().searchPath().currentSchema()
+            ),
+            new SubqueryAnalyzer(relationAnalyzer, new StatementAnalysisContext(typeHints, Operation.READ, txnContext))
         );
+        Symbol query = expressionAnalyzer.generateQuerySymbol(delete.getWhere(), new ExpressionAnalysisContext());
+        query = maybeAliasedStatement.maybeMapFields(query);
 
-        if (analysis.parameterContext().hasBulkParams()) {
-            numNested = analysis.parameterContext().numBulkParams();
-        }
-        for (int i = 0; i < numNested; i++) {
-            analysis.parameterContext().setBulkIdx(i);
-            INNER_ANALYZER.process(node, innerAnalysisContext);
-        }
-
-        statementAnalysisContext.endRelation();
-        return deleteAnalyzedStatement;
+        Symbol normalizedQuery = normalizer.normalize(query, txnContext);
+        return new AnalyzedDeleteStatement(table, normalizedQuery);
     }
 }

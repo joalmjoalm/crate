@@ -21,61 +21,56 @@
 
 package io.crate.analyze.validator;
 
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.MatchPredicate;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolVisitor;
-import io.crate.analyze.symbol.format.SymbolPrinter;
-import io.crate.types.DataTypes;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.MatchPredicate;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolVisitor;
+import io.crate.expression.symbol.WindowFunction;
 
 import java.util.Locale;
 
 public class GroupBySymbolValidator {
 
-    private final static InnerValidator INNER_VALIDATOR = new InnerValidator();
+    private static final InnerValidator INNER_VALIDATOR = new InnerValidator();
 
     public static void validate(Symbol symbol) throws IllegalArgumentException, UnsupportedOperationException {
-        INNER_VALIDATOR.process(symbol, null);
+        symbol.accept(INNER_VALIDATOR, "Cannot GROUP BY '%s': invalid data type '%s'");
     }
 
-    private static void validateDataType(Symbol symbol) {
-        if (!DataTypes.PRIMITIVE_TYPES.contains(symbol.valueType())) {
-            throw new IllegalArgumentException(
-                String.format(Locale.ENGLISH, "Cannot GROUP BY '%s': invalid data type '%s'",
-                    SymbolPrinter.INSTANCE.printSimple(symbol),
-                    symbol.valueType()));
-        }
-    }
-
-    private static class InnerValidator extends SymbolVisitor<Void, Void> {
+    private static class InnerValidator extends SymbolVisitor<String, Void> {
 
         @Override
-        public Void visitFunction(Function symbol, Void context) {
-            switch (symbol.info().type()) {
+        public Void visitFunction(Function function, String errorMsgTemplate) {
+            switch (function.info().type()) {
                 case SCALAR:
-                    visitSymbol(symbol, context);
+                    for (Symbol argument : function.arguments()) {
+                        argument.accept(this, errorMsgTemplate);
+                    }
                     break;
                 case AGGREGATE:
                     throw new IllegalArgumentException("Aggregate functions are not allowed in GROUP BY");
-                case PREDICATE:
-                    throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
-                        "%s predicate cannot be used in a GROUP BY clause", symbol.info().ident().name()));
+                case TABLE:
+                    throw new IllegalArgumentException("Table functions are not allowed in GROUP BY");
                 default:
                     throw new UnsupportedOperationException(
-                        String.format(Locale.ENGLISH, "FunctionInfo.Type %s not handled", symbol.info().type()));
+                        String.format(Locale.ENGLISH, "FunctionInfo.Type %s not handled", function.info().type()));
             }
             return null;
         }
 
         @Override
-        public Void visitMatchPredicate(MatchPredicate matchPredicate, Void context) {
-            throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
-                "%s predicate cannot be used in a GROUP BY clause", io.crate.operation.predicate.MatchPredicate.NAME));
+        public Void visitWindowFunction(WindowFunction symbol, String context) {
+            throw new IllegalArgumentException("Window functions are not allowed in GROUP BY");
         }
 
         @Override
-        protected Void visitSymbol(Symbol symbol, Void context) {
-            validateDataType(symbol);
+        public Void visitMatchPredicate(MatchPredicate matchPredicate, String errorMsgTemplate) {
+            throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
+                "%s predicate cannot be used in a GROUP BY clause", io.crate.expression.predicate.MatchPredicate.NAME));
+        }
+
+        @Override
+        protected Void visitSymbol(Symbol symbol, String errorMsgTemplate) {
             return null;
         }
     }

@@ -22,36 +22,36 @@
 
 package io.crate.analyze.relations;
 
-import io.crate.analyze.BaseAnalyzerTest;
 import io.crate.exceptions.ValidationException;
-import io.crate.operation.operator.OperatorModule;
-import io.crate.testing.MockedClusterServiceModule;
-import io.crate.testing.T3;
-import org.elasticsearch.common.inject.Module;
-import org.junit.Rule;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.SQLExecutor;
+import org.junit.Before;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
-import java.util.List;
+import java.io.IOException;
 
-public class RelationAnalyzerTest extends BaseAnalyzerTest {
+import static org.hamcrest.core.Is.is;
 
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
+public class RelationAnalyzerTest extends CrateDummyClusterServiceUnitTest {
 
-    @Override
-    protected List<Module> getModules() {
-        List<Module> modules = super.getModules();
-        modules.add(new MockedClusterServiceModule());
-        modules.add(new OperatorModule());
-        modules.add(T3.META_DATA_MODULE);
-        return modules;
+    private SQLExecutor executor;
+
+    @Before
+    public void prepare() throws IOException {
+        executor = SQLExecutor.builder(clusterService).enableDefaultTables().build();
     }
 
     @Test
     public void testValidateUsedRelationsInJoinConditions() throws Exception {
         expectedException.expect(ValidationException.class);
-        expectedException.expectMessage("missing FROM-clause entry for relation 't3'");
-        analyze("select * from t1 join t2 on t1.a = t3.c join t3 on t2.b = t3.c");
+        expectedException.expectMessage("missing FROM-clause entry for relation '[doc.t3]'");
+        executor.analyze("select * from t1 join t2 on t1.a = t3.c join t3 on t2.b = t3.c");
+    }
+
+    @Test
+    public void testColumnNameFromArrayComparisonExpression() throws Exception {
+        AnalyzedRelation relation = executor.analyze("select 'foo' = any(partitioned_by) " +
+                                                     "from information_schema.tables");
+        assertThat(relation.fields().get(0).path().sqlFqn(), is("'foo' = ANY(partitioned_by)"));
     }
 }

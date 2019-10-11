@@ -23,27 +23,50 @@
 package io.crate.analyze;
 
 import io.crate.exceptions.UnsupportedFeatureException;
+import io.crate.planner.node.management.ExplainPlan;
+import io.crate.profile.ProfilingContext;
+import io.crate.profile.Timer;
 import io.crate.sql.SqlFormatter;
-import io.crate.sql.tree.*;
+import io.crate.sql.tree.AstVisitor;
+import io.crate.sql.tree.CopyFrom;
+import io.crate.sql.tree.Explain;
+import io.crate.sql.tree.Node;
+import io.crate.sql.tree.Query;
+import io.crate.sql.tree.Statement;
+
+import java.util.Collections;
 
 public class ExplainStatementAnalyzer {
 
     private final Analyzer analyzer;
 
-    public ExplainStatementAnalyzer(Analyzer analyzer) {
+    ExplainStatementAnalyzer(Analyzer analyzer) {
         this.analyzer = analyzer;
     }
 
     public ExplainAnalyzedStatement analyze(Explain node, Analysis analysis) {
-        CHECK_VISITOR.process(node.getStatement(), null);
-        AnalyzedStatement subStatement = analyzer.analyzedStatement(node.getStatement(), analysis);
+        Statement statement = node.getStatement();
+        statement.accept(CHECK_VISITOR, null);
+
+        final AnalyzedStatement subStatement;
+        ProfilingContext profilingContext;
+        if (node.isAnalyze()) {
+            profilingContext = new ProfilingContext(Collections::emptyList);
+            Timer timer = profilingContext.createAndStartTimer(ExplainPlan.Phase.Analyze.name());
+            subStatement = analyzer.analyzedStatement(statement, analysis);
+            profilingContext.stopTimerAndStoreDuration(timer);
+        } else {
+            profilingContext = null;
+            subStatement = analyzer.analyzedStatement(statement, analysis);
+        }
         String columnName = SqlFormatter.formatSql(node);
-        ExplainAnalyzedStatement explainAnalyzedStatement = new ExplainAnalyzedStatement(columnName, subStatement);
+        ExplainAnalyzedStatement explainAnalyzedStatement =
+            new ExplainAnalyzedStatement(columnName, subStatement, profilingContext);
         analysis.rootRelation(explainAnalyzedStatement);
         return explainAnalyzedStatement;
     }
 
-    private static final AstVisitor<Void, Void> CHECK_VISITOR = new AstVisitor<Void, Void>() {
+    private static final AstVisitor<Void, Void> CHECK_VISITOR = new AstVisitor<>() {
 
         @Override
         protected Void visitQuery(Query node, Void context) {

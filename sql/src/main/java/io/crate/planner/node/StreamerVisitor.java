@@ -22,8 +22,16 @@
 package io.crate.planner.node;
 
 import io.crate.Streamer;
-import io.crate.planner.node.dql.*;
-import io.crate.planner.node.dql.join.NestedLoopPhase;
+import io.crate.execution.dsl.phases.CountPhase;
+import io.crate.execution.dsl.phases.ExecutionPhase;
+import io.crate.execution.dsl.phases.ExecutionPhaseVisitor;
+import io.crate.execution.dsl.phases.FileUriCollectPhase;
+import io.crate.execution.dsl.phases.HashJoinPhase;
+import io.crate.execution.dsl.phases.MergePhase;
+import io.crate.execution.dsl.phases.NestedLoopPhase;
+import io.crate.execution.dsl.phases.PKLookupPhase;
+import io.crate.execution.dsl.phases.RoutedCollectPhase;
+import io.crate.execution.dsl.phases.TableFunctionCollectPhase;
 import io.crate.types.DataTypes;
 
 import java.util.Locale;
@@ -57,12 +65,22 @@ public class StreamerVisitor {
         }
 
         @Override
+        public Streamer<?>[] visitPKLookup(PKLookupPhase pkLookupPhase, Void context) {
+            return DataTypes.getStreamers(pkLookupPhase.outputTypes());
+        }
+
+        @Override
         public Streamer<?>[] visitCountPhase(CountPhase phase, Void context) {
             return COUNT_STREAMERS;
         }
 
         @Override
         public Streamer<?>[] visitNestedLoopPhase(NestedLoopPhase phase, Void context) {
+            return DataTypes.getStreamers(phase.outputTypes());
+        }
+
+        @Override
+        public Streamer<?>[] visitHashJoinPhase(HashJoinPhase phase, Void context) {
             return DataTypes.getStreamers(phase.outputTypes());
         }
 

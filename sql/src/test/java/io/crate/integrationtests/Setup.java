@@ -21,7 +21,7 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLResponse;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.SQLTransportExecutor;
 
 import java.util.Arrays;
@@ -45,7 +45,7 @@ public class Setup {
         transportExecutor.exec("create table locations (" +
                                " id string primary key," +
                                " name string," +
-                               " date timestamp," +
+                               " date timestamp with time zone," +
                                " kind string," +
                                " position integer," +
                                " description string," +
@@ -136,12 +136,12 @@ public class Setup {
         groupBySetup("integer");
     }
 
-    public void groupBySetup(String numericType) throws Exception {
+    public void groupBySetup(String numericType) {
         transportExecutor.exec(String.format(Locale.ENGLISH, "create table characters (" +
                                                              " race string," +
                                                              " gender string," +
                                                              " age %s," +
-                                                             " birthdate timestamp," +
+                                                             " birthdate timestamp with time zone," +
                                                              " name string," +
                                                              " details object as (job string)," +
                                                              " details_ignored object(ignored)" +
@@ -172,7 +172,7 @@ public class Setup {
         transportExecutor.exec("create table employees (" +
                                " name string, " +
                                " department string," +
-                               " hired timestamp, " +
+                               " hired timestamp with time zone, " +
                                " age short," +
                                " income double, " +
                                " good boolean" +
@@ -235,10 +235,12 @@ public class Setup {
                                ") with (number_of_replicas=0)");
         transportExecutor.ensureGreen();
         SQLResponse response = transportExecutor.exec("insert into any_table (id, temps, names, tags) values (?,?,?,?), (?,?,?,?), (?,?,?,?), (?,?,?,?)",
-            1, Arrays.asList(0L, 0L, 0L), Arrays.asList("Dornbirn", "Berlin", "St. Margrethen"), Arrays.asList("cool"),
-            2, Arrays.asList(0, 1, -1), Arrays.asList("Dornbirn", "Dornbirn", "Dornbirn"), Arrays.asList("cool", null),
-            3, Arrays.asList(42, -42), Arrays.asList("Hangelsberg", "Berlin"), Arrays.asList("kuhl", "cool"),
-            4, null, null, Arrays.asList("kuhl", null)
+            new Object[] {
+                1, Arrays.asList(0L, 0L, 0L), Arrays.asList("Dornbirn", "Berlin", "St. Margrethen"), Arrays.asList("cool"),
+                2, Arrays.asList(0, 1, -1), Arrays.asList("Dornbirn", "Dornbirn", "Dornbirn"), Arrays.asList("cool", null),
+                3, Arrays.asList(42, -42), Arrays.asList("Hangelsberg", "Berlin"), Arrays.asList("kuhl", "cool"),
+                4, null, null, Arrays.asList("kuhl", null)
+            }
         );
         assertThat(response.rowCount(), is(4L));
         transportExecutor.exec("refresh table any_table");
@@ -247,7 +249,7 @@ public class Setup {
     public void partitionTableSetup() {
         transportExecutor.exec("create table parted (" +
                                "id int primary key," +
-                               "date timestamp primary key," +
+                               "date timestamp with time zone primary key," +
                                "o object(ignored)" +
                                ") partitioned by (date) with (number_of_replicas=0)");
         transportExecutor.ensureGreen();
@@ -278,5 +280,38 @@ public class Setup {
             }
         );
         transportExecutor.exec("refresh table characters");
+    }
+
+    public void setUpJobs() {
+        transportExecutor.exec("create table jobs (id int primary key, department string, min_salary double, max_salary double)");
+        transportExecutor.ensureYellowOrGreen();
+        transportExecutor.execBulk("insert into jobs (id, department, min_salary, max_salary) values (?, ?, ?, ?)",
+            new Object[][]{
+                new Object[]{1, "engineering", 8200.0, 16000.0},
+                new Object[]{2, "HR", 6000.0, 12000.0},
+                new Object[]{3, "management", 20000.0, 40000.0},
+                new Object[]{4, "internship", 3000.0, 6000.0}
+            }
+        );
+        transportExecutor.exec("refresh table jobs");
+
+
+        transportExecutor.exec(
+            "create table job_history (" +
+                "job_id int, " +
+                "from_ts timestamp with time zone, " +
+                "to_ts timestamp with time zone)"
+        );
+        transportExecutor.ensureYellowOrGreen();
+        transportExecutor.execBulk("insert into job_history (job_id, from_ts, to_ts) values (?, ?, ?)",
+            new Object[][]{
+                new Object[]{1, "2017-01-01", "2017-02-02"},
+                new Object[]{1, "2017-05-05", "2017-01-12"},
+                new Object[]{2, "2015-12-01", "2016-10-25"},
+                new Object[]{3, "2016-05-20", "2017-12-31"},
+                new Object[]{4, "2014-11-11", "2016-04-04"}
+            }
+        );
+        transportExecutor.exec("refresh table job_history");
     }
 }

@@ -22,7 +22,7 @@
 
 package io.crate.planner.node.fetch;
 
-import io.crate.analyze.symbol.InputColumn;
+import io.crate.expression.symbol.InputColumn;
 import io.crate.metadata.Reference;
 
 import java.util.Collection;
@@ -32,23 +32,23 @@ import java.util.List;
 public class FetchSource {
 
     private final List<Reference> partitionedByColumns;
-    private final Collection<InputColumn> docIdCols;
-    private final Collection<Reference> references;
+    private final LinkedHashSet<InputColumn> fetchIdCols = new LinkedHashSet<>();
+    private final LinkedHashSet<Reference> references = new LinkedHashSet<>();
 
     public FetchSource(List<Reference> partitionedByColumns) {
-        this(partitionedByColumns, new LinkedHashSet<InputColumn>(), new LinkedHashSet<Reference>());
-    }
-
-    public FetchSource(List<Reference> partitionedByColumns,
-                       Collection<InputColumn> docIdCols,
-                       Collection<Reference> references) {
         this.partitionedByColumns = partitionedByColumns;
-        this.docIdCols = docIdCols;
-        this.references = references;
     }
 
-    public Collection<InputColumn> docIdCols() {
-        return docIdCols;
+    public void addFetchIdColumn(InputColumn fetchIdColumn) {
+        fetchIdCols.add(fetchIdColumn);
+    }
+
+    public void addRefToFetch(Reference ref) {
+        references.add(ref);
+    }
+
+    public Collection<InputColumn> fetchIdCols() {
+        return fetchIdCols;
     }
 
     public List<Reference> partitionedByColumns() {

@@ -22,16 +22,15 @@
 package io.crate.integrationtests;
 
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.hamcrest.Matchers;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.List;
 
 import static org.hamcrest.core.Is.is;
 
-@UseJdbc
 public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -98,6 +97,22 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    public void testWherePKWithOrderBySymbolThatIsAlsoInSelectList() throws Exception {
+        execute("create table users (" +
+                "   id int primary key," +
+                "   name string" +
+                ") clustered into 2 shards with (number_of_replicas = 0)");
+        ensureYellow();
+        execute("insert into users (id, name) values (?, ?)", new Object[][]{
+            new Object[]{1, "Arthur"},
+            new Object[]{2, "Trillian"},
+            });
+        execute("refresh table users");
+        execute("select name from users where id = 1 order by name desc");
+        assertThat(TestingHelpers.printedTable(response.rows()), is("Arthur\n"));
+    }
+
+    @Test
     public void testWherePkColLimit0() throws Exception {
         execute("create table users (id int primary key, name string) " +
                 "clustered into 1 shards with (number_of_replicas = 0)");
@@ -148,7 +163,6 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
     public void testSelectNestedObjectWherePk() throws Exception {
         execute("create table items (id string primary key, details object as (tags array(string)) )" +
                 "clustered into 3 shards with (number_of_replicas = '0-1')");
-        ensureYellow();
 
         execute("insert into items (id, details) values (?, ?)", new Object[]{
             "123", MapBuilder.newMapBuilder().put("tags", Arrays.asList("small", "blue")).map()
@@ -157,10 +171,10 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
 
         execute("select id, details['tags'] from items where id = '123'");
         assertThat(response.rowCount(), is(1L));
-        assertThat((String) response.rows()[0][0], is("123"));
+        assertThat(response.rows()[0][0], is("123"));
         //noinspection unchecked
-        String[] tags = Arrays.copyOf((Object[]) response.rows()[0][1], 2, String[].class);
-        assertThat(tags, Matchers.arrayContaining("small", "blue"));
+        List<Object> tags = (List<Object>) response.rows()[0][1];
+        assertThat(tags, Matchers.contains("small", "blue"));
     }
 
     @Test
@@ -197,8 +211,8 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
     public void testEmptyClusteredByUnderId() throws Exception {
         // regression test that empty routing executes correctly
         execute("create table auto_id (" +
-                "  name string," +
-                "  location geo_point" +
+                "  location geo_point, " +
+                "  name string" +
                 ") with (number_of_replicas=0)");
         ensureYellow();
 
@@ -215,8 +229,8 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
     public void testEmptyClusteredByExplicit() throws Exception {
         // regression test that empty routing executes correctly
         execute("create table explicit_routing (" +
-                "  name string," +
-                "  location geo_point" +
+                "  location geo_point, " +
+                "  name string " +
                 ") clustered by (name) with (number_of_replicas=0)");
         ensureYellow();
         execute("insert into explicit_routing (name, location) values (',', [36.567, 52.998]), ('Dornbirn', [54.45, 4.567])");
@@ -228,7 +242,7 @@ public class WherePKIntegrationTest extends SQLTransportIntegrationTest {
         execute("select * from explicit_routing where name=','");
         assertThat(response.cols(), is(Matchers.arrayContaining("location", "name")));
         assertThat(response.rowCount(), is(1L));
-        assertThat(TestingHelpers.printedTable(response.rows()), is("[36.567, 52.998]| ,\n"));
+        assertThat(TestingHelpers.printedTable(response.rows()), is("Pt(x=36.567,y=52.998)| ,\n"));
     }
 
     @Test

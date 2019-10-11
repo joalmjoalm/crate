@@ -21,21 +21,19 @@
 
 package io.crate.metadata;
 
-import io.crate.operation.reference.partitioned.PartitionExpression;
+import io.crate.expression.reference.ReferenceResolver;
+import io.crate.expression.reference.partitioned.PartitionExpression;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class PartitionReferenceResolver implements NestedReferenceResolver {
+public class PartitionReferenceResolver implements ReferenceResolver<PartitionExpression> {
 
     private final Map<ReferenceIdent, PartitionExpression> expressionMap;
-    private final NestedReferenceResolver fallbackResolver;
     private final List<PartitionExpression> partitionExpressions;
 
-    public PartitionReferenceResolver(NestedReferenceResolver fallbackReferenceResolver,
-                                      List<PartitionExpression> partitionExpressions) {
-        this.fallbackResolver = fallbackReferenceResolver;
+    public PartitionReferenceResolver(List<PartitionExpression> partitionExpressions) {
         this.partitionExpressions = partitionExpressions;
         this.expressionMap = new HashMap<>(partitionExpressions.size(), 1.0f);
         for (PartitionExpression partitionExpression : partitionExpressions) {
@@ -44,10 +42,9 @@ public class PartitionReferenceResolver implements NestedReferenceResolver {
     }
 
     @Override
-    public ReferenceImplementation getImplementation(Reference ref) {
+    public PartitionExpression getImplementation(Reference ref) {
         PartitionExpression expression = expressionMap.get(ref.ident());
-        assert expression != null || fallbackResolver.getImplementation(ref) == null
-            : "granularity < PARTITION should have been resolved already";
+        assert expression != null : "granularity < PARTITION should have been resolved already";
         return expression;
     }
 

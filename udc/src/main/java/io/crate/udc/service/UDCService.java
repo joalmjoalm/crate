@@ -21,50 +21,71 @@
 
 package io.crate.udc.service;
 
-import io.crate.ClusterIdService;
+import io.crate.license.LicenseService;
 import io.crate.monitor.ExtendedNodeInfo;
+import io.crate.settings.CrateSetting;
+import io.crate.types.DataTypes;
 import io.crate.udc.ping.PingTask;
-import io.crate.udc.plugin.UDCPlugin;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchException;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Provider;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 
 import java.util.Timer;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
-public class UDCService extends AbstractLifecycleComponent<UDCService> {
+public class UDCService extends AbstractLifecycleComponent {
+
+    private static final Logger LOGGER = LogManager.getLogger(UDCService.class);
+
+    public static final CrateSetting<Boolean> UDC_ENABLED_SETTING = CrateSetting.of(Setting.boolSetting(
+        "udc.enabled", true,
+        Setting.Property.NodeScope), DataTypes.BOOLEAN);
+    public static final CrateSetting<String> UDC_URL_SETTING = CrateSetting.of(new Setting<>(
+        "udc.url", "https://udc.crate.io/",
+        Function.identity(), Setting.Property.NodeScope), DataTypes.STRING);
+    public static final CrateSetting<TimeValue> UDC_INITIAL_DELAY_SETTING = CrateSetting.of(Setting.positiveTimeSetting(
+        "udc.initial_delay", new TimeValue(10, TimeUnit.MINUTES),
+        Setting.Property.NodeScope), DataTypes.STRING);
+    public static final CrateSetting<TimeValue> UDC_INTERVAL_SETTING = CrateSetting.of(Setting.positiveTimeSetting(
+        "udc.interval", new TimeValue(24, TimeUnit.HOURS),
+        Setting.Property.NodeScope),DataTypes.STRING);
 
     private final Timer timer;
 
     private final ClusterService clusterService;
-    private final Provider<ClusterIdService> clusterIdServiceProvider;
     private final ExtendedNodeInfo extendedNodeInfo;
+    private final LicenseService licenseService;
+    private final Settings settings;
 
     @Inject
     public UDCService(Settings settings,
                       ExtendedNodeInfo extendedNodeInfo,
                       ClusterService clusterService,
-                      Provider<ClusterIdService> clusterIdServiceProvider) {
-        super(settings);
+                      LicenseService licenseService) {
+        this.settings = settings;
         this.extendedNodeInfo = extendedNodeInfo;
         this.clusterService = clusterService;
-        this.clusterIdServiceProvider = clusterIdServiceProvider;
+        this.licenseService = licenseService;
         this.timer = new Timer("crate-udc");
     }
 
     @Override
     protected void doStart() throws ElasticsearchException {
-        String url = settings.get(UDCPlugin.URL_SETTING_NAME, UDCPlugin.URL_DEFAULT_SETTING);
-        TimeValue initialDelay = settings.getAsTime(UDCPlugin.INITIAL_DELAY_SETTING_NAME, UDCPlugin.INITIAL_DELAY_DEFAULT_SETTING);
-        TimeValue interval = settings.getAsTime(UDCPlugin.INTERVAL_SETTING_NAME, UDCPlugin.INTERVAL_DEFAULT_SETTING);
+        String url = UDC_URL_SETTING.setting().get(settings);
+        TimeValue initialDelay = UDC_INITIAL_DELAY_SETTING.setting().get(settings);
+        TimeValue interval = UDC_INTERVAL_SETTING.setting().get(settings);
 
-        if (logger.isDebugEnabled()) {
-            logger.debug("Starting with delay {} and period {}.", initialDelay.getSeconds(), interval.getSeconds());
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("Starting with delay {} and period {}.", initialDelay.getSeconds(), interval.getSeconds());
         }
-        PingTask pingTask = new PingTask(clusterService, clusterIdServiceProvider.get(), extendedNodeInfo, url);
+        PingTask pingTask = new PingTask(clusterService, extendedNodeInfo, url, settings, licenseService);
         timer.scheduleAtFixedRate(pingTask, initialDelay.millis(), interval.millis());
     }
 

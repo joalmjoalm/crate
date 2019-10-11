@@ -24,18 +24,17 @@ package io.crate.sql.tree;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 
-import javax.annotation.Nullable;
 import java.util.List;
 
-public class InsertFromSubquery extends Insert {
+public class InsertFromSubquery<T> extends Insert<T> {
 
     private final Query subQuery;
 
-    public InsertFromSubquery(Table table,
+    public InsertFromSubquery(Table<T> table,
                               Query subQuery,
-                              @Nullable List<String> columns,
-                              @Nullable List<Assignment> onDuplicateKeyAssignments) {
-        super(table, columns, onDuplicateKeyAssignments);
+                              List<String> columns,
+                              DuplicateKeyContext<T> duplicateKeyContext) {
+        super(table, columns, duplicateKeyContext);
         this.subQuery = subQuery;
     }
 
@@ -67,7 +66,6 @@ public class InsertFromSubquery extends Insert {
             .add("table", table)
             .add("columns", columns)
             .add("subquery", subQuery)
-            .add("assignments", onDuplicateKeyAssignments)
             .toString();
     }
 

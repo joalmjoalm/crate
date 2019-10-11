@@ -21,38 +21,50 @@
 
 package io.crate.analyze;
 
-import com.google.common.collect.Iterables;
 import io.crate.sql.ExpressionFormatter;
+import io.crate.sql.tree.ArrayComparisonExpression;
 import io.crate.sql.tree.Expression;
 import io.crate.sql.tree.QualifiedNameReference;
+import io.crate.sql.tree.SubqueryExpression;
 import io.crate.sql.tree.SubscriptExpression;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
+import java.util.NoSuchElementException;
 
 public class OutputNameFormatter {
 
-    private final static InnerOutputNameFormatter INSTANCE = new InnerOutputNameFormatter();
+    private static final InnerOutputNameFormatter INSTANCE = new InnerOutputNameFormatter();
 
     public static String format(Expression expression) {
-        return INSTANCE.process(expression, null);
+        return expression.accept(INSTANCE, null);
     }
 
     private static class InnerOutputNameFormatter extends ExpressionFormatter.Formatter {
         @Override
-        protected String visitQualifiedNameReference(QualifiedNameReference node, Void context) {
-
-            List<String> parts = new ArrayList<>();
-            for (String part : node.getName().getParts()) {
-                parts.add(part);
+        protected String visitQualifiedNameReference(QualifiedNameReference node, List<Expression> parameters) {
+            List<String> parts = node.getName().getParts();
+            if (parts.isEmpty()) {
+                throw new NoSuchElementException("Parts of QualifiedNameReference are empty: " + node.getName());
             }
-            return Iterables.getLast(parts);
+            return parts.get(parts.size() - 1);
         }
 
         @Override
-        protected String visitSubscriptExpression(SubscriptExpression node, Void context) {
-            return String.format(Locale.ENGLISH, "%s[%s]", process(node.name(), null), process(node.index(), null));
+        protected String visitSubscriptExpression(SubscriptExpression node, List<Expression> parameters) {
+            return node.name().accept(this, null) + '[' + node.index().accept(this, null) + ']';
+        }
+
+        @Override
+        public String visitArrayComparisonExpression(ArrayComparisonExpression node, List<Expression> parameters) {
+            return node.getLeft().accept(this, null) + ' ' +
+                   node.getType().getValue() + ' ' +
+                   node.quantifier().name() + '(' +
+                   node.getRight().accept(this, null) + ')';
+        }
+
+        @Override
+        protected String visitSubqueryExpression(SubqueryExpression node, List<Expression> parameters) {
+            return super.visitSubqueryExpression(node, parameters).replace("\n", "");
         }
     }
 }

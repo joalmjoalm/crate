@@ -22,126 +22,158 @@
 
 package io.crate.planner;
 
-import com.carrotsearch.hppc.ObjectLongMap;
-import com.google.common.collect.ImmutableList;
-import io.crate.action.sql.Option;
+import com.carrotsearch.hppc.ObjectObjectMap;
 import io.crate.action.sql.SQLOperations;
-import io.crate.metadata.TableIdent;
-import io.crate.protocols.postgres.FormatCodes;
-import io.crate.test.integration.CrateUnitTest;
-import io.crate.types.DataType;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.common.inject.Provider;
+import io.crate.action.sql.Session;
+import io.crate.data.RowN;
+import io.crate.metadata.RelationName;
+import io.crate.plugin.SQLPlugin;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.threadpool.ThreadPool;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
-import org.mockito.Mockito;
+import org.mockito.Answers;
 
-import java.util.Collections;
+import java.util.Collection;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.hamcrest.Matchers.is;
-import static org.mockito.Matchers.anyByte;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Mockito.*;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.core.IsNull.notNullValue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
-public class TableStatsServiceTest extends CrateUnitTest {
+public class TableStatsServiceTest extends CrateDummyClusterServiceUnitTest {
 
-    private ThreadPool threadPool;
-
-    @Before
-    public void init() throws Exception {
-        threadPool = new ThreadPool("dummy");
-    }
-
-    @After
-    public void clearThreadPool() throws Exception {
-        threadPool.shutdown();
-        threadPool.awaitTermination(30, TimeUnit.SECONDS);
-    }
-
-    @Test
-    public void testRowsToTableStatConversion() {
-        final ClusterService clusterService = mock(ClusterService.class);
-        when(clusterService.localNode()).thenReturn(mock(DiscoveryNode.class));
-
-        final TableStatsService statsService = new TableStatsService(Settings.EMPTY,
-            threadPool,
-            clusterService,
-            TimeValue.timeValueHours(1),
-            new Provider<SQLOperations>() {
-                @Override
-                public SQLOperations get() {
-                    return mock(SQLOperations.class);
-                }
-            });
-        ObjectLongMap<TableIdent> stats = statsService.statsFromRows(ImmutableList.of(
-            new Object[]{1L, "custom", "foo"},
-            new Object[]{2L, "doc", "foo"},
-            new Object[]{3L, "bar", "foo"}));
-        assertThat(stats.size(), is(3));
-        assertThat(stats.get(new TableIdent("bar", "foo")), is(3L));
+    @Override
+    protected Collection<Setting<?>> additionalClusterSettings() {
+        return new SQLPlugin(Settings.EMPTY).getSettings();
     }
 
     @Test
-    public void testStatsQueriesCorrectly() throws Exception {
-        ClusterService clusterService = mock(ClusterService.class);
-        when(clusterService.localNode()).thenReturn(mock(DiscoveryNode.class));
-        final SQLOperations sqlOperations = mock(SQLOperations.class);
-        SQLOperations.Session session = mock(SQLOperations.Session.class);
-        when(sqlOperations.createSession(eq("sys"), eq(Option.NONE), eq(TableStatsService.DEFAULT_SOFT_LIMIT)))
-            .thenReturn(session);
-
-        TableStatsService statsService = new TableStatsService(Settings.EMPTY,
-            threadPool,
+    public void testSettingsChanges() {
+        // Initially disabled
+        TableStatsService statsService = new TableStatsService(
+            Settings.builder().put(TableStatsService.STATS_SERVICE_REFRESH_INTERVAL_SETTING.getKey(), 0).build(),
+            THREAD_POOL,
             clusterService,
-            TimeValue.timeValueHours(1),
-            new Provider<SQLOperations>() {
-                @Override
-                public SQLOperations get() {
-                    return sqlOperations;
-                }
-            });
+            new TableStats(),
+            mock(SQLOperations.class, Answers.RETURNS_MOCKS));
+
+        assertThat(statsService.refreshInterval,
+            is(TimeValue.timeValueMinutes(0)));
+        assertThat(statsService.refreshScheduledTask, is(nullValue()));
+
+        // Default setting
+        statsService = new TableStatsService(
+            Settings.EMPTY,
+            THREAD_POOL,
+            clusterService,
+            new TableStats(),
+            mock(SQLOperations.class, Answers.RETURNS_MOCKS));
+
+        assertThat(statsService.refreshInterval,
+            is(TableStatsService.STATS_SERVICE_REFRESH_INTERVAL_SETTING.getDefault()));
+        assertThat(statsService.refreshScheduledTask, is(notNullValue()));
+
+        ClusterSettings clusterSettings = clusterService.getClusterSettings();
+
+        // Update setting
+        clusterSettings.applySettings(Settings.builder()
+            .put(TableStatsService.STATS_SERVICE_REFRESH_INTERVAL_SETTING.getKey(), "10m").build());
+
+        assertThat(statsService.refreshInterval, is(TimeValue.timeValueMinutes(10)));
+        assertThat(statsService.refreshScheduledTask,
+            is(notNullValue()));
+
+        // Disable
+        clusterSettings.applySettings(Settings.builder()
+            .put(TableStatsService.STATS_SERVICE_REFRESH_INTERVAL_SETTING.getKey(), 0).build());
+
+        assertThat(statsService.refreshInterval, is(TimeValue.timeValueMillis(0)));
+        assertThat(statsService.refreshScheduledTask,
+            is(nullValue()));
+
+        // Reset setting
+        clusterSettings.applySettings(Settings.builder().build());
+
+        assertThat(statsService.refreshInterval,
+            is(TableStatsService.STATS_SERVICE_REFRESH_INTERVAL_SETTING.getDefault()));
+        assertThat(statsService.refreshScheduledTask, is(notNullValue()));
+    }
+
+    @Test
+    public void testRowsToTableStatConversion() throws InterruptedException, ExecutionException, TimeoutException {
+        CompletableFuture<ObjectObjectMap<RelationName, TableStats.Stats>> statsFuture = new CompletableFuture<>();
+        TableStatsService.TableStatsResultReceiver receiver =
+            new TableStatsService.TableStatsResultReceiver(statsFuture::complete);
+
+        receiver.setNextRow(new RowN(new Object[]{0L, 10L, "empty", "foo"}));
+        receiver.setNextRow(new RowN(new Object[]{1L, 10L, "custom", "foo"}));
+        receiver.setNextRow(new RowN(new Object[]{2L, 20L, "doc", "foo"}));
+        receiver.setNextRow(new RowN(new Object[]{3L, 30L, "bar", "foo"}));
+        receiver.allFinished(false);
+
+        ObjectObjectMap<RelationName, TableStats.Stats> stats = statsFuture.get(10, TimeUnit.SECONDS);
+        assertThat(stats.size(), is(4));
+        TableStats.Stats statValues = stats.get(new RelationName("bar", "foo"));
+        assertThat(statValues.numDocs, is(3L));
+        assertThat(statValues.sizeInBytes, is(30L));
+
+        TableStats tableStats = new TableStats();
+        tableStats.updateTableStats(stats);
+        assertThat(tableStats.estimatedSizePerRow(new RelationName("bar", "foo")), is(10L));
+        assertThat(tableStats.estimatedSizePerRow(new RelationName("empty", "foo")), is(0L));
+        assertThat(tableStats.estimatedSizePerRow(new RelationName("notInCache", "foo")), is(-1L));
+    }
+
+    @Test
+    public void testStatsQueriesCorrectly() {
+        SQLOperations sqlOperations = mock(SQLOperations.class);
+        Session session = mock(Session.class);
+        when(sqlOperations.newSystemSession()).thenReturn(session);
+
+        TableStatsService statsService = new TableStatsService(
+            Settings.EMPTY,
+            THREAD_POOL,
+            clusterService,
+            new TableStats(),
+            sqlOperations
+        );
         statsService.run();
 
-        verify(session, times(1)).parse(
-            eq(TableStatsService.UNNAMED),
-            eq(TableStatsService.STMT),
-            eq(Collections.<DataType>emptyList()));
-        verify(session, times(1)).bind(
-            eq(TableStatsService.UNNAMED),
-            eq(TableStatsService.UNNAMED),
-            eq(Collections.emptyList()),
-            isNull(FormatCodes.FormatCode[].class));
-        verify(session, times(1)).execute(
-            eq(TableStatsService.UNNAMED),
-            eq(0),
-            any(TableStatsService.TableStatsResultReceiver.class));
-        verify(session, times(1)).sync();
+        verify(session, times(1)).quickExec(eq(TableStatsService.STMT), any(), any(), any());
     }
 
     @Test
-    public void testNoUpdateIfLocalNodeNotAvailable() throws Exception {
+    public void testNoUpdateIfLocalNodeNotAvailable() {
         final ClusterService clusterService = mock(ClusterService.class);
         when(clusterService.localNode()).thenReturn(null);
-        final SQLOperations sqlOperations = mock(SQLOperations.class);
+        when(clusterService.getClusterSettings()).thenReturn(this.clusterService.getClusterSettings());
+        SQLOperations sqlOperations = mock(SQLOperations.class);
+        Session session = mock(Session.class);
+        when(sqlOperations.createSession(anyString(), any(), any())).thenReturn(session);
 
-        TableStatsService statsService = new TableStatsService(Settings.EMPTY,
-            threadPool,
+        TableStatsService statsService = new TableStatsService(
+            Settings.EMPTY,
+            THREAD_POOL,
             clusterService,
-            TimeValue.timeValueHours(1),
-            new Provider<SQLOperations>() {
-                @Override
-                public SQLOperations get() {
-                    return sqlOperations;
-                }
-            });
+            new TableStats(),
+            sqlOperations
+        );
 
         statsService.run();
-        Mockito.verify(sqlOperations, times(0)).createSession(anyString(), anySetOf(Option.class), anyByte());
+        verify(session, times(0)).sync();
     }
 }

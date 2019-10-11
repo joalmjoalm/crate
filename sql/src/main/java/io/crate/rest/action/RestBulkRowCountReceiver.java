@@ -22,8 +22,8 @@
 package io.crate.rest.action;
 
 import io.crate.action.sql.BaseResultReceiver;
-import io.crate.core.collections.Row;
-import io.crate.exceptions.Exceptions;
+import io.crate.data.Row;
+import io.crate.exceptions.SQLExceptions;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -45,14 +45,14 @@ class RestBulkRowCountReceiver extends BaseResultReceiver {
     }
 
     @Override
-    public void allFinished() {
+    public void allFinished(boolean interrupted) {
         results[resultIdx] = new Result(null, rowCount);
-        super.allFinished();
+        super.allFinished(interrupted);
     }
 
     @Override
     public void fail(@Nonnull Throwable t) {
-        results[resultIdx] = new Result(Exceptions.messageOf(t), rowCount);
+        results[resultIdx] = new Result(SQLExceptions.messageOf(t), rowCount);
         super.fail(t);
     }
 

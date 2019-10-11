@@ -21,47 +21,42 @@
 
 package io.crate.metadata.information;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSortedMap;
-import io.crate.metadata.*;
-import io.crate.types.ArrayType;
-import io.crate.types.DataType;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
+import io.crate.metadata.table.ColumnRegistrar;
+import io.crate.metadata.table.ConstraintInfo;
 
-public class InformationTableConstraintsTableInfo extends InformationTableInfo {
+import java.util.Map;
+
+import static io.crate.execution.engine.collect.NestableCollectExpression.constant;
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.STRING;
+
+public class InformationTableConstraintsTableInfo extends InformationTableInfo<ConstraintInfo> {
 
     public static final String NAME = "table_constraints";
-    public static final TableIdent IDENT = new TableIdent(InformationSchemaInfo.NAME, NAME);
+    public static final RelationName IDENT = new RelationName(InformationSchemaInfo.NAME, NAME);
 
-    public static class Columns {
-        public static final ColumnIdent SCHEMA_NAME = new ColumnIdent("schema_name");
-        public static final ColumnIdent TABLE_NAME = new ColumnIdent("table_name");
-        public static final ColumnIdent CONSTRAINT_NAME = new ColumnIdent("constraint_name");
-        public static final ColumnIdent CONSTRAINT_TYPE = new ColumnIdent("constraint_type");
+    private static ColumnRegistrar<ConstraintInfo> columnRegistrar() {
+        return new ColumnRegistrar<ConstraintInfo>(IDENT, RowGranularity.DOC)
+            .register("constraint_schema", STRING, () -> forFunction(r -> r.relationName().schema()))
+            .register("constraint_name", STRING, () -> forFunction(ConstraintInfo::constraintName))
+            .register("constraint_catalog", STRING, () -> forFunction(r -> r.relationName().schema()))
+            .register("table_catalog", STRING, () -> forFunction(r -> r.relationName().schema()))
+            .register("table_schema", STRING, () -> forFunction(r -> r.relationName().schema()))
+            .register("table_name", STRING, () -> forFunction(r -> r.relationName().name()))
+            .register("constraint_type", STRING, () -> forFunction(r -> r.constraintType().toString()))
+            .register("is_deferrable", STRING, () -> constant("NO"))
+            .register("initially_deferred", STRING, () -> constant("NO"));
     }
 
-    public static class References {
-        public static final Reference SCHEMA_NAME = createRef(Columns.SCHEMA_NAME, DataTypes.STRING);
-        public static final Reference TABLE_NAME = createRef(Columns.TABLE_NAME, DataTypes.STRING);
-        public static final Reference CONSTRAINT_NAME = createRef(Columns.CONSTRAINT_NAME, new ArrayType(DataTypes.STRING));
-        public static final Reference CONSTRAINT_TYPE = createRef(Columns.CONSTRAINT_TYPE, DataTypes.STRING);
+    static Map<ColumnIdent, RowCollectExpressionFactory<ConstraintInfo>> expressions() {
+        return columnRegistrar().expressions();
     }
 
-    private static Reference createRef(ColumnIdent columnIdent, DataType dataType) {
-        return new Reference(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
-    }
-
-    protected InformationTableConstraintsTableInfo(ClusterService clusterService) {
-        super(clusterService,
-            IDENT,
-            ImmutableList.<ColumnIdent>of(),
-            ImmutableSortedMap.<ColumnIdent, Reference>naturalOrder()
-                .put(Columns.SCHEMA_NAME, References.SCHEMA_NAME)
-                .put(Columns.TABLE_NAME, References.TABLE_NAME)
-                .put(Columns.CONSTRAINT_NAME, References.CONSTRAINT_NAME)
-                .put(Columns.CONSTRAINT_TYPE, References.CONSTRAINT_TYPE)
-                .build()
-        );
+    InformationTableConstraintsTableInfo() {
+        super(IDENT, columnRegistrar(), "constraint_catalog", "constraint_schema", "constraint_name");
     }
 }

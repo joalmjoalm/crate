@@ -23,50 +23,43 @@ package io.crate.integrationtests;
 
 import com.google.common.util.concurrent.SettableFuture;
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLRequest;
-import io.crate.action.sql.SQLResponse;
-import io.crate.exceptions.Exceptions;
-import io.crate.plugin.SQLPlugin;
-import io.crate.testing.UseJdbc;
+import io.crate.exceptions.SQLExceptions;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.plugin.CrateTestingPlugin;
 import org.elasticsearch.action.ActionFuture;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.threadpool.ThreadPool;
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import javax.annotation.Nullable;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static com.carrotsearch.randomizedtesting.RandomizedTest.$;
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
 
-@UseJdbc
 public class KillIntegrationTest extends SQLTransportIntegrationTest {
 
     private Setup setup = new Setup(sqlExecutor);
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return pluginList(
-            SQLPlugin.class,
-            CrateTestingPlugin.class
-        );
+        ArrayList<Class<? extends Plugin>> plugins = new ArrayList<>(super.nodePlugins());
+        plugins.add(CrateTestingPlugin.class);
+        return plugins;
     }
 
     @Rule
     public TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-    @Before
-    public void setSetup() {
-        execute("SET GLOBAL stats.enabled = true");
-    }
 
     @Test
     public void testKillInsertFromSubQuery() throws Exception {
@@ -74,11 +67,11 @@ public class KillIntegrationTest extends SQLTransportIntegrationTest {
         execute("create table new_employees (" +
                 " name string, " +
                 " department string," +
-                " hired timestamp, " +
+                " hired timestamp with time zone, " +
                 " age short," +
                 " income double, " +
                 " good boolean" +
-                ") with (number_of_replicas=1)");
+                ") with (number_of_replicas=0)");
         ensureYellow();
         assertGotCancelled("insert into new_employees (select * from employees)", null, true);
         // There could still be running upsert requests after the kill happened, so wait for them
@@ -87,7 +80,7 @@ public class KillIntegrationTest extends SQLTransportIntegrationTest {
 
     private void assertGotCancelled(final String statement, @Nullable final Object[] params, boolean killAll) throws Exception {
         try {
-            ActionFuture<SQLResponse> future = sqlExecutor.execute(new SQLRequest(statement, params));
+            ActionFuture<SQLResponse> future = sqlExecutor.execute(statement, params);
             String jobId = waitForJobEntry(statement);
             if (jobId == null) {
                 // query finished too fast
@@ -101,12 +94,12 @@ public class KillIntegrationTest extends SQLTransportIntegrationTest {
             try {
                 future.get(10, TimeUnit.SECONDS);
             } catch (Throwable exception) {
-                exception = Exceptions.unwrap(exception); // wrapped in ExecutionException
+                exception = SQLExceptions.unwrap(exception); // wrapped in ExecutionException
                 assertThat(exception, instanceOf(SQLActionException.class));
                 assertThat(exception.toString(), anyOf(
                     containsString("Job killed"), // CancellationException
-                    containsString("JobExecutionContext for job"), // ContextMissingException when job execution context not found
-                    containsString("SearchContext for job") // ContextMissingException when search context not found
+                    containsString("RootTask for job"), // TaskMissing when root task not found
+                    containsString("Task for job") // TaskMissing when task not found
                 ));
             }
         } finally {
@@ -121,23 +114,20 @@ public class KillIntegrationTest extends SQLTransportIntegrationTest {
     @Nullable
     private String waitForJobEntry(final String statement) throws Exception {
         final SettableFuture<String> jobIdFuture = SettableFuture.create();
-        assertBusy(new Runnable() {
-            @Override
-            public void run() {
-                SQLResponse logResponse = execute("select * from sys.jobs where stmt = ?", $(statement));
-                if (logResponse.rowCount() == 0) {
-                    logResponse = execute("select * from sys.jobs_log where stmt = ?", $(statement));
-                    if (logResponse.rowCount() > 0L) {
-                        // query finished before jobId could be retrieved
-                        // finishing without killing - test will pass which is okay because it is not deterministic by design
-                        jobIdFuture.set(null);
-                        return;
-                    }
+        assertBusy(() -> {
+            SQLResponse logResponse = execute("select * from sys.jobs where stmt = ?", $(statement));
+            if (logResponse.rowCount() == 0) {
+                logResponse = execute("select * from sys.jobs_log where stmt = ?", $(statement));
+                if (logResponse.rowCount() > 0L) {
+                    // query finished before jobId could be retrieved
+                    // finishing without killing - test will pass which is okay because it is not deterministic by design
+                    jobIdFuture.set(null);
+                    return;
                 }
-                assertThat(logResponse.rowCount(), greaterThan(0L));
-                String jobId = logResponse.rows()[0][0].toString();
-                jobIdFuture.set(jobId);
             }
+            assertThat(logResponse.rowCount(), greaterThan(0L));
+            String jobId = logResponse.rows()[0][0].toString();
+            jobIdFuture.set(jobId);
         });
         return jobIdFuture.get(10, TimeUnit.SECONDS);
     }
@@ -189,12 +179,6 @@ public class KillIntegrationTest extends SQLTransportIntegrationTest {
         assertThat(killResponse.rowCount(), is(0L));
         SQLResponse logResponse = execute("select * from sys.jobs_log where error = ?", new Object[]{"KILLED"});
         assertThat(logResponse.rowCount(), is(0L));
-    }
-
-    @After
-    public void tearDown() throws Exception {
-        super.tearDown();
-        execute("reset GLOBAL stats.enabled");
     }
 
 }

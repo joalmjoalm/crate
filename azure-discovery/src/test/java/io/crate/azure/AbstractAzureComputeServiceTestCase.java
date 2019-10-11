@@ -24,32 +24,29 @@ package io.crate.azure;
 
 import io.crate.azure.management.AzureComputeService.Discovery;
 import io.crate.azure.management.AzureComputeService.Management;
-import org.elasticsearch.action.admin.cluster.node.info.NodesInfoResponse;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.discovery.DiscoveryModule;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.hamcrest.Matchers;
 
 
 public abstract class AbstractAzureComputeServiceTestCase extends ESIntegTestCase {
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        Settings.Builder builder = Settings.settingsBuilder()
+        Settings.Builder builder = Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
-            .put("node.mode", "network")
-            .put("discovery.type", "azure")
-            .put(Management.SUBSCRIPTION_ID, "fake")
-            .put(Discovery.REFRESH, "5s")
-            .put(Management.APP_ID, "dummy")
-            .put(Management.TENANT_ID, "dummy")
-            .put(Management.APP_SECRET, "dummy")
-            .put(Management.RESOURCE_GROUP_NAME, "dummy");
+            .put(DiscoveryModule.DISCOVERY_SEED_PROVIDERS_SETTING.getKey(), "azure")
+            .put(Management.SUBSCRIPTION_ID.getKey(), "fake")
+            .put(Discovery.REFRESH.getKey(), "5s")
+            .put(Management.APP_ID.getKey(), "dummy")
+            .put(Management.TENANT_ID.getKey(), "dummy")
+            .put(Management.APP_SECRET.getKey(), "dummy")
+            .put(Management.RESOURCE_GROUP_NAME.getKey(), "dummy");
         return builder.build();
     }
 
-    protected void checkNumberOfNodes(int expected) {
-        NodesInfoResponse nodeInfos = client().admin().cluster().prepareNodesInfo().execute().actionGet();
-        assertNotNull(nodeInfos);
-        assertNotNull(nodeInfos.getNodes());
-        assertEquals(expected, nodeInfos.getNodes().length);
+    void checkNumberOfNodes(int expected) {
+        assertThat(internalCluster().clusterService().state().nodes().getSize(), Matchers.is(expected));
     }
 }

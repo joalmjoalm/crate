@@ -21,9 +21,12 @@
 
 package io.crate.analyze.validator;
 
-import io.crate.analyze.symbol.*;
-import io.crate.analyze.symbol.format.SymbolPrinter;
-import io.crate.metadata.FunctionInfo;
+import io.crate.expression.symbol.Field;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.MatchPredicate;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolVisitor;
+import io.crate.expression.symbol.format.SymbolPrinter;
 import io.crate.types.DataTypes;
 
 import java.util.Locale;
@@ -35,16 +38,29 @@ import java.util.Locale;
  */
 public class SemanticSortValidator {
 
-    private final static InnerValidator INNER_VALIDATOR = new InnerValidator();
+    private static final InnerValidator INNER_VALIDATOR = new InnerValidator();
 
     public static void validate(Symbol symbol) throws UnsupportedOperationException {
-        INNER_VALIDATOR.process(symbol, new SortContext());
+        symbol.accept(INNER_VALIDATOR, new SortContext("ORDER BY"));
+    }
+
+    /**
+     * @param symbol
+     * @param operation there are operations other than the `ORDER BY` that will translate into a sorting operation.
+     *                  this represents the name of these possible operations and will be used to customise the error
+     *                  reporting message.
+     * @throws UnsupportedOperationException
+     */
+    public static void validate(Symbol symbol, String operation) throws UnsupportedOperationException {
+        symbol.accept(INNER_VALIDATOR, new SortContext(operation));
     }
 
     static class SortContext {
+        private final String operation;
         private boolean inFunction;
 
-        public SortContext() {
+        SortContext(String operation) {
+            this.operation = operation;
             this.inFunction = false;
         }
     }
@@ -56,19 +72,16 @@ public class SemanticSortValidator {
             if (!context.inFunction && !DataTypes.PRIMITIVE_TYPES.contains(symbol.valueType())) {
                 throw new UnsupportedOperationException(
                     String.format(Locale.ENGLISH,
-                        "Cannot ORDER BY '%s': invalid return type '%s'.",
-                        SymbolPrinter.INSTANCE.printSimple(symbol),
-                        symbol.valueType())
+                                  "Cannot %s '%s': invalid return type '%s'.",
+                                  context.operation,
+                                  SymbolPrinter.INSTANCE.printUnqualified(symbol),
+                                  symbol.valueType())
                 );
-            }
-            if (symbol.info().type() == FunctionInfo.Type.PREDICATE) {
-                throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
-                    "%s predicate cannot be used in an ORDER BY clause", symbol.info().ident().name()));
             }
             try {
                 context.inFunction = true;
                 for (Symbol arg : symbol.arguments()) {
-                    process(arg, context);
+                    arg.accept(this, context);
                 }
             } finally {
                 context.inFunction = false;
@@ -78,7 +91,9 @@ public class SemanticSortValidator {
 
         public Void visitMatchPredicate(MatchPredicate matchPredicate, SortContext context) {
             throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
-                "%s predicate cannot be used in an ORDER BY clause", io.crate.operation.predicate.MatchPredicate.NAME));
+                                                                  "%s predicate cannot be used in an %s clause",
+                                                                  io.crate.expression.predicate.MatchPredicate.NAME,
+                                                                  context.operation));
         }
 
         @Override
@@ -88,9 +103,10 @@ public class SemanticSortValidator {
             if (!context.inFunction && !DataTypes.PRIMITIVE_TYPES.contains(field.valueType())) {
                 throw new UnsupportedOperationException(
                     String.format(Locale.ENGLISH,
-                        "Cannot ORDER BY '%s': invalid data type '%s'.",
-                        SymbolPrinter.INSTANCE.printSimple(field),
-                        field.valueType())
+                                  "Cannot %s '%s': invalid data type '%s'.",
+                                  context.operation,
+                                  SymbolPrinter.INSTANCE.printUnqualified(field),
+                                  field.valueType())
                 );
             }
             return null;

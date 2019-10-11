@@ -22,13 +22,24 @@
 
 package io.crate.plugin;
 
-import io.crate.discovery.SrvDiscovery;
 import io.crate.discovery.SrvUnicastHostsProvider;
+import org.elasticsearch.common.network.NetworkService;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.discovery.DiscoveryModule;
+import org.elasticsearch.discovery.SeedHostsProvider;
+import org.elasticsearch.plugins.DiscoveryPlugin;
 import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.transport.TransportService;
 
-public class SrvPlugin extends Plugin {
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
+
+public class SrvPlugin extends Plugin implements DiscoveryPlugin {
+
+    private static final String DISCOVERY_NAME = "srv";
 
     private final Settings settings;
 
@@ -37,24 +48,18 @@ public class SrvPlugin extends Plugin {
     }
 
     @Override
-    public String name() {
-        return "discovery-srv";
+    public List<Setting<?>> getSettings() {
+        return Arrays.asList(
+            SrvUnicastHostsProvider.DISCOVERY_SRV_QUERY,
+            SrvUnicastHostsProvider.DISCOVERY_SRV_RESOLVER
+        );
     }
 
     @Override
-    public String description() {
-        return "DNS srv discovery";
+    public Map<String, Supplier<SeedHostsProvider>> getSeedHostProviders(TransportService transportService,
+                                                                         NetworkService networkService) {
+        return Collections.singletonMap(DISCOVERY_NAME, () -> new SrvUnicastHostsProvider(settings, transportService));
     }
 
 
-    public void onModule(DiscoveryModule discoveryModule) {
-        /**
-         * Different types of discovery modules can be defined on startup using the `discovery.type` setting.
-         * This SrvDiscoveryModule can be loaded using `-Des.discovery.type=srv`
-         */
-        if ("srv".equals(settings.get("discovery.type"))) {
-            discoveryModule.addDiscoveryType(SrvDiscovery.SRV, SrvDiscovery.class);
-            discoveryModule.addUnicastHostProvider(SrvUnicastHostsProvider.class);
-        }
-    }
 }

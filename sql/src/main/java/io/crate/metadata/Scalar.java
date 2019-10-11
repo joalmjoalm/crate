@@ -21,43 +21,76 @@
 
 package io.crate.metadata;
 
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.operation.Input;
+import io.crate.data.Input;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.format.OperatorFormatSpec;
 
-import javax.annotation.Nullable;
 import java.util.Collection;
 import java.util.List;
 
 /**
- * evaluable function implementation
+ * Base class for Scalar functions in crate.
+ * A Scalar function is a function which has zero or more arguments and returns a value. (not rows).
+ * <p>
+ * Argument types and return types are restricted to the types supported by Crate (see {@link io.crate.types.DataType})
+ * </p>
+ *
+ * <p>
+ *     Usually functions are registered as deterministic (See {@link io.crate.metadata.FunctionInfo.Feature}.
+ *     If this is the case the function must be a pure function. Meaning that given the same input it must always produce
+ *     the same output.
+ *
+ *     Functions also MUST NOT have any internal state that influences the result of future calls.
+ *     Functions are used as singletons.
+ *     An exception is if {@link #compile(List)} returns a NEW instance.
+ * </p>
+ *
+ * To implement scalar functions, you may want to use one of the following abstractions:
+ *
+ * <ul>
+ *     <li>{@link io.crate.expression.scalar.UnaryScalar}</li>
+ *     <li>{@link io.crate.expression.scalar.arithmetic.BinaryScalar}</li>
+ *     <li>{@link io.crate.expression.scalar.DoubleScalar}</li>
+ *     <li>{@link io.crate.expression.scalar.TripleScalar}</li>
+ * </ul>
  *
  * @param <ReturnType> the class of the returned value
  */
-public abstract class Scalar<ReturnType, InputType> implements FunctionImplementation<Function> {
+public abstract class Scalar<ReturnType, InputType> implements FunctionImplementation {
 
-    private static final Predicate<Symbol> NULL_LITERAL = new Predicate<Symbol>() {
-        @Override
-        public boolean apply(@Nullable Symbol input) {
-            return input instanceof Input && ((Input) input).value() == null;
-        }
-    };
+    public static <R, I> Scalar<R, I> withOperator(Scalar<R, I> func, String operator) {
+        return new OperatorScalar<>(func, operator);
+    }
 
-    public abstract ReturnType evaluate(Input<InputType>... args);
 
     /**
-     * Returns a optional compiled version of the scalar implementation.
+     * Evaluate the function using the provided arguments
+     */
+    public abstract ReturnType evaluate(TransactionContext txnCtx, Input<InputType>... args);
+
+    /**
+     * Called to return a "optimized" version of a scalar implementation.
+     *
+     * The returned instance will only be used in the context of a single query
+     * (or rather, a subset of a single query if executed distributed).
+     *
+     * @param arguments arguments in symbol form. If any symbols are literals, any arguments passed to
+     *                  {@link #evaluate(TransactionContext, Input[])} will have the same value as those literals.
+     *                  (Within the scope of a single operation)
      */
     public Scalar<ReturnType, InputType> compile(List<Symbol> arguments) {
         return this;
     }
 
     @Override
-    public Symbol normalizeSymbol(Function symbol, StmtCtx stmtCtx) {
-        return evaluateIfLiterals(this, symbol);
+    public Symbol normalizeSymbol(Function symbol, TransactionContext txnCtx) {
+        try {
+            return evaluateIfLiterals(this, txnCtx, symbol);
+        } catch (Throwable t) {
+            return symbol;
+        }
     }
 
     protected static boolean anyNonLiterals(Collection<? extends Symbol> arguments) {
@@ -69,36 +102,51 @@ public abstract class Scalar<ReturnType, InputType> implements FunctionImplement
         return false;
     }
 
-    protected static boolean hasNullInputs(Input[] args) {
-        for (Input arg : args) {
-            if (arg.value() == null) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    protected static boolean containsNullLiteral(Collection<Symbol> symbols) {
-        return Iterables.any(symbols, NULL_LITERAL);
-    }
-
     /**
      * This method will evaluate the function using the given scalar if all arguments are literals.
      * Otherwise it will return the function as is or NULL in case it contains a null literal
      */
-    private static <ReturnType, InputType> Symbol evaluateIfLiterals(Scalar<ReturnType, InputType> scalar, Function function) {
-        Input[] inputs = new Input[function.arguments().size()];
-        int idx = 0;
-        for (Symbol arg : function.arguments()) {
-            if (arg instanceof Input) {
-                Input inputArg = (Input) arg;
-                inputs[idx] = inputArg;
-                idx++;
-            } else {
+    protected static <ReturnType, InputType> Symbol evaluateIfLiterals(Scalar<ReturnType, InputType> scalar,
+                                                                       TransactionContext txnCtx,
+                                                                       Function function) {
+        List<Symbol> arguments = function.arguments();
+        for (Symbol argument : arguments) {
+            if (!(argument instanceof Input)) {
                 return function;
             }
         }
+        Input[] inputs = new Input[arguments.size()];
+        int idx = 0;
+        for (Symbol arg : arguments) {
+            inputs[idx] = (Input) arg;
+            idx++;
+        }
         //noinspection unchecked
-        return Literal.of(function.info().returnType(), scalar.evaluate(inputs));
+        return Literal.of(function.info().returnType(), scalar.evaluate(txnCtx, inputs));
+    }
+
+    public static class OperatorScalar<R, I> extends Scalar<R, I> implements OperatorFormatSpec {
+        private final Scalar<R, I> func;
+        private final String operator;
+
+        OperatorScalar(Scalar<R, I> func, String operator) {
+            this.func = func;
+            this.operator = operator;
+        }
+
+        @Override
+        public FunctionInfo info() {
+            return func.info();
+        }
+
+        @Override
+        public R evaluate(TransactionContext txnCtx, Input<I>... args) {
+            return func.evaluate(txnCtx, args);
+        }
+
+        @Override
+        public String operator(Function function) {
+            return operator;
+        }
     }
 }

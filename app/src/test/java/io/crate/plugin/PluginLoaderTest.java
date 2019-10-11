@@ -22,12 +22,14 @@
 
 package io.crate.plugin;
 
+import io.crate.metadata.FunctionIdent;
+import io.crate.metadata.FunctionInfo;
+import io.crate.metadata.Functions;
 import io.crate.test.CauseMatcher;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.collect.Tuple;
+import io.crate.types.DataTypes;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.plugins.PluginInfo;
 import org.elasticsearch.plugins.PluginsService;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Rule;
@@ -37,11 +39,12 @@ import org.junit.rules.ExpectedException;
 import java.io.File;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 import static org.elasticsearch.client.Requests.clusterHealthRequest;
-import static org.elasticsearch.common.settings.Settings.settingsBuilder;
 import static org.hamcrest.Matchers.is;
 
 @ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST, numDataNodes = 0, numClientNodes = 0)
@@ -52,7 +55,7 @@ public class PluginLoaderTest extends ESIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return pluginList(PluginLoaderPlugin.class);
+        return Arrays.asList(PluginLoaderPlugin.class, HttpTransportPlugin.class);
     }
 
     @Test
@@ -60,7 +63,7 @@ public class PluginLoaderTest extends ESIntegTestCase {
         String node = startNodeWithPlugins("/io/crate/plugin/simple_plugin");
 
         PluginsService pluginsService = internalCluster().getInstance(PluginsService.class, node);
-        PluginLoaderPlugin corePlugin = getCratePlugin(pluginsService.plugins());
+        PluginLoaderPlugin corePlugin = getCratePlugin(pluginsService);
 
         PluginLoader pluginLoader = corePlugin.pluginLoader;
         assertThat(pluginLoader.plugins.size(), is(1));
@@ -72,10 +75,32 @@ public class PluginLoaderTest extends ESIntegTestCase {
         String node = startNodeWithPlugins("/io/crate/plugin/plugin_with_crate_settings");
 
         PluginsService pluginsService = internalCluster().getInstance(PluginsService.class, node);
-        PluginLoaderPlugin corePlugin = getCratePlugin(pluginsService.plugins());
+        PluginLoaderPlugin corePlugin = getCratePlugin(pluginsService);
         Settings settings = corePlugin.settings;
 
         assertThat(settings.get("setting.for.crate"), is("foo"));
+    }
+
+    @Test
+    public void testLoadPluginRegisteringScalarFunction() throws Exception {
+        String node = startNodeWithPlugins("/io/crate/plugin/simple_plugin_registering_scalar_function");
+
+        PluginsService pluginsService = internalCluster().getInstance(PluginsService.class, node);
+        PluginLoaderPlugin corePlugin = getCratePlugin(pluginsService);
+
+        PluginLoader pluginLoader = corePlugin.pluginLoader;
+        assertThat(pluginLoader.plugins.size(), is(1));
+        assertThat(pluginLoader.plugins.get(0).getClass().getCanonicalName(), is("io.crate.plugin.ExamplePlugin"));
+
+        Functions functions = internalCluster().getInstance(Functions.class);
+        FunctionIdent isEven = new FunctionIdent("is_even", Collections.singletonList(DataTypes.LONG));
+        assertThat(functions.getQualified(isEven).info(),
+                   is(new FunctionInfo( isEven, DataTypes.BOOLEAN)));
+
+        // Also check that the built-in functions are not lost
+        FunctionIdent abs = new FunctionIdent("abs", Collections.singletonList(DataTypes.LONG));
+        assertThat(functions.getQualified(abs).info(),
+                   is(new FunctionInfo(abs, DataTypes.LONG)));
     }
 
     @Test
@@ -102,23 +127,22 @@ public class PluginLoaderTest extends ESIntegTestCase {
 
     private static String startNodeWithPlugins(String pluginDir) throws URISyntaxException {
         URL resource = PluginLoaderTest.class.getResource(pluginDir);
-        Settings.Builder settings = settingsBuilder();
+        Settings.Builder settings = Settings.builder();
         if (resource != null) {
-            settings.put("path.crate_plugins", new File(resource.toURI()).getAbsolutePath());
+            settings.put(PluginLoader.SETTING_CRATE_PLUGINS_PATH.getKey(), new File(resource.toURI()).getAbsolutePath());
         }
         String nodeName = internalCluster().startNode(settings);
         // We wait for a Green status
         client().admin().cluster().health(clusterHealthRequest().waitForGreenStatus()).actionGet();
-        return internalCluster().getInstance(ClusterService.class, nodeName).state().nodes().localNode().name();
+        return internalCluster().getInstance(ClusterService.class, nodeName).state().nodes().getLocalNode().getName();
     }
 
-    private PluginLoaderPlugin getCratePlugin(List<Tuple<PluginInfo, Plugin>> pluginsService) {
-        // there are now a couple of Mock*Plugins loaded in Tests as well.. find the CrateCorePlugin
-        for (Tuple<PluginInfo, Plugin> pluginInfoPluginTuple : pluginsService) {
-            if (pluginInfoPluginTuple.v2() instanceof PluginLoaderPlugin) {
-                return ((PluginLoaderPlugin) pluginInfoPluginTuple.v2());
-            }
+    private PluginLoaderPlugin getCratePlugin(PluginsService pluginsService) {
+        // find the PluginLoaderPlugin, should be the only one loaded
+        List<PluginLoaderPlugin> pluginLoaderPlugins = pluginsService.filterPlugins(PluginLoaderPlugin.class);
+        if (pluginLoaderPlugins.isEmpty()) {
+            throw new IllegalStateException("Couldn't find PluginLoaderPlugin");
         }
-        throw new IllegalStateException("Couldn't find CrateCorePlugin");
+        return pluginLoaderPlugins.get(0);
     }
 }

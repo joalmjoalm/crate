@@ -23,76 +23,94 @@ package io.crate.integrationtests;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import io.crate.action.sql.SQLAction;
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLRequest;
+import io.crate.metadata.IndexMappings;
+import io.crate.metadata.PartitionName;
+import io.crate.metadata.RelationName;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.UseRandomizedSchema;
+import org.elasticsearch.Version;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
+import org.junit.After;
 import org.junit.Test;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-import static org.hamcrest.Matchers.*;
-
+import static io.crate.testing.TestingHelpers.printedTable;
+import static org.hamcrest.Matchers.arrayContaining;
+import static org.hamcrest.Matchers.is;
 
 @ESIntegTestCase.ClusterScope(numDataNodes = 2)
-@UseJdbc
 public class InformationSchemaTest extends SQLTransportIntegrationTest {
 
-    final static Joiner commaJoiner = Joiner.on(", ");
-
-    private void serviceSetup() {
-        execute("create table t1 (col1 integer primary key, " +
-                "col2 string) clustered into 7 " +
-                "shards");
-        execute("create table t2 (col1 integer primary key, " +
-                "col2 string) clustered into " +
-                "10 shards");
-        execute(
-            "create table t3 (col1 integer, col2 string) clustered into 5 shards with (number_of_replicas=8)");
-        ensureYellow();
+    @After
+    public void dropLeftoverViews() {
+        execute("SELECT table_schema, table_name FROM information_schema.tables WHERE table_type = 'VIEW'");
+        for (Object[] row : response.rows()) {
+            logger.info("DROP VIEW {}.{}", row[0], row[1]);
+            execute("DROP VIEW " + String.format("\"%s\".\"%s\"", row[0], row[1]));
+        }
     }
 
     @Test
-    public void testDefaultTables() throws Exception {
-        execute("select * from information_schema.tables order by schema_name, table_name");
-        assertEquals(20L, response.rowCount());
+    public void testDefaultTables() {
+        execute("select * from information_schema.tables order by table_schema, table_name");
+        assertEquals(36L, response.rowCount());
 
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "NULL| NULL| strict| 0| 1| NULL| information_schema| NULL| columns\n" +
-            "NULL| NULL| strict| 0| 1| NULL| information_schema| NULL| routines\n" +
-            "NULL| NULL| strict| 0| 1| NULL| information_schema| NULL| schemata\n" +
-            "NULL| NULL| strict| 0| 1| NULL| information_schema| NULL| sql_features\n" +
-            "NULL| NULL| strict| 0| 1| NULL| information_schema| NULL| table_constraints\n" +
-            "NULL| NULL| strict| 0| 1| NULL| information_schema| NULL| table_partitions\n" +
-            "NULL| NULL| strict| 0| 1| NULL| information_schema| NULL| tables\n" +
-            "NULL| NULL| strict| 0| 1| NULL| pg_catalog| NULL| pg_type\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| checks\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| cluster\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| jobs\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| jobs_log\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| node_checks\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| nodes\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| operations\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| operations_log\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| repositories\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| shards\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| snapshots\n" +
-            "NULL| NULL| strict| 0| 1| NULL| sys| NULL| summits\n"));
+        assertThat(printedTable(response.rows()), is(
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| columns| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| key_column_usage| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| referential_constraints| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| routines| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| schemata| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| sql_features| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| table_constraints| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| table_partitions| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| tables| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| information_schema| views| information_schema| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_attrdef| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_attribute| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_class| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_constraint| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_database| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_description| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_index| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_namespace| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_settings| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| pg_catalog| pg_type| pg_catalog| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| allocations| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| checks| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| cluster| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| health| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| jobs| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| jobs_log| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| jobs_metrics| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| node_checks| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| nodes| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| operations| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| operations_log| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| repositories| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| segments| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| shards| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| snapshots| sys| BASE TABLE| NULL\n" +
+            "NULL| NULL| NULL| strict| NULL| NULL| NULL| SYSTEM GENERATED| NULL| NULL| NULL| sys| summits| sys| BASE TABLE| NULL\n")
+        );
     }
 
     @Test
-    public void testSelectFromInformationSchema() throws Exception {
+    public void testSelectFromInformationSchema() {
         execute("create table quotes (" +
                 "id integer primary key, " +
                 "quote string index off, " +
+                "__quote_info int, " +
                 "index quote_fulltext using fulltext(quote) with (analyzer='snowball')" +
-                ") clustered by (id) into 3 shards with (number_of_replicas=10)");
+                ") clustered by (id) into 3 shards with (number_of_replicas=0)");
 
         execute("select table_name, number_of_shards, number_of_replicas, clustered_by from " +
                 "information_schema.tables " +
@@ -100,121 +118,216 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         assertEquals(1L, response.rowCount());
         assertEquals("quotes", response.rows()[0][0]);
         assertEquals(3, response.rows()[0][1]);
-        assertEquals("10", response.rows()[0][2]);
+        assertEquals("0", response.rows()[0][2]);
         assertEquals("id", response.rows()[0][3]);
 
         execute("select * from information_schema.columns where table_name='quotes'");
-        assertEquals(2L, response.rowCount());
+        assertEquals(3L, response.rowCount());
 
+        execute("select * from information_schema.table_constraints where table_schema = ? and table_name='quotes'",
+            new Object[]{sqlExecutor.getCurrentSchema()});
+        assertEquals(1L, response.rowCount());
 
-        execute("select * from information_schema.table_constraints where schema_name='doc' and table_name='quotes'");
+        execute("select table_name from information_schema.columns where table_schema = ? and table_name='quotes' " +
+                "and column_name='__quote_info'", new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(1L, response.rowCount());
 
         execute("select * from information_schema.routines");
-        assertEquals(118L, response.rowCount());
+        assertEquals(125L, response.rowCount());
     }
 
     @Test
-    public void testSearchInformationSchemaTablesRefresh() throws Exception {
-        serviceSetup();
+    @UseRandomizedSchema(random = false)
+    public void testSelectViewsFromInformationSchema() {
+        execute("CREATE TABLE t1 (id INTEGER, name STRING) CLUSTERED INTO 2 SHARDS WITH (number_of_replicas=1)");
+        execute("CREATE VIEW t1_view1 AS SELECT * FROM t1 WHERE name = 'foo'");
+        execute("CREATE VIEW t1_view2 AS SELECT id FROM t1 WHERE name = 'foo'");
 
-        execute("select * from information_schema.tables");
-        assertEquals(23L, response.rowCount());
+        // SELECT information_schema.tables
+        execute("SELECT table_type, table_name, number_of_shards, number_of_replicas " +
+                "FROM information_schema.tables " +
+                "WHERE table_name LIKE 't1%' " +
+                "ORDER BY 1, 2");
+        assertThat(printedTable(response.rows()), is("BASE TABLE| t1| 2| 1\n" +
+                                                                    "VIEW| t1_view1| NULL| NULL\n" +
+                                                                    "VIEW| t1_view2| NULL| NULL\n"));
 
-        client().execute(SQLAction.INSTANCE,
-            new SQLRequest("create table t4 (col1 integer, col2 string) with (number_of_replicas=0)")).actionGet();
-        ensureGreen("t4");
+        // SELECT information_schema.views
+        execute("SELECT table_name, view_definition " +
+                "FROM information_schema.views " +
+                "WHERE table_name LIKE 't1%' " +
+                "ORDER BY 1, 2");
+        Object[][] rows = response.rows();
+        assertThat(rows[0][0], is("t1_view1"));
+        assertThat(rows[0][1],
+            is("SELECT *\n" +
+               "FROM \"t1\"\n" +
+               "WHERE \"name\" = 'foo'\n"));
+        assertThat(rows[1][0], is("t1_view2"));
+        assertThat(rows[1][1],
+            is("SELECT \"id\"\n" +
+               "FROM \"t1\"\n" +
+               "WHERE \"name\" = 'foo'\n"));
 
-        execute("select * from information_schema.tables");
-        assertEquals(24L, response.rowCount());
+        // SELECT information_schema.columns
+        execute("SELECT table_name, column_name " +
+                "FROM information_schema.columns " +
+                "WHERE table_name LIKE 't1%' " +
+                "ORDER BY 1, 2");
+        assertThat(printedTable(response.rows()), is("t1| id\n" +
+                                                                    "t1| name\n" +
+                                                                    "t1_view1| id\n" +
+                                                                    "t1_view1| name\n" +
+                                                                    "t1_view2| id\n"));
+
+        // After dropping the target table of the view, the view still shows up in information_schema.tables and
+        // information_schema.views,  but not in information_schema.columns, because the SELECT statement could not be
+        // analyzed.
+        execute("DROP TABLE t1");
+
+        execute("SELECT table_name, view_definition " +
+                "FROM information_schema.views " +
+                "WHERE table_name LIKE 't1%' " +
+                "ORDER BY 1, 2");
+        assertThat(rows[0][0], is("t1_view1"));
+        assertThat(rows[0][1],
+            is("SELECT *\n" +
+               "FROM \"t1\"\n" +
+               "WHERE \"name\" = 'foo'\n"));
+        assertThat(rows[1][0], is("t1_view2"));
+        assertThat(rows[1][1],
+            is("SELECT \"id\"\n" +
+               "FROM \"t1\"\n" +
+               "WHERE \"name\" = 'foo'\n"));
+
+        execute("SELECT table_name, column_name " +
+                "FROM information_schema.columns " +
+                "WHERE table_name LIKE 't1%' " +
+                "ORDER BY 1, 2");
+        assertThat(printedTable(response.rows()), is(""));
+
+        // Clean up metadata that does not show up in information_schema any more
+        execute("DROP VIEW t1_view1, t1_view2");
     }
 
     @Test
-    public void testSelectStarFromInformationSchemaTableWithOrderBy() throws Exception {
+    public void testSearchInformationSchemaTablesRefresh() {
+        execute("select * from information_schema.tables");
+        assertEquals(36L, response.rowCount());
+
+        execute("create table t4 (col1 integer, col2 string) with(number_of_replicas=0)");
+        ensureYellow(getFqn("t4"));
+
+        execute("select * from information_schema.tables");
+        assertEquals(37L, response.rowCount());
+    }
+
+    @Test
+    public void testSelectStarFromInformationSchemaTableWithOrderBy() {
+        String defaultSchema = sqlExecutor.getCurrentSchema();
         execute("create table test (col1 integer primary key, col2 string) clustered into 5 shards");
         execute("create table foo (col1 integer primary key, " +
                 "col2 string) clustered by(col1) into 3 shards");
         ensureGreen();
-        execute("select * from INFORMATION_SCHEMA.Tables where schema_name='doc' order by table_name asc");
-        assertEquals(2L, response.rowCount());
-        assertEquals("doc", response.rows()[0][6]);
-        assertEquals("foo", response.rows()[0][8]);
-        assertEquals(3, response.rows()[0][4]); //
-        assertEquals("1", response.rows()[0][3]);
-        assertEquals("col1", response.rows()[0][1]);
+        execute("select * from INFORMATION_SCHEMA.Tables where table_schema = ? order by table_name asc",
+            new Object[]{defaultSchema});
+        assertThat(response.rowCount(), is(2L));
 
-        assertEquals("doc", response.rows()[1][6]);
-        assertEquals("test", response.rows()[1][8]);
-        assertEquals(5, response.rows()[1][4]);
-        assertEquals("1", response.rows()[1][3]);
-        assertEquals("col1", response.rows()[1][1]);
+        TestingHelpers.assertCrateVersion(response.rows()[0][15], Version.CURRENT, null);
+        assertThat(response.rows()[0][13], is(defaultSchema));
+        assertThat(response.rows()[0][12], is("foo"));
+        assertThat(response.rows()[0][11], is(defaultSchema));
+        assertThat(response.rows()[0][14], is("BASE TABLE"));
+        assertThat(response.rows()[0][8], is(IndexMappings.DEFAULT_ROUTING_HASH_FUNCTION_PRETTY_NAME));
+        assertThat(response.rows()[0][5], is(3));
+        assertThat(response.rows()[0][4], is("0-1"));
+        assertThat(response.rows()[0][2], is("col1"));
+        assertThat(response.rows()[0][1], is(false));
+
+        TestingHelpers.assertCrateVersion(response.rows()[0][15], Version.CURRENT, null);
+        assertThat(response.rows()[1][13], is(defaultSchema));
+        assertThat(response.rows()[1][12], is("test"));
+        assertThat(response.rows()[1][11], is(defaultSchema));
+        assertThat(response.rows()[1][14], is("BASE TABLE"));
+        assertThat(response.rows()[1][8], is(IndexMappings.DEFAULT_ROUTING_HASH_FUNCTION_PRETTY_NAME));
+        assertThat(response.rows()[1][5], is(5));
+        assertThat(response.rows()[1][4], is("0-1"));
+        assertThat(response.rows()[1][2], is("col1"));
+        assertThat(response.rows()[0][1], is(false));
     }
 
     @Test
-    public void testSelectStarFromInformationSchemaTableWithOrderByAndLimit() throws Exception {
+    public void testSelectStarFromInformationSchemaTableWithOrderByAndLimit() {
         execute("create table test (col1 integer primary key, col2 string)");
         execute("create table foo (col1 integer primary key, col2 string) clustered into 3 shards");
         ensureGreen();
-        execute("select schema_name, table_name, number_of_shards, number_of_replicas " +
-                "from INFORMATION_SCHEMA.Tables where schema_name='doc' " +
-                "order by table_name asc limit 1");
+        execute("select table_schema, table_name, number_of_shards, number_of_replicas " +
+                "from INFORMATION_SCHEMA.Tables where table_schema = ? " +
+                "order by table_name asc limit 1", new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(1L, response.rowCount());
-        assertEquals("doc", response.rows()[0][0]);
+        assertEquals(sqlExecutor.getCurrentSchema(), response.rows()[0][0]);
         assertEquals("foo", response.rows()[0][1]);
         assertEquals(3, response.rows()[0][2]);
-        assertEquals("1", response.rows()[0][3]);
+        assertEquals("0-1", response.rows()[0][3]);
     }
 
     @Test
-    public void testSelectStarFromInformationSchemaTableWithOrderByTwoColumnsAndLimit() throws Exception {
+    public void testSelectStarFromInformationSchemaTableWithOrderByTwoColumnsAndLimit() {
         execute("create table test (col1 integer primary key, col2 string) clustered into 1 shards");
         execute("create table foo (col1 integer primary key, col2 string) clustered into 3 shards");
         execute("create table bar (col1 integer primary key, col2 string) clustered into 3 shards");
         ensureGreen();
-        execute("select table_name, number_of_shards from INFORMATION_SCHEMA.Tables where schema_name='doc' " +
-                "order by number_of_shards desc, table_name asc limit 2");
+        execute("select table_name, number_of_shards from INFORMATION_SCHEMA.Tables where table_schema = ? " +
+                "order by number_of_shards desc, table_name asc limit 2", new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(2L, response.rowCount());
 
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
+        assertThat(printedTable(response.rows()), is(
             "bar| 3\n" +
             "foo| 3\n"));
     }
 
     @Test
-    public void testSelectStarFromInformationSchemaTableWithOrderByAndLimitOffset() throws Exception {
+    public void testSelectStarFromInformationSchemaTableWithOrderByAndLimitOffset() {
+        String defaultSchema = sqlExecutor.getCurrentSchema();
         execute("create table test (col1 integer primary key, col2 string) clustered into 5 shards");
         execute("create table foo (col1 integer primary key, col2 string) clustered into 3 shards");
         ensureGreen();
-        execute("select * from INFORMATION_SCHEMA.Tables where schema_name='doc' order by table_name asc limit 1 offset 1");
-        assertEquals(1L, response.rowCount());
+        execute("select * from INFORMATION_SCHEMA.Tables where table_schema = ? order by table_name asc limit 1 offset 1", new Object[]{defaultSchema});
+        assertThat(response.rowCount(), is(1L));
 
-        assertEquals("doc", response.rows()[0][6]); // schema_name
-        assertEquals("test", response.rows()[0][8]); // table_name
-        assertEquals(5, response.rows()[0][4]); // number_of_shards
-        assertEquals("1", response.rows()[0][3]); // number_of_replicas
-        assertEquals("col1", response.rows()[0][1]); // primary key
+        TestingHelpers.assertCrateVersion(response.rows()[0][15], Version.CURRENT, null); // version
+        assertThat(response.rows()[0][13], is(defaultSchema)); // table_schema
+        assertThat(response.rows()[0][12], is("test"));  // table_name
+        assertThat(response.rows()[0][11], is(defaultSchema)); // table_catalog
+        assertThat(response.rows()[0][14], is("BASE TABLE")); // table_type
+        assertThat(response.rows()[0][8], is(IndexMappings.DEFAULT_ROUTING_HASH_FUNCTION_PRETTY_NAME)); // routing_hash_function
+        assertThat(response.rows()[0][5], is(5)); // number_of_shards
+        assertThat(response.rows()[0][4], is("0-1")); // number_of_replicas
+        assertThat(response.rows()[0][2], is("col1")); // primary key
+        assertThat(response.rows()[0][1], is(false)); // closed
     }
 
     @Test
-    public void testSelectFromInformationSchemaTable() throws Exception {
-        execute("select TABLE_NAME from INFORMATION_SCHEMA.Tables where schema_name='doc'");
+    public void testSelectFromInformationSchemaTable() {
+        execute("select TABLE_NAME from INFORMATION_SCHEMA.Tables where table_schema='doc'");
         assertEquals(0L, response.rowCount());
 
         execute("create table test (col1 integer primary key, col2 string) clustered into 5 shards");
         ensureGreen();
 
         execute("select table_name, number_of_shards, number_of_replicas, " +
-                "clustered_by from INFORMATION_SCHEMA.Tables where schema_name='doc'");
+                "clustered_by from INFORMATION_SCHEMA.Tables where table_schema = ?",
+            new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(1L, response.rowCount());
         assertEquals("test", response.rows()[0][0]);
         assertEquals(5, response.rows()[0][1]);
-        assertEquals("1", response.rows()[0][2]);
+        assertEquals("0-1", response.rows()[0][2]);
         assertEquals("col1", response.rows()[0][3]);
     }
 
     @Test
-    public void testSelectBlobTablesFromInformationSchemaTable() throws Exception {
-        execute("select TABLE_NAME from INFORMATION_SCHEMA.Tables where schema_name='blob'");
+    public void testSelectBlobTablesFromInformationSchemaTable() {
+        execute("select TABLE_NAME from INFORMATION_SCHEMA.Tables where table_schema='blob'");
         assertEquals(0L, response.rowCount());
 
         String blobsPath = createTempDir().toAbsolutePath().toString();
@@ -222,101 +335,141 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         ensureGreen();
 
         execute("select table_name, number_of_shards, number_of_replicas, " +
-                "clustered_by, blobs_path from INFORMATION_SCHEMA.Tables where schema_name='blob' ");
+                "clustered_by, blobs_path, routing_hash_function, version " +
+                "from INFORMATION_SCHEMA.Tables where table_schema='blob' ");
         assertEquals(1L, response.rowCount());
         assertEquals("test", response.rows()[0][0]);
         assertEquals(5, response.rows()[0][1]);
-        assertEquals("1", response.rows()[0][2]);
+        assertEquals("0-1", response.rows()[0][2]);
         assertEquals("digest", response.rows()[0][3]);
         assertEquals(blobsPath, response.rows()[0][4]);
+        assertThat(response.rows()[0][5], is(IndexMappings.DEFAULT_ROUTING_HASH_FUNCTION_PRETTY_NAME));
+        TestingHelpers.assertCrateVersion(response.rows()[0][6], Version.CURRENT, null);
 
         // cleanup blobs path, tempDir hook will be deleted before table would be deleted, avoid error in log
         execute("drop blob table test");
     }
 
     @Test
-    public void testSelectPartitionedTablesFromInformationSchemaTable() throws Exception {
+    public void testSelectPartitionedTablesFromInformationSchemaTable() {
         execute("create table test (id int primary key, name string) partitioned by (id)");
         execute("insert into test (id, name) values (1, 'Youri'), (2, 'Ruben')");
         ensureGreen();
 
         execute("select table_name, number_of_shards, number_of_replicas, " +
-                "clustered_by, partitioned_by from INFORMATION_SCHEMA.Tables where schema_name = 'doc'");
+                "clustered_by, partitioned_by from INFORMATION_SCHEMA.Tables where table_schema = ?",
+            new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(1L, response.rowCount());
         assertEquals("test", response.rows()[0][0]);
         assertEquals(4, response.rows()[0][1]);
-        assertEquals("1", response.rows()[0][2]);
+        assertEquals("0-1", response.rows()[0][2]);
         assertEquals("id", response.rows()[0][3]);
-        assertThat((Object[]) response.rows()[0][4], arrayContaining(new Object[]{"id"}));
+        assertThat((List<Object>) response.rows()[0][4], Matchers.contains("id"));
     }
 
     @Test
-    public void testSelectStarFromInformationSchemaTable() throws Exception {
+    public void testSelectStarFromInformationSchemaTable() {
         execute("create table test (col1 integer, col2 string) clustered into 5 shards");
         ensureGreen();
-        execute("select * from INFORMATION_SCHEMA.Tables where schema_name='doc'");
-        assertEquals(1L, response.rowCount());
-        assertEquals("doc", response.rows()[0][6]);
-        assertEquals("test", response.rows()[0][8]);
-        assertEquals(5, response.rows()[0][4]);
-        assertEquals("1", response.rows()[0][3]);
-        assertEquals("_id", response.rows()[0][1]);
+        execute("select * from INFORMATION_SCHEMA.Tables where table_schema = ?", new Object[]{sqlExecutor.getCurrentSchema()});
+        assertThat(response.rowCount(), is(1L));
+
+        TestingHelpers.assertCrateVersion(response.rows()[0][15], Version.CURRENT, null);
+        assertThat(response.rows()[0][13], is(sqlExecutor.getCurrentSchema()));
+        assertThat(response.rows()[0][12], is("test"));
+        assertThat(response.rows()[0][11], is(sqlExecutor.getCurrentSchema()));
+        assertThat(response.rows()[0][14], is("BASE TABLE"));
+        assertThat(response.rows()[0][8], is(IndexMappings.DEFAULT_ROUTING_HASH_FUNCTION_PRETTY_NAME));
+        assertThat(response.rows()[0][5], is(5));
+        assertThat(response.rows()[0][4], is("0-1"));
+        assertThat(response.rows()[0][2], is("_id"));
+        assertThat(response.rows()[0][1], is(false));
     }
 
     @Test
     public void testSelectFromTableConstraints() throws Exception {
+        execute("SELECT column_name FROM information_schema.columns WHERE table_schema='information_schema' " +
+                "AND table_name='table_constraints'");
+        assertEquals(9L, response.rowCount());
+        assertThat(TestingHelpers.getColumn(response.rows(),0),
+            arrayContaining("constraint_catalog", "constraint_name", "constraint_schema", "constraint_type", "initially_deferred",
+                "is_deferrable", "table_catalog", "table_name", "table_schema"));
+        execute("SELECT constraint_name, constraint_type, table_name, table_schema FROM " +
+                "information_schema.table_constraints ORDER BY table_schema ASC, table_name ASC");
+        assertEquals(27L, response.rowCount());
+        assertThat(printedTable(response.rows()),
+            is(
+                "columns_pk| PRIMARY KEY| columns| information_schema\n" +
+                "information_schema_columns_column_name_not_null| CHECK| columns| information_schema\n" +
+                "information_schema_columns_data_type_not_null| CHECK| columns| information_schema\n" +
+                "information_schema_columns_is_generated_not_null| CHECK| columns| information_schema\n" +
+                "information_schema_columns_is_nullable_not_null| CHECK| columns| information_schema\n" +
+                "information_schema_columns_ordinal_position_not_null| CHECK| columns| information_schema\n" +
+                "information_schema_columns_table_catalog_not_null| CHECK| columns| information_schema\n" +
+                "information_schema_columns_table_name_not_null| CHECK| columns| information_schema\n" +
+                "information_schema_columns_table_schema_not_null| CHECK| columns| information_schema\n" +
+                "key_column_usage_pk| PRIMARY KEY| key_column_usage| information_schema\n" +
+                "referential_constraints_pk| PRIMARY KEY| referential_constraints| information_schema\n" +
+                "schemata_pk| PRIMARY KEY| schemata| information_schema\n" +
+                "sql_features_pk| PRIMARY KEY| sql_features| information_schema\n" +
+                "table_constraints_pk| PRIMARY KEY| table_constraints| information_schema\n" +
+                "table_partitions_pk| PRIMARY KEY| table_partitions| information_schema\n" +
+                "tables_pk| PRIMARY KEY| tables| information_schema\n" +
+                "views_pk| PRIMARY KEY| views| information_schema\n" +
+                "allocations_pk| PRIMARY KEY| allocations| sys\n" +
+                "checks_pk| PRIMARY KEY| checks| sys\n" +
+                "jobs_pk| PRIMARY KEY| jobs| sys\n" +
+                "jobs_log_pk| PRIMARY KEY| jobs_log| sys\n" +
+                "node_checks_pk| PRIMARY KEY| node_checks| sys\n" +
+                "nodes_pk| PRIMARY KEY| nodes| sys\n" +
+                "repositories_pk| PRIMARY KEY| repositories| sys\n" +
+                "shards_pk| PRIMARY KEY| shards| sys\n" +
+                "snapshots_pk| PRIMARY KEY| snapshots| sys\n" +
+                "summits_pk| PRIMARY KEY| summits| sys\n"
+            ));
 
-        execute("select * from INFORMATION_SCHEMA.table_constraints order by schema_name asc, table_name asc");
-        assertEquals(13L, response.rowCount());
-        assertThat(response.cols(),
-            arrayContaining("constraint_name", "constraint_type", "schema_name", "table_name"));
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "[schema_name, table_name, column_name]| PRIMARY_KEY| information_schema| columns\n" +
-            "[schema_name]| PRIMARY_KEY| information_schema| schemata\n" +
-            "[feature_id, feature_name, sub_feature_id, sub_feature_name, is_supported, is_verified_by, comments]| PRIMARY_KEY| information_schema| sql_features\n" +
-            "[schema_name, table_name]| PRIMARY_KEY| information_schema| tables\n" +
-            "[id]| PRIMARY_KEY| sys| checks\n" +
-            "[id]| PRIMARY_KEY| sys| jobs\n" +
-            "[id]| PRIMARY_KEY| sys| jobs_log\n" +
-            "[id]| PRIMARY_KEY| sys| node_checks\n" +
-            "[id]| PRIMARY_KEY| sys| nodes\n" +
-            "[name]| PRIMARY_KEY| sys| repositories\n" +
-            "[schema_name, table_name, id, partition_ident]| PRIMARY_KEY| sys| shards\n" +
-            "[name, repository]| PRIMARY_KEY| sys| snapshots\n" +
-            "[mountain]| PRIMARY_KEY| sys| summits\n"
-        ));
-
-        execute("create table test (col1 integer primary key, col2 string)");
+        execute("CREATE TABLE test (col1 INTEGER, col2 INTEGER, col3 INT NOT NULL, col4 STRING, " +
+                "PRIMARY KEY(col1,col2))");
         ensureGreen();
-        execute("select constraint_type, constraint_name, " +
-                "table_name from information_schema.table_constraints where schema_name='doc'");
-        assertEquals(1L, response.rowCount());
-        assertEquals("PRIMARY_KEY", response.rows()[0][0]);
-        assertThat(commaJoiner.join((Object[]) response.rows()[0][1]), is("col1"));
-        assertEquals("test", response.rows()[0][2]);
-    }
-
-    @Test
-    public void testRefreshTableConstraints() throws Exception {
-        execute("create table test (col1 integer primary key, col2 string)");
-        ensureGreen();
-        execute("select table_name, constraint_name from INFORMATION_SCHEMA" +
-                ".table_constraints where schema_name='doc'");
-        assertEquals(1L, response.rowCount());
-        assertEquals("test", response.rows()[0][0]);
-        assertThat(commaJoiner.join((Object[]) response.rows()[0][1]), is("col1"));
-
-        execute("create table test2 (col1a string primary key, col2a timestamp)");
-        ensureGreen();
-        execute("select table_name, constraint_name from INFORMATION_SCHEMA.table_constraints where schema_name='doc' order by table_name asc");
-
+        execute("SELECT constraint_type, constraint_name, table_name FROM information_schema.table_constraints " +
+                "WHERE table_schema = ?",
+            new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(2L, response.rowCount());
-        assertEquals("test2", response.rows()[1][0]);
-        assertThat(commaJoiner.join((Object[]) response.rows()[1][1]), is("col1a"));
+        assertThat(response.rows()[0][0], is("PRIMARY KEY"));
+        assertThat(response.rows()[0][1], is("test_pk"));
+        assertThat(response.rows()[0][2], is("test"));
+        assertThat(response.rows()[1][0], is("CHECK"));
+        assertThat(response.rows()[1][1], is(sqlExecutor.getCurrentSchema() + "_test_col3_not_null"));
+        assertThat(response.rows()[1][2], is("test"));
     }
 
     @Test
-    public void testSelectFromRoutines() throws Exception {
+    public void testRefreshTableConstraints() {
+        execute("CREATE TABLE test (col1 INTEGER PRIMARY KEY, col2 STRING)");
+        ensureGreen();
+        execute("SELECT table_name, constraint_name FROM Information_schema" +
+                ".table_constraints WHERE table_schema = ?", new Object[]{sqlExecutor.getCurrentSchema()});
+        assertEquals(1L, response.rowCount());
+        assertThat(response.rows()[0][0], is("test"));
+        assertThat(response.rows()[0][1], is("test_pk"));
+
+        execute("CREATE TABLE test2 (" +
+            "   col1a STRING PRIMARY KEY," +
+            "   \"Col2a\" TIMESTAMP WITH TIME ZONE NOT NULL)");
+        ensureGreen();
+        execute("SELECT table_name, constraint_name FROM information_schema.table_constraints WHERE table_schema = ? " +
+                "ORDER BY table_name ASC",
+            new Object[]{sqlExecutor.getCurrentSchema()});
+
+        assertEquals(3L, response.rowCount());
+        assertThat(response.rows()[1][0], is("test2"));
+        assertThat(response.rows()[1][1], is("test2_pk"));
+        assertThat(response.rows()[2][0], is("test2"));
+        assertThat(response.rows()[2][1], is(sqlExecutor.getCurrentSchema() + "_test2_Col2a_not_null"));
+    }
+
+    @Test
+    public void testSelectFromRoutines() {
         String stmt1 = "CREATE ANALYZER myAnalyzer WITH (" +
                        "  TOKENIZER whitespace," +
                        "  TOKEN_FILTERS (" +
@@ -332,31 +485,27 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
                 "  stopwords=[?, ?, ?]" +
                 ")", new Object[]{"der", "die", "das"});
         ensureGreen();
-        execute("SELECT * from INFORMATION_SCHEMA.routines " +
+        execute("SELECT routine_name, routine_type, routine_definition from INFORMATION_SCHEMA.routines " +
                 "where routine_name = 'myanalyzer' " +
                 "or routine_name = 'myotheranalyzer' " +
                 "and routine_type = 'ANALYZER' " +
                 "order by routine_name asc");
         assertEquals(2L, response.rowCount());
+        assertThat(printedTable(response.rows()), is(
+            "myanalyzer| ANALYZER| {\"filter\":[\"myanalyzer_mytokenfilter\",\"kstem\"],\"tokenizer\":\"whitespace\",\"type\":\"custom\"}\n" +
+            "myotheranalyzer| ANALYZER| {\"stopwords\":[\"der\",\"die\",\"das\"],\"type\":\"german\"}\n"));
 
         assertEquals("myanalyzer", response.rows()[0][0]);
         assertEquals("ANALYZER", response.rows()[0][1]);
         assertEquals("myotheranalyzer", response.rows()[1][0]);
         assertEquals("ANALYZER", response.rows()[1][1]);
-        client().admin().cluster().prepareUpdateSettings()
-            .setPersistentSettingsToRemove(
-                ImmutableSet.of("crate.analysis.custom.analyzer.myanalyzer",
-                    "crate.analysis.custom.analyzer.myotheranalyzer",
-                    "crate.analysis.custom.filter.myanalyzer_mytokenfilter"))
-            .setTransientSettingsToRemove(
-                ImmutableSet.of("crate.analysis.custom.analyzer.myanalyzer",
-                    "crate.analysis.custom.analyzer.myotheranalyzer",
-                    "crate.analysis.custom.filter.myanalyzer_mytokenfilter"))
-            .execute().actionGet();
+
+        execute("drop analyzer myanalyzer");
+        execute("drop analyzer myotheranalyzer");
     }
 
     @Test
-    public void testSelectAnalyzersFromRoutines() throws Exception {
+    public void testSelectAnalyzersFromRoutines() {
         execute("SELECT routine_name from INFORMATION_SCHEMA.routines WHERE " +
                 "routine_type='ANALYZER' order by " +
                 "routine_name desc limit 5");
@@ -372,7 +521,7 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testSelectTokenizersFromRoutines() throws Exception {
+    public void testSelectTokenizersFromRoutines() {
         execute("SELECT routine_name from INFORMATION_SCHEMA.routines WHERE " +
                 "routine_type='TOKENIZER' order by " +
                 "routine_name asc limit 5");
@@ -382,13 +531,13 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
             tokenizerNames[i] = (String) response.rows()[i][0];
         }
         assertEquals(
-            "PathHierarchy, classic, edgeNGram, edge_ngram, keyword",
+            "PathHierarchy, char_group, classic, edge_ngram, keyword",
             Joiner.on(", ").join(tokenizerNames)
         );
     }
 
     @Test
-    public void testSelectTokenFiltersFromRoutines() throws Exception {
+    public void testSelectTokenFiltersFromRoutines() {
         execute("SELECT routine_name from INFORMATION_SCHEMA.routines WHERE " +
                 "routine_type='TOKEN_FILTER' order by " +
                 "routine_name asc limit 5");
@@ -398,29 +547,29 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
             tokenFilterNames[i] = (String) response.rows()[i][0];
         }
         assertEquals(
-            "apostrophe, arabic_normalization, arabic_stem, asciifolding, brazilian_stem",
+            "apostrophe, arabic_normalization, arabic_stem, asciifolding, bengali_normalization",
             Joiner.on(", ").join(tokenFilterNames)
         );
     }
 
     @Test
-    public void testSelectCharFiltersFromRoutines() throws Exception {
+    public void testSelectCharFiltersFromRoutines() {
         execute("SELECT routine_name from INFORMATION_SCHEMA.routines WHERE " +
                 "routine_type='CHAR_FILTER' order by " +
                 "routine_name asc");
-        assertEquals(4L, response.rowCount());
+        assertEquals(3L, response.rowCount());
         String[] charFilterNames = new String[response.rows().length];
         for (int i = 0; i < response.rowCount(); i++) {
             charFilterNames[i] = (String) response.rows()[i][0];
         }
         assertEquals(
-            "htmlStrip, html_strip, mapping, pattern_replace",
+            "html_strip, mapping, pattern_replace",
             Joiner.on(", ").join(charFilterNames)
         );
     }
 
     @Test
-    public void testTableConstraintsWithOrderBy() throws Exception {
+    public void testTableConstraintsWithOrderBy() {
         execute("create table test1 (col11 integer primary key, col12 float)");
         execute("create table test2 (col21 double primary key, col22 string)");
         execute("create table abc (col31 integer primary key, col32 string)");
@@ -428,7 +577,7 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         ensureGreen();
 
         execute("select table_name from INFORMATION_SCHEMA.table_constraints " +
-                "where schema_name not in ('sys', 'information_schema')  " +
+                "where table_schema not in ('sys', 'information_schema')  " +
                 "ORDER BY table_name");
         assertEquals(3L, response.rowCount());
         assertEquals("abc", response.rows()[0][0]);
@@ -437,55 +586,138 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testDefaultColumns() throws Exception {
-        execute("select * from information_schema.columns order by schema_name, table_name");
-        assertEquals(358, response.rowCount());
+    public void testDefaultColumns() {
+        execute("select * from information_schema.columns order by table_schema, table_name");
+        assertEquals(701, response.rowCount());
     }
 
     @Test
-    public void testColumnsColumns() throws Exception {
-        execute("select * from information_schema.columns where schema_name='information_schema' and table_name='columns' order by ordinal_position asc");
-        assertThat(response.rowCount(), is(8L));
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "column_name| string| NULL| false| false| 1| information_schema| columns\n" +
-            "data_type| string| NULL| false| true| 2| information_schema| columns\n" +
-            "generation_expression| string| NULL| false| true| 3| information_schema| columns\n" +
-            "is_generated| boolean| NULL| false| true| 4| information_schema| columns\n" +
-            "is_nullable| boolean| NULL| false| true| 5| information_schema| columns\n" +
-            "ordinal_position| short| NULL| false| true| 6| information_schema| columns\n" +
-            "schema_name| string| NULL| false| false| 7| information_schema| columns\n" +
-            "table_name| string| NULL| false| false| 8| information_schema| columns\n"));
+    public void testColumnsColumns() {
+        execute("select column_name, data_type from information_schema.columns where table_schema='information_schema' and table_name='columns' order by column_name asc");
+        assertThat(response.rowCount(), is(32L));
+        assertThat(printedTable(response.rows()), is(
+            "character_maximum_length| integer\n" +
+            "character_octet_length| integer\n" +
+            "character_set_catalog| text\n" +
+            "character_set_name| text\n" +
+            "character_set_schema| text\n" +
+            "check_action| integer\n" +
+            "check_references| text\n" +
+            "collation_catalog| text\n" +
+            "collation_name| text\n" +
+            "collation_schema| text\n" +
+            "column_default| text\n" +
+            "column_name| text\n" +
+            "data_type| text\n" +
+            "datetime_precision| integer\n" +
+            "domain_catalog| text\n" +
+            "domain_name| text\n" +
+            "domain_schema| text\n" +
+            "generation_expression| text\n" +
+            "interval_precision| integer\n" +
+            "interval_type| text\n" +
+            "is_generated| text\n" +
+            "is_nullable| boolean\n" +
+            "numeric_precision| integer\n" +
+            "numeric_precision_radix| integer\n" +
+            "numeric_scale| integer\n" +
+            "ordinal_position| integer\n" +
+            "table_catalog| text\n" +
+            "table_name| text\n" +
+            "table_schema| text\n" +
+            "udt_catalog| text\n" +
+            "udt_name| text\n" +
+            "udt_schema| text\n")
+        );
     }
 
     @Test
-    public void testSelectFromTableColumns() throws Exception {
-        execute("create table test (col1 integer primary key, col2 string index off, age integer not null)");
+    public void testSupportedPgTypeColumns() {
+        execute("select column_name, data_type from information_schema.columns " +
+                "where table_schema = 'pg_catalog' " +
+                "and table_name = 'pg_type' " +
+                "order by 1 asc");
+        assertThat(response.rowCount(), is(11L));
+        assertThat(printedTable(response.rows()), is(
+            "oid| integer\n" +
+            "typarray| integer\n" +
+            "typbasetype| integer\n" +
+            "typdelim| text\n" +
+            "typelem| integer\n" +
+            "typlen| smallint\n" +
+            "typname| text\n" +
+            "typnamespace| integer\n" +
+            "typnotnull| boolean\n" +
+            "typtype| text\n" +
+            "typtypmod| integer\n"
+        ));
+    }
+
+    @Test
+    public void testSelectFromTableColumns() {
+        String defaultSchema = sqlExecutor.getCurrentSchema();
+        execute("create table test ( " +
+                "col1 integer primary key, " +
+                "col2 string index off, " +
+                "age integer not null, " +
+                "b byte, " +
+                "s short, " +
+                "d double, " +
+                "f float, " +
+                "stuff object(dynamic) AS (" +
+                "  level1 object(dynamic) AS (" +
+                "    level2 string not null," +
+                "    level2_nullable string" +
+                "  ) not null" +
+                ") not null)");
+
         ensureGreen();
-        execute("select * from INFORMATION_SCHEMA.Columns where schema_name='doc'");
-        assertEquals(3L, response.rowCount());
-        assertEquals("age", response.rows()[0][0]);
-        assertEquals("integer", response.rows()[0][1]);
-        assertEquals(null, response.rows()[0][2]);
-        assertEquals(false, response.rows()[0][3]);
-        assertEquals(false, response.rows()[0][4]);
-        short expected = 1;
-        assertEquals(expected, response.rows()[0][5]);
-        assertEquals("doc", response.rows()[0][6]);
-        assertEquals("test", response.rows()[0][7]);
+        execute("select * from INFORMATION_SCHEMA.Columns where table_schema = ? order by column_name asc", new Object[]{defaultSchema});
+        assertEquals(11L, response.rowCount());
+        assertEquals("age", response.rows()[0][11]); // column_name
+        assertEquals("integer", response.rows()[0][12]); // data_type
+        assertEquals(null, response.rows()[0][13]); // datetime_precision
+        assertEquals("NEVER", response.rows()[0][20]); // is_generated
+        assertEquals(false, response.rows()[0][21]); // is_nullable
+        assertEquals(32, response.rows()[0][22]); // numeric_precision
+        assertEquals(2, response.rows()[0][23]); // numeric_precision_radix
 
-        assertEquals("col1", response.rows()[1][0]);
-        assertEquals(false, response.rows()[1][4]);
+        assertEquals(3, response.rows()[0][25]); // ordinal_position
+        assertEquals(defaultSchema, response.rows()[0][26]); // table_catalog
+        assertEquals("test", response.rows()[0][27]); // table_name
+        assertEquals(defaultSchema, response.rows()[0][28]); // table_schema
 
-        assertEquals("col2", response.rows()[2][0]);
-        assertEquals(true, response.rows()[2][4]);
+        assertEquals("col1", response.rows()[2][11]);
+        assertEquals(false, response.rows()[2][21]);
+
+        assertEquals("col2", response.rows()[3][11]);
+        assertEquals(true, response.rows()[3][21]);
+
+        assertEquals("b", response.rows()[1][11]);
+        assertEquals(8, response.rows()[1][22]);
+        assertEquals("s", response.rows()[6][11]);
+        assertEquals(16, response.rows()[6][22]);
+        assertEquals("d", response.rows()[4][11]);
+        assertEquals(53, response.rows()[4][22]);
+        assertEquals("f", response.rows()[5][11]);
+        assertEquals(24, response.rows()[5][22]);
+        assertEquals("stuff", response.rows()[7][11]);
+        assertEquals(false, response.rows()[7][21]); // is_nullable
+        assertEquals("stuff['level1']", response.rows()[8][11]);
+        assertEquals(false, response.rows()[8][21]); // is_nullable
+        assertEquals("stuff['level1']['level2']", response.rows()[9][11]);
+        assertEquals(false, response.rows()[9][21]); // is_nullable
+        assertEquals("stuff['level1']['level2_nullable']", response.rows()[10][11]);
+        assertEquals(true, response.rows()[10][21]); // is_nullable
     }
 
     @Test
-    public void testSelectFromTableColumnsRefresh() throws Exception {
+    public void testSelectFromTableColumnsRefresh() {
         execute("create table test (col1 integer, col2 string, age integer)");
         ensureGreen();
         execute("select table_name, column_name, " +
-                "ordinal_position, data_type from INFORMATION_SCHEMA.Columns where schema_name='doc'");
+                "ordinal_position, data_type from INFORMATION_SCHEMA.Columns where table_schema = ?",
+            new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(3L, response.rowCount());
         assertEquals("test", response.rows()[0][0]);
 
@@ -493,8 +725,8 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         ensureGreen();
         execute("select table_name, column_name, " +
                 "ordinal_position, data_type from INFORMATION_SCHEMA.Columns " +
-                "where schema_name='doc' " +
-                "order by table_name");
+                "where table_schema = ? " +
+                "order by table_name", new Object[]{sqlExecutor.getCurrentSchema()});
 
         assertEquals(6L, response.rowCount());
         assertEquals("test", response.rows()[0][0]);
@@ -502,121 +734,80 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testSelectFromTableColumnsMultiField() throws Exception {
+    public void testSelectFromTableColumnsMultiField() {
         execute("create table test (col1 string, col2 string," +
                 "index col1_col2_ft using fulltext(col1, col2))");
         ensureGreen();
         execute("select table_name, column_name," +
-                "ordinal_position, data_type from INFORMATION_SCHEMA.Columns where schema_name='doc'");
+                "ordinal_position, data_type from INFORMATION_SCHEMA.Columns where table_schema = ?",
+            new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(2L, response.rowCount());
 
         assertEquals("test", response.rows()[0][0]);
         assertEquals("col1", response.rows()[0][1]);
-        short expected = 1;
-        assertEquals(expected, response.rows()[0][2]);
-        assertEquals("string", response.rows()[0][3]);
+        assertEquals(1, response.rows()[0][2]);
+        assertEquals("text", response.rows()[0][3]);
 
         assertEquals("test", response.rows()[1][0]);
         assertEquals("col2", response.rows()[1][1]);
-        expected = 2;
-        assertEquals(expected, response.rows()[1][2]);
-        assertEquals("string", response.rows()[1][3]);
+        assertEquals(2, response.rows()[1][2]);
+        assertEquals("text", response.rows()[1][3]);
     }
 
-    /* TODO: enable when information_schema.indices is implemented
-    @SuppressWarnings("unchecked")
     @Test
-    public void testSelectFromTableIndices() throws Exception {
-        execute("create table test (col1 string, col2 string, " +
-                "col3 string index using fulltext, " +
-                "col4 string index off, " +
-                "index col1_col2_ft using fulltext(col1, col2) with(analyzer='english'))");
-        ensureGreen();
-        execute("select table_name, index_name, method, columns, properties " +
-                "from INFORMATION_SCHEMA.Indices");
-        assertEquals(4L, response.rowCount());
-
-        assertEquals("test", response.rows()[0][0]);
-        assertEquals("col1", response.rows()[0][1]);
-        assertEquals("plain", response.rows()[0][2]);
-        assertTrue(response.rows()[0][3] instanceof List);
-        assertThat((List<String>) response.rows()[0][3], contains("col1"));
-        assertEquals("", response.rows()[0][4]);
-
-        assertEquals("test", response.rows()[1][0]);
-        assertEquals("col2", response.rows()[1][1]);
-        assertEquals("plain", response.rows()[1][2]);
-        assertThat((List<String>) response.rows()[1][3], contains("col2"));
-        assertEquals("", response.rows()[1][4]);
-
-        assertEquals("test", response.rows()[2][0]);
-        assertEquals("col1_col2_ft", response.rows()[2][1]);
-        assertEquals("fulltext", response.rows()[2][2]);
-        assertThat((List<String>) response.rows()[2][3], contains("col1", "col2"));
-        assertEquals("analyzer=english", response.rows()[2][4]);
-
-        assertEquals("test", response.rows()[3][0]);
-        assertEquals("col3", response.rows()[3][1]);
-        assertEquals("fulltext", response.rows()[3][2]);
-        assertThat((List<String>) response.rows()[3][3], contains("col3"));
-        assertEquals("analyzer=standard", response.rows()[3][4]);
-    }*/
-
-    @Test
-    public void testGlobalAggregation() throws Exception {
+    public void testGlobalAggregation() {
         execute("select max(ordinal_position) from information_schema.columns");
         assertEquals(1, response.rowCount());
 
-        short max_ordinal = 99;
-        assertEquals(max_ordinal, response.rows()[0][0]);
+        assertEquals(34, response.rows()[0][0]);
 
         execute("create table t1 (id integer, col1 string)");
         ensureGreen();
-        execute("select max(ordinal_position) from information_schema.columns where schema_name='doc'");
+        execute("select max(ordinal_position) from information_schema.columns where table_schema = ?",
+            new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(1, response.rowCount());
 
-        max_ordinal = 2;
-        assertEquals(max_ordinal, response.rows()[0][0]);
-
+        assertEquals(2, response.rows()[0][0]);
     }
 
     @Test
-    public void testGlobalAggregationMany() throws Exception {
-        execute("create table t1 (id integer, col1 string) clustered into 10 shards with(number_of_replicas=14)");
-        execute("create table t2 (id integer, col1 string) clustered into 5 shards with(number_of_replicas=7)");
-        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=2)");
+    public void testGlobalAggregationMany() {
+        execute("create table t1 (id integer, col1 string) clustered into 10 shards with(number_of_replicas=0)");
+        execute("create table t2 (id integer, col1 string) clustered into 5 shards with(number_of_replicas=0)");
+        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=0)");
         ensureYellow();
         execute("select min(number_of_shards), max(number_of_shards), avg(number_of_shards)," +
-                "sum(number_of_shards) from information_schema.tables where schema_name='doc'");
+                "sum(number_of_shards) from information_schema.tables where table_schema = ?", new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(1, response.rowCount());
 
         assertEquals(3, response.rows()[0][0]);
         assertEquals(10, response.rows()[0][1]);
         assertEquals(6.0d, response.rows()[0][2]);
-        assertEquals(18.0d, response.rows()[0][3]);
+        assertEquals(18L, response.rows()[0][3]);
     }
 
     @Test
-    public void testGlobalAggregationWithWhere() throws Exception {
-        execute("create table t1 (id integer, col1 string) clustered into 10 shards with(number_of_replicas=14)");
-        execute("create table t2 (id integer, col1 string) clustered into 5 shards with(number_of_replicas=7)");
-        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=2)");
+    public void testGlobalAggregationWithWhere() {
+        execute("create table t1 (id integer, col1 string) clustered into 1 shards with(number_of_replicas=0)");
+        execute("create table t2 (id integer, col1 string) clustered into 2 shards with(number_of_replicas=0)");
+        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=0)");
         ensureYellow();
         execute("select min(number_of_shards), max(number_of_shards), avg(number_of_shards)," +
-                "sum(number_of_shards) from information_schema.tables where schema_name='doc' and table_name != 't1'");
+                "sum(number_of_shards) from information_schema.tables where table_schema = ? and table_name != 't1'",
+            new Object[]{sqlExecutor.getCurrentSchema()});
         assertEquals(1, response.rowCount());
 
-        assertEquals(3, response.rows()[0][0]);
-        assertEquals(5, response.rows()[0][1]);
-        assertEquals(4.0d, response.rows()[0][2]);
-        assertEquals(8.0d, response.rows()[0][3]);
+        assertEquals(2, response.rows()[0][0]);
+        assertEquals(3, response.rows()[0][1]);
+        assertEquals(2.5d, response.rows()[0][2]);
+        assertEquals(5L, response.rows()[0][3]);
     }
 
     @Test
-    public void testGlobalAggregationWithAlias() throws Exception {
-        execute("create table t1 (id integer, col1 string) clustered into 10 shards with(number_of_replicas=14)");
-        execute("create table t2 (id integer, col1 string) clustered into 5 shards with(number_of_replicas=7)");
-        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=2)");
+    public void testGlobalAggregationWithAlias() {
+        execute("create table t1 (id integer, col1 string) clustered into 10 shards with(number_of_replicas=0)");
+        execute("create table t2 (id integer, col1 string) clustered into 5 shards with(number_of_replicas=0)");
+        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=0)");
         ensureYellow();
         execute("select min(number_of_shards) as min_shards from information_schema.tables where table_name = 't1'");
         assertEquals(1, response.rowCount());
@@ -625,21 +816,21 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testGlobalCount() throws Exception {
-        execute("create table t1 (id integer, col1 string) clustered into 10 shards with(number_of_replicas=14)");
-        execute("create table t2 (id integer, col1 string) clustered into 5 shards with(number_of_replicas=7)");
-        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=2)");
+    public void testGlobalCount() {
+        execute("create table t1 (id integer, col1 string) clustered into 10 shards with(number_of_replicas=0)");
+        execute("create table t2 (id integer, col1 string) clustered into 5 shards with(number_of_replicas=0)");
+        execute("create table t3 (id integer, col1 string) clustered into 3 shards with(number_of_replicas=0)");
         ensureYellow();
         execute("select count(*) from information_schema.tables");
         assertEquals(1, response.rowCount());
-        assertEquals(23L, response.rows()[0][0]);
+        assertEquals(39L, response.rows()[0][0]);
     }
 
     @Test
-    public void testGlobalCountDistinct() throws Exception {
-        execute("create table t3 (id integer, col1 string)");
+    public void testGlobalCountDistinct() {
+        execute("create table t3 (TableInfoid integer, col1 string)");
         ensureGreen();
-        execute("select count(distinct schema_name) from information_schema.tables order by count(distinct schema_name)");
+        execute("select count(distinct table_schema) from information_schema.tables order by count(distinct table_schema)");
         assertEquals(1, response.rowCount());
         assertEquals(4L, response.rows()[0][0]);
     }
@@ -656,18 +847,6 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         ensureGreen();
         execute("select column_name, ordinal_position from information_schema.columns where table_name='t4'");
         assertEquals(4, response.rowCount());
-        assertEquals("stuff", response.rows()[0][0]);
-        short ordinal_position = 1;
-        assertEquals(ordinal_position++, response.rows()[0][1]);
-
-        assertEquals("stuff['first_name']", response.rows()[1][0]);
-        assertEquals(ordinal_position++, response.rows()[1][1]);
-
-        assertEquals("stuff['last_name']", response.rows()[2][0]);
-        assertEquals(ordinal_position++, response.rows()[2][1]);
-
-        assertEquals("title", response.rows()[3][0]);
-        assertEquals(ordinal_position, response.rows()[3][1]);
 
         execute("insert into t4 (stuff) values (?)", new Object[]{
             new HashMap<String, Object>() {{
@@ -681,27 +860,10 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         waitForMappingUpdateOnAll("t4", "stuff.first_name", "stuff.middle_name", "stuff.last_name");
         execute("select column_name, ordinal_position from information_schema.columns where table_name='t4'");
         assertEquals(5, response.rowCount());
-
-        assertEquals("stuff", response.rows()[0][0]);
-        ordinal_position = 1;
-        assertEquals(ordinal_position++, response.rows()[0][1]);
-
-        assertEquals("stuff['first_name']", response.rows()[1][0]);
-        assertEquals(ordinal_position++, response.rows()[1][1]);
-
-        assertEquals("stuff['last_name']", response.rows()[2][0]);
-        assertEquals(ordinal_position++, response.rows()[2][1]);
-
-        assertEquals("stuff['middle_name']", response.rows()[3][0]);
-        assertEquals(ordinal_position++, response.rows()[3][1]);
-
-
-        assertEquals("title", response.rows()[4][0]);
-        assertEquals(ordinal_position, response.rows()[4][1]);
     }
 
     @Test
-    public void testAddColumnToIgnoredObject() throws Exception {
+    public void testAddColumnToIgnoredObject() {
         execute("create table t4 (" +
                 "  title string," +
                 "  stuff object(ignored) as (" +
@@ -712,18 +874,6 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         ensureYellow();
         execute("select column_name, ordinal_position from information_schema.columns where table_name='t4'");
         assertEquals(4, response.rowCount());
-        short ordinal_position = 1;
-        assertEquals("stuff", response.rows()[0][0]);
-        assertEquals(ordinal_position++, response.rows()[0][1]);
-
-        assertEquals("stuff['first_name']", response.rows()[1][0]);
-        assertEquals(ordinal_position++, response.rows()[1][1]);
-
-        assertEquals("stuff['last_name']", response.rows()[2][0]);
-        assertEquals(ordinal_position++, response.rows()[2][1]);
-
-        assertEquals("title", response.rows()[3][0]);
-        assertEquals(ordinal_position, response.rows()[3][1]);
 
         execute("insert into t4 (stuff) values (?)", new Object[]{
             new HashMap<String, Object>() {{
@@ -735,38 +885,23 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
 
         execute("select column_name, ordinal_position from information_schema.columns where table_name='t4'");
         assertEquals(4, response.rowCount());
-
-        ordinal_position = 1;
-        assertEquals("stuff", response.rows()[0][0]);
-        assertEquals(ordinal_position++, response.rows()[0][1]);
-
-        assertEquals("stuff['first_name']", response.rows()[1][0]);
-        assertEquals(ordinal_position++, response.rows()[1][1]);
-
-        assertEquals("stuff['last_name']", response.rows()[2][0]);
-        assertEquals(ordinal_position++, response.rows()[2][1]);
-
-        assertEquals("title", response.rows()[3][0]);
-        assertEquals(ordinal_position, response.rows()[3][1]);
     }
 
     @Test
-    public void testPartitionedBy() throws Exception {
+    public void testPartitionedBy() {
         execute("create table my_table (id integer, name string) partitioned by (name)");
         execute("create table my_other_table (id integer, name string, content string) " +
                 "partitioned by (name, content)");
 
         execute("select * from information_schema.tables " +
-                "where schema_name = 'doc' order by table_name");
+                "where table_schema = ? order by table_name", new Object[]{sqlExecutor.getCurrentSchema()});
 
-        Object[] row1 = new String[]{"name", "content"};
-        Object[] row2 = new String[]{"name"};
-        assertThat((Object[]) response.rows()[0][5], arrayContaining(row1));
-        assertThat((Object[]) response.rows()[1][5], arrayContaining(row2));
+        assertThat((List<Object>) response.rows()[0][6], Matchers.contains("name", "content"));
+        assertThat((List<Object>) response.rows()[1][6], Matchers.contains("name"));
     }
 
     @Test
-    public void testTablePartitions() throws Exception {
+    public void testTablePartitions() {
         execute("create table my_table (par int, content string) " +
                 "clustered into 5 shards " +
                 "partitioned by (par)");
@@ -778,13 +913,19 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         execute("insert into my_table (par, content) values (3, 'content6')");
         ensureGreen();
 
-        execute("select table_name, schema_name, partition_ident, values, number_of_shards, number_of_replicas " +
+        execute("select table_name," +
+                "   table_schema, " +
+                "   partition_ident, " +
+                "   values, " +
+                "   number_of_shards, " +
+                "   number_of_replicas, " +
+                "   settings['write']['wait_for_active_shards'] " +
                 "from information_schema.table_partitions order by table_name, partition_ident");
         assertEquals(3, response.rowCount());
 
-        Object[] row1 = new Object[]{"my_table", "doc", "04132", ImmutableMap.of("par", 1), 5, "1"};
-        Object[] row2 = new Object[]{"my_table", "doc", "04134", ImmutableMap.of("par", 2), 5, "1"};
-        Object[] row3 = new Object[]{"my_table", "doc", "04136", ImmutableMap.of("par", 3), 5, "1"};
+        Object[] row1 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "04132", ImmutableMap.of("par", 1), 5, "0-1", "1"};
+        Object[] row2 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "04134", ImmutableMap.of("par", 2), 5, "0-1", "1"};
+        Object[] row3 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "04136", ImmutableMap.of("par", 3), 5, "0-1", "1"};
 
         assertArrayEquals(row1, response.rows()[0]);
         assertArrayEquals(row2, response.rows()[1]);
@@ -792,71 +933,14 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testDisableWriteOnSinglePartition() throws Exception {
-        execute("create table my_table (par int, content string) " +
-                "clustered into 5 shards " +
-                "partitioned by (par)");
-        execute("insert into my_table (par, content) values (1, 'content1'), " +
-                "(1, 'content2'), " +
-                "(2, 'content3'), " +
-                "(2, 'content4'), " +
-                "(2, 'content5'), " +
-                "(3, 'content6')");
-
-        ensureGreen();
-        execute("alter table my_table partition (par=1) set (\"blocks.write\"=true)");
-
-        // update is expected to be executed without exception since this partition has no write block
-        execute("update my_table set content=\'content42\' where par=2");
-        refresh();
-        // verifying update
-        execute("select content from my_table where par=2");
-        assertThat(response.rowCount(), is(3L));
-
-        expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("blocked by: [FORBIDDEN/8/index write (api)]");
-
-        // trying to perform an update on a partition with a write block
-        execute("update my_table set content=\'content42\' where par=1");
-
-    }
-
-    @Test
-    public void testMultipleWritesWhenOnePartitionIsReadOnly() throws Exception {
-        execute("create table my_table (par int, content string) " +
-                "clustered into 5 shards " +
-                "partitioned by (par)");
-        execute("insert into my_table (par, content) values " +
-                "(1, 'content2'), " +
-                "(2, 'content3')");
-
-        ensureGreen();
-        execute("alter table my_table partition (par=1) set (\"blocks.write\"=true)");
-        try {
-            execute("insert into my_table (par, content) values (2, 'content42'), " +
-                    "(2, 'content42'), " +
-                    "(1, 'content2'), " +
-                    "(3, 'content6')");
-
-        } catch (SQLActionException e) {
-            assertThat(e.getMessage(), containsString("blocked by: [FORBIDDEN/8/index write (api)];"));
-        }
-        refresh();
-        execute("select * from my_table");
-        assertThat(response.rowCount(), is(both(greaterThanOrEqualTo(2L)).and(lessThanOrEqualTo(5L))));
-        //cleaning up
-        execute("alter table my_table partition (par=1) set (\"blocks.write\"=false)");
-    }
-
-    @Test
     public void testPartitionedTableShardsAndReplicas() throws Exception {
         execute("create table parted (par byte, content string) " +
                 "partitioned by (par) " +
-                "clustered into 2 shards with (number_of_replicas=0)");
+                "clustered into 2 shards with (number_of_replicas=0, column_policy='dynamic')");
         ensureGreen();
 
         execute("select table_name, number_of_shards, number_of_replicas from information_schema.tables where table_name='parted'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("parted| 2| 0\n"));
+        assertThat(printedTable(response.rows()), is("parted| 2| 0\n"));
 
         execute("select * from information_schema.table_partitions where table_name='parted' order by table_name, partition_ident");
         assertThat(response.rowCount(), is(0L));
@@ -866,11 +950,11 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         ensureGreen();
 
         execute("select table_name, number_of_shards, number_of_replicas from information_schema.tables where table_name='parted'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("parted| 2| 0\n"));
+        assertThat(printedTable(response.rows()), is("parted| 2| 0\n"));
 
         execute("select table_name, partition_ident, values, number_of_shards, number_of_replicas " +
                 "from information_schema.table_partitions where table_name='parted' order by table_name, partition_ident");
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
+        assertThat(printedTable(response.rows()), is(
             "parted| 04132| {par=1}| 2| 0\n" +
             "parted| 04136| {par=3}| 2| 0\n"));
 
@@ -882,12 +966,12 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         ensureGreen();
 
         execute("select table_name, number_of_shards, number_of_replicas from information_schema.tables where table_name='parted'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("parted| 6| 0\n"));
+        assertThat(printedTable(response.rows()), is("parted| 6| 0\n"));
 
         execute("select table_name, partition_ident, values, number_of_shards, number_of_replicas " +
                 "from information_schema.table_partitions where table_name='parted' order by table_name, partition_ident");
         assertThat(response.rowCount(), is(3L));
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
+        assertThat(printedTable(response.rows()), is(
             "parted| 04132| {par=1}| 2| 0\n" +
             "parted| 04134| {par=2}| 6| 0\n" +
             "parted| 04136| {par=3}| 2| 0\n"));
@@ -898,12 +982,12 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
 
         // ensure newer index metadata does not override settings in template
         execute("select table_name, number_of_shards, number_of_replicas from information_schema.tables where table_name='parted'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("parted| 6| 0\n"));
+        assertThat(printedTable(response.rows()), is("parted| 6| 0\n"));
 
         execute("select table_name, partition_ident, values, number_of_shards, number_of_replicas " +
                 "from information_schema.table_partitions where table_name='parted' order by table_name, partition_ident");
         assertThat(response.rowCount(), is(3L));
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
+        assertThat(printedTable(response.rows()), is(
             "parted| 04132| {par=1}| 2| 0\n" +
             "parted| 04134| {par=2}| 6| 0\n" +
             "parted| 04136| {par=3}| 2| 0\n"));
@@ -912,12 +996,12 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         waitNoPendingTasksOnAll();
 
         execute("select table_name, number_of_shards, number_of_replicas from information_schema.tables where table_name='parted'");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("parted| 6| 0\n"));
+        assertThat(printedTable(response.rows()), is("parted| 6| 0\n"));
         waitNoPendingTasksOnAll();
         execute("select table_name, partition_ident, values, number_of_shards, number_of_replicas " +
                 "from information_schema.table_partitions where table_name='parted' order by table_name, partition_ident");
         assertThat(response.rowCount(), is(2L));
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
+        assertThat(printedTable(response.rows()), is(
             "parted| 04132| {par=1}| 2| 0\n" +
             "parted| 04136| {par=3}| 2| 0\n"));
 
@@ -940,15 +1024,15 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         execute("insert into my_table (par, par_str, content) values (2, 'asdf', 'content5')");
         ensureYellow();
 
-        execute("select table_name, schema_name, partition_ident, values, number_of_shards, number_of_replicas " +
+        execute("select table_name, table_schema, partition_ident, values, number_of_shards, number_of_replicas " +
                 "from information_schema.table_partitions order by table_name, partition_ident");
         assertEquals(5, response.rowCount());
 
-        Object[] row1 = new Object[]{"my_table", "doc", "08132132c5p0", ImmutableMap.of("par", 1, "par_str", "bar"), 5, "1"};
-        Object[] row2 = new Object[]{"my_table", "doc", "08132136dtng", ImmutableMap.of("par", 1, "par_str", "foo"), 5, "1"};
-        Object[] row3 = new Object[]{"my_table", "doc", "08134132c5p0", ImmutableMap.of("par", 2, "par_str", "bar"), 5, "1"};
-        Object[] row4 = new Object[]{"my_table", "doc", "08134136dtng", ImmutableMap.of("par", 2, "par_str", "foo"), 5, "1"};
-        Object[] row5 = new Object[]{"my_table", "doc", "081341b1edi6c", ImmutableMap.of("par", 2, "par_str", "asdf"), 4, "1"};
+        Object[] row1 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "08132132c5p0", ImmutableMap.of("par", 1, "par_str", "bar"), 5, "0-1"};
+        Object[] row2 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "08132136dtng", ImmutableMap.of("par", 1, "par_str", "foo"), 5, "0-1"};
+        Object[] row3 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "08134132c5p0", ImmutableMap.of("par", 2, "par_str", "bar"), 5, "0-1"};
+        Object[] row4 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "08134136dtng", ImmutableMap.of("par", 2, "par_str", "foo"), 5, "0-1"};
+        Object[] row5 = new Object[]{"my_table", sqlExecutor.getCurrentSchema(), "081341b1edi6c", ImmutableMap.of("par", 2, "par_str", "asdf"), 4, "0-1"};
 
         assertArrayEquals(row1, response.rows()[0]);
         assertArrayEquals(row2, response.rows()[1]);
@@ -958,10 +1042,13 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testPartitionsNestedCol() throws Exception {
-        execute("create table my_table (id int, metadata object as (date timestamp)) " +
-                "clustered into 5 shards " +
-                "partitioned by (metadata['date'])");
+    public void testPartitionsNestedCol() {
+        execute(
+            "create table my_table (" +
+            "   id int," +
+            "   metadata object as (date timestamp with time zone)" +
+            ") clustered into 5 shards " +
+            "partitioned by (metadata['date'])");
         ensureYellow();
         execute("insert into my_table (id, metadata) values (?, ?), (?, ?)",
             new Object[]{
@@ -973,19 +1060,24 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         execute("select table_name, partition_ident, values from information_schema.table_partitions order by table_name, partition_ident");
         assertEquals(2, response.rowCount());
 
-        assertThat(TestingHelpers.printedTable(response.rows()),
+        assertThat(printedTable(response.rows()),
             is("my_table| 04130| {metadata['date']=0}\n" +
                "my_table| 04732d1g64p36d9i60o30c1g| {metadata['date']=1401235200000}\n"));
     }
 
     @Test
-    public void testAnyInformationSchema() throws Exception {
-        execute("create table any1 (id integer, date timestamp, names array(string)) partitioned by (date)");
+    public void testAnyInformationSchema() {
+        execute(
+            "create table any1 (" +
+            "   id integer," +
+            "   date timestamp with time zone," +
+            "   names array(string)" +
+            ") partitioned by (date)");
         execute("create table any2 (id integer, num long, names array(string)) partitioned by (num)");
         ensureGreen();
         execute("select table_name from information_schema.tables where 'date' = ANY (partitioned_by)");
         assertThat(response.rowCount(), is(1L));
-        assertThat((String) response.rows()[0][0], is("any1"));
+        assertThat(response.rows()[0][0], is("any1"));
     }
 
     @Test
@@ -1017,61 +1109,189 @@ public class InformationSchemaTest extends SQLTransportIntegrationTest {
         assertThat(response.rowCount(), is(4L));
 
         String expected = "data_points| data| object\n" +
-                          "data_points| data['somelongroute']| long\n" +
-                          "data_points| data['somestringroute']| string\n" +
-                          "data_points| day| string\n";
-        assertEquals(expected, TestingHelpers.printedTable(response.rows()));
+                          "data_points| data['somelongroute']| bigint\n" +
+                          "data_points| data['somestringroute']| text\n" +
+                          "data_points| day| text\n";
+        assertEquals(expected, printedTable(response.rows()));
     }
 
     @Test
-    public void testRegexpMatch() throws Exception {
-        serviceSetup();
-        execute("create blob table blob_t1 with (number_of_replicas=0)");
+    @UseRandomizedSchema(random = false)
+    public void testRegexpMatch() {
+        execute("create blob table blob_t1");
+        execute("create table t(id String)");
         ensureYellow();
-        execute("select distinct schema_name from information_schema.tables " +
-                "where schema_name ~ '[a-z]+o[a-z]' order by schema_name");
+        execute("select distinct table_schema from information_schema.tables " +
+                "where table_schema ~ '[a-z]+o[a-z]' order by table_schema");
         assertThat(response.rowCount(), is(2L));
-        assertThat((String) response.rows()[0][0], is("blob"));
-        assertThat((String) response.rows()[1][0], is("doc"));
+        assertThat(response.rows()[0][0], is("blob"));
+        assertThat(response.rows()[1][0], is("doc"));
     }
 
     @Test
+    @UseRandomizedSchema(random = false)
     public void testSelectSchemata() throws Exception {
         execute("select * from information_schema.schemata order by schema_name asc");
         assertThat(response.rowCount(), is(5L));
-        assertThat(TestingHelpers.getColumn(response.rows(), 0), is(Matchers.<Object>arrayContaining("blob", "doc", "information_schema", "pg_catalog", "sys")));
+        assertThat(TestingHelpers.getColumn(response.rows(), 0), is(Matchers.arrayContaining("blob", "doc", "information_schema", "pg_catalog", "sys")));
 
         execute("create table t1 (col string) with (number_of_replicas=0)");
         ensureGreen();
 
         execute("select * from information_schema.schemata order by schema_name asc");
         assertThat(response.rowCount(), is(5L));
-        assertThat(TestingHelpers.getColumn(response.rows(), 0), is(Matchers.<Object>arrayContaining("blob", "doc", "information_schema", "pg_catalog", "sys")));
+        assertThat(TestingHelpers.getColumn(response.rows(), 0), is(Matchers.arrayContaining("blob", "doc", "information_schema", "pg_catalog", "sys")));
     }
 
     @Test
     public void testOrphanedPartition() throws Exception {
         prepareCreate(".partitioned.foo.04138").execute().get();
-        execute("select table_name from information_schema.tables where schema_name='doc'");
+        execute("select table_name from information_schema.tables where table_schema='doc'");
         assertThat(response.rowCount(), is(0L));
     }
 
     @Test
-    public void testSelectGeneratedColumnFromInformationSchemaColumns() throws Exception {
+    public void testSelectGeneratedColumnFromInformationSchemaColumns() {
         execute("create table t (lastname string, firstname string, name as (lastname || '_' || firstname)) " +
                 "with (number_of_replicas = 0)");
-        execute("select column_name, is_generated, generation_expression from information_schema.columns where is_generated = true");
-        assertThat(TestingHelpers.printedTable(response.rows()),
-            is("name| true| concat(concat(lastname, '_'), firstname)\n"));
+        execute("select column_name, is_generated, generation_expression from information_schema.columns where is_generated = 'ALWAYS'");
+        assertThat(printedTable(response.rows()),
+            is("name| ALWAYS| concat(concat(lastname, '_'), firstname)\n"));
     }
 
     @Test
-    public void testSelectSqlFeatures() throws Exception {
+    public void testSelectSqlFeatures() {
         execute("select * from information_schema.sql_features order by feature_id asc");
         assertThat(response.rowCount(), is(672L));
 
         execute("select feature_id, feature_name from information_schema.sql_features where feature_id='E011'");
         assertThat(response.rowCount(), is(7L));
-        assertThat((String) response.rows()[0][1], is("Numeric data types"));
+        assertThat(response.rows()[0][1], is("Numeric data types"));
     }
+
+    @Test
+    public void testScalarEvaluatesInErrorOnInformationSchema() {
+        expectedException.expect(SQLActionException.class);
+        expectedException.expectMessage(" / by zero");
+        execute("select 1/0 from information_schema.tables");
+    }
+
+    @Test
+    public void testInformationRoutinesColumns() {
+        execute("select column_name from information_schema.columns where table_name='routines' order by column_name asc");
+        assertThat(printedTable(response.rows()),
+            is(
+              "data_type\n" +
+              "is_deterministic\n" +
+              "routine_body\n" +
+              "routine_definition\n" +
+              "routine_name\n" +
+              "routine_schema\n" +
+              "routine_type\n" +
+              "specific_name\n"
+            ));
+    }
+
+    @Test
+    public void testOpenCloseTableInformation() {
+        execute("create table t (i int)");
+        ensureYellow();
+
+        execute("alter table t close");
+        execute("select closed from information_schema.tables where table_name = 't'");
+        assertEquals(1, response.rowCount());
+        assertEquals(true, response.rows()[0][0]);
+
+        execute("alter table t open");
+        execute("select closed from information_schema.tables where table_name = 't'");
+        assertEquals(1, response.rowCount());
+        assertEquals(false, response.rows()[0][0]);
+    }
+
+    @Test
+    public void testOpenClosePartitionInformation() {
+        execute("create table t (i int) partitioned by (i)");
+        ensureYellow();
+
+        execute("insert into t values (1)");
+        String partitionIdent = new PartitionName(
+            new RelationName(sqlExecutor.getCurrentSchema(), "t"),
+            Collections.singletonList("1")
+        ).ident();
+
+        execute("insert into t values (2), (3)");
+        ensureYellow();
+
+        execute("select closed from information_schema.table_partitions where table_name = 't'");
+
+        assertEquals(3, response.rowCount());
+        assertEquals(false, response.rows()[0][0]);
+        assertEquals(false, response.rows()[1][0]);
+        assertEquals(false, response.rows()[2][0]);
+
+        execute("alter table t partition (i = 1) close");
+        execute("select partition_ident, values from information_schema.table_partitions" +
+                " where table_name = 't' and closed = true");
+
+        assertEquals(1, response.rowCount());
+
+        HashMap values = (HashMap) response.rows()[0][1];
+        assertEquals(1, values.get("i"));
+        assertTrue(partitionIdent.endsWith((String) response.rows()[0][0]));
+
+        execute("alter table t partition (i = 1) open");
+        execute("select closed from information_schema.table_partitions");
+
+        assertEquals(3, response.rowCount());
+        assertEquals(false, response.rows()[0][0]);
+        assertEquals(false, response.rows()[1][0]);
+        assertEquals(false, response.rows()[2][0]);
+    }
+
+    @Test
+    public void testSelectFromKeyColumnUsage() {
+        execute("create table table1 (id1 integer)");
+        execute("create table table2 (id2 integer primary key)");
+        execute("create table table3 (id3 integer, name string, other double, primary key (id3, name))");
+        ensureYellow();
+
+        execute("select * from information_schema.key_column_usage order by table_name, ordinal_position asc");
+        assertEquals(3L, response.rowCount());
+        assertThat(response.cols(), arrayContaining(
+            "column_name",
+            "constraint_catalog",
+            "constraint_name",
+            "constraint_schema",
+            "ordinal_position",
+            "table_catalog",
+            "table_name",
+            "table_schema"
+        ));
+
+        final String defaultSchema = sqlExecutor.getCurrentSchema();
+        Matcher<Object[][]> resultMatcher = arrayContaining(
+            new Object[]{"id2", defaultSchema, "table2_pk", defaultSchema, 1, defaultSchema, "table2", defaultSchema},
+            new Object[]{"id3", defaultSchema, "table3_pk", defaultSchema, 1, defaultSchema, "table3", defaultSchema},
+            new Object[]{"name", defaultSchema, "table3_pk", defaultSchema, 2, defaultSchema, "table3", defaultSchema}
+        );
+        assertThat(response.rows(), resultMatcher);
+
+        // check that the constraint name is the same as in table_constraints by joining the two tables
+        execute("select t1.* from information_schema.key_column_usage t1 " +
+                "join information_schema.table_constraints t2 " +
+                "on t1.constraint_name = t2.constraint_name " +
+                "order by t1.table_name, t1.ordinal_position asc");
+        assertThat(response.rows(), resultMatcher);
+    }
+
+    @Test
+    public void testSelectFromReferentialConstraints() {
+        execute("select * from information_schema.referential_constraints");
+        assertEquals(0L, response.rowCount());
+        assertThat(response.cols(),
+            arrayContaining("constraint_catalog", "constraint_name", "constraint_schema", "delete_rule",
+                "match_option", "unique_constraint_catalog", "unique_constraint_name", "unique_constraint_schema",
+                "update_rule"));
+    }
+
 }

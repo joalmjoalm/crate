@@ -22,25 +22,25 @@
 
 package io.crate.protocols.postgres;
 
-import io.crate.analyze.symbol.Field;
-import io.crate.core.collections.Row;
-import io.crate.exceptions.Exceptions;
+import io.crate.data.Row;
+import io.crate.exceptions.SQLExceptions;
+import io.crate.expression.symbol.Field;
 import io.crate.protocols.postgres.types.PGType;
 import io.crate.protocols.postgres.types.PGTypes;
 import io.crate.types.DataType;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
-import org.jboss.netty.buffer.ChannelBuffer;
-import org.jboss.netty.buffer.ChannelBuffers;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelFuture;
-import org.jboss.netty.channel.ChannelFutureListener;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelFutureListener;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.LogManager;
 
 import javax.annotation.Nullable;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.SortedSet;
 
 /**
  * Regular data packet is in the following format:
@@ -55,35 +55,36 @@ import java.util.Locale;
  * <p>
  * See https://www.postgresql.org/docs/9.2/static/protocol-message-formats.html
  */
-class Messages {
+public class Messages {
 
-    private final static ESLogger LOGGER = Loggers.getLogger(Messages.class);
+    private static final Logger LOGGER = LogManager.getLogger(Messages.class);
 
+    private static final byte[] SEVERITY_FATAL = "FATAL".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] SEVERITY_ERROR = "ERROR".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] ERROR_CODE_INVALID_AUTHORIZATION_SPECIFICATION = "28000".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] ERROR_CODE_FEATURE_NOT_SUPPORTED = "0A000".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] ERROR_CODE_INTERNAL_ERROR = "XX000".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] METHOD_NAME_CLIENT_AUTH = "ClientAuthentication".getBytes(StandardCharsets.UTF_8);
 
-    static void sendAuthenticationOK(Channel channel) {
-        ChannelBuffer buffer = ChannelBuffers.buffer(9);
+    public static ChannelFuture sendAuthenticationOK(Channel channel) {
+        ByteBuf buffer = channel.alloc().buffer(9);
         buffer.writeByte('R');
         buffer.writeInt(8); // size excluding char
         buffer.writeInt(0);
-        ChannelFuture channelFuture = channel.write(buffer);
+        ChannelFuture channelFuture = channel.writeAndFlush(buffer);
         if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace("sentAuthenticationOK");
-                }
-            });
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace("sentAuthenticationOK"));
         }
+        return channelFuture;
     }
 
     /**
      * | 'C' | int32 len | str commandTag
-     *
      * @param query    :the query
      * @param rowCount : number of rows in the result set or number of rows affected by the DML statement
      */
-    static void sendCommandComplete(Channel channel, String query, long rowCount) {
-        query = query.split(" ", 2)[0].toUpperCase(Locale.ENGLISH);
+    static ChannelFuture sendCommandComplete(Channel channel, String query, long rowCount) {
+        query = query.trim().split(" ", 2)[0].toUpperCase(Locale.ENGLISH);
         String commandTag;
         /*
          * from https://www.postgresql.org/docs/current/static/protocol-message-formats.html:
@@ -101,19 +102,15 @@ class Messages {
 
         byte[] commandTagBytes = commandTag.getBytes(StandardCharsets.UTF_8);
         int length = 4 + commandTagBytes.length + 1;
-        ChannelBuffer buffer = ChannelBuffers.buffer(length + 1);
+        ByteBuf buffer = channel.alloc().buffer(length + 1);
         buffer.writeByte('C');
         buffer.writeInt(length);
         writeCString(buffer, commandTagBytes);
-        ChannelFuture channelFuture = channel.write(buffer);
+        ChannelFuture channelFuture = channel.writeAndFlush(buffer);
         if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace("sentCommandComplete");
-                }
-            });
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace("sentCommandComplete"));
         }
+        return channelFuture;
     }
 
     /**
@@ -133,18 +130,13 @@ class Messages {
      * rejected until block is ended).
      */
     static void sendReadyForQuery(Channel channel) {
-        ChannelBuffer buffer = ChannelBuffers.buffer(6);
+        ByteBuf buffer = channel.alloc().buffer(6);
         buffer.writeByte('Z');
         buffer.writeInt(5);
         buffer.writeByte('I');
-        ChannelFuture channelFuture = channel.write(buffer);
+        ChannelFuture channelFuture = channel.writeAndFlush(buffer);
         if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace("sentReadyForQuery");
-                }
-            });
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace("sentReadyForQuery"));
         }
     }
 
@@ -172,34 +164,27 @@ class Messages {
         byte[] valueBytes = value.getBytes(StandardCharsets.UTF_8);
 
         int length = 4 + nameBytes.length + 1 + valueBytes.length + 1;
-        ChannelBuffer buffer = ChannelBuffers.buffer(length + 1);
+        ByteBuf buffer = channel.alloc().buffer(length + 1);
         buffer.writeByte('S');
         buffer.writeInt(length);
         writeCString(buffer, nameBytes);
         writeCString(buffer, valueBytes);
         ChannelFuture channelFuture = channel.write(buffer);
         if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace("sentParameterStatus {}={}", name, value);
-                }
-            });
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace("sentParameterStatus {}={}", name, value));
         }
     }
 
-    /**
-     * 'E' | int32 len | char code | str value | \0 | char code | str value | \0 | ... | \0
-     * <p>
-     * char code / str value -> key-value fields
-     * example error fields are: message, detail, hint, error position
-     * <p>
-     * See https://www.postgresql.org/docs/9.2/static/protocol-error-fields.html for a list of error codes
-     */
-    static void sendErrorResponse(Channel channel, Throwable throwable) {
-        final String message = Exceptions.messageOf(throwable);
+    static void sendAuthenticationError(Channel channel, String message) {
+        LOGGER.warn(message);
         byte[] msg = message.getBytes(StandardCharsets.UTF_8);
-        byte[] severity = "ERROR".getBytes(StandardCharsets.UTF_8);
+        sendErrorResponse(channel, message, msg, SEVERITY_FATAL, null, null,
+            METHOD_NAME_CLIENT_AUTH, ERROR_CODE_INVALID_AUTHORIZATION_SPECIFICATION);
+    }
+
+    static ChannelFuture sendErrorResponse(Channel channel, Throwable throwable) {
+        final String message = SQLExceptions.messageOf(throwable);
+        byte[] msg = message.getBytes(StandardCharsets.UTF_8);
         byte[] lineNumber = null;
         byte[] fileName = null;
         byte[] methodName = null;
@@ -221,11 +206,30 @@ class Messages {
         byte[] errorCode;
         if (throwable instanceof IllegalArgumentException || throwable instanceof UnsupportedOperationException) {
             // feature_not_supported
-            errorCode = "0A000".getBytes(StandardCharsets.UTF_8);
+            errorCode = ERROR_CODE_FEATURE_NOT_SUPPORTED;
         } else {
             // internal_error
-            errorCode = "XX000".getBytes(StandardCharsets.UTF_8);
+            errorCode = ERROR_CODE_INTERNAL_ERROR;
         }
+        return sendErrorResponse(channel, message, msg, SEVERITY_ERROR, lineNumber, fileName, methodName, errorCode);
+    }
+
+    /**
+     * 'E' | int32 len | char code | str value | \0 | char code | str value | \0 | ... | \0
+     * <p>
+     * char code / str value -> key-value fields
+     * example error fields are: message, detail, hint, error position
+     * <p>
+     * See https://www.postgresql.org/docs/9.2/static/protocol-error-fields.html for a list of error codes
+     */
+    private static ChannelFuture sendErrorResponse(Channel channel,
+                                                   String message,
+                                                   byte[] msg,
+                                                   byte[] severity,
+                                                   byte[] lineNumber,
+                                                   byte[] fileName,
+                                                   byte[] methodName,
+                                                   byte[] errorCode) {
         int length = 4 +
             1 + (severity.length + 1) +
             1 + (msg.length + 1) +
@@ -234,7 +238,7 @@ class Messages {
             (lineNumber != null ? 1 + (lineNumber.length + 1) : 0) +
             (methodName != null ? 1 + (methodName.length + 1) : 0) +
             1;
-        ChannelBuffer buffer = ChannelBuffers.buffer(length + 1);
+        ByteBuf buffer = channel.alloc().buffer(length + 1);
         buffer.writeByte('E');
         buffer.writeInt(length);
         buffer.writeByte('S');
@@ -256,15 +260,11 @@ class Messages {
             writeCString(buffer, methodName);
         }
         buffer.writeByte(0);
-        ChannelFuture channelFuture = channel.write(buffer);
+        ChannelFuture channelFuture = channel.writeAndFlush(buffer);
         if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace("sentErrorResponse msg={}", message);
-                }
-            });
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace("sentErrorResponse msg={}", message));
         }
+        return channelFuture;
     }
 
     /**
@@ -288,16 +288,25 @@ class Messages {
      */
     static void sendDataRow(Channel channel, Row row, List<? extends DataType> columnTypes, @Nullable FormatCodes.FormatCode[] formatCodes) {
         int length = 4 + 2;
+        assert columnTypes.size() == row.numColumns()
+            : "Number of columns in the row must match number of columnTypes. Row: " + row + " types: " + columnTypes;
 
-        ChannelBuffer buffer = ChannelBuffers.dynamicBuffer();
+        ByteBuf buffer = channel.alloc().buffer();
         buffer.writeByte('D');
         buffer.writeInt(0); // will be set at the end
-        buffer.writeShort(row.size());
+        buffer.writeShort(row.numColumns());
 
-        for (int i = 0; i < row.size(); i++) {
+        for (int i = 0; i < row.numColumns(); i++) {
             DataType dataType = columnTypes.get(i);
-            PGType pgType = PGTypes.get(dataType);
-            Object value = row.get(i);
+            PGType pgType;
+            Object value;
+            try {
+                pgType = PGTypes.get(dataType);
+                value = row.get(i);
+            } catch (Exception e) {
+                buffer.release();
+                throw e;
+            }
             if (value == null) {
                 buffer.writeInt(-1);
                 length += 4;
@@ -312,26 +321,58 @@ class Messages {
                         break;
 
                     default:
+                        buffer.release();
                         throw new AssertionError("Unrecognized formatCode: " + formatCode);
                 }
             }
         }
 
         buffer.setInt(1, length);
-        ChannelFuture channelFuture = channel.write(buffer);
-        if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace("sentDataRow");
-                }
-            });
-        }
+        channel.write(buffer);
     }
 
-    static void writeCString(ChannelBuffer buffer, byte[] valBytes) {
+    static void writeCString(ByteBuf buffer, byte[] valBytes) {
         buffer.writeBytes(valBytes);
         buffer.writeByte(0);
+    }
+
+    /**
+     * ParameterDescription (B)
+     *
+     *     Byte1('t')
+     *
+     *         Identifies the message as a parameter description.
+     *     Int32
+     *
+     *         Length of message contents in bytes, including self.
+     *     Int16
+     *
+     *         The number of parameters used by the statement (can be zero).
+     *
+     *     Then, for each parameter, there is the following:
+     *
+     *     Int32
+     *
+     *         Specifies the object ID of the parameter data type.
+     *
+     * @param channel The channel to write the parameter description to.
+     * @param parameters A {@link SortedSet} containing the parameters from index 1 upwards.
+     */
+    static void sendParameterDescription(Channel channel, DataType[] parameters) {
+        final int messageByteSize = 4 + 2 + parameters.length * 4;
+        ByteBuf buffer = channel.alloc().buffer(messageByteSize);
+        buffer.writeByte('t');
+        buffer.writeInt(messageByteSize);
+        if (parameters.length > Short.MAX_VALUE) {
+            buffer.release();
+            throw new IllegalArgumentException("Too many parameters. Max supported: " + Short.MAX_VALUE);
+        }
+        buffer.writeShort(parameters.length);
+        for (DataType dataType : parameters) {
+            int pgTypeId = PGTypes.get(dataType).oid();
+            buffer.writeInt(pgTypeId);
+        }
+        channel.write(buffer);
     }
 
     /**
@@ -348,7 +389,7 @@ class Messages {
     static void sendRowDescription(Channel channel, Collection<Field> columns, @Nullable FormatCodes.FormatCode[] formatCodes) {
         int length = 4 + 2;
         int columnSize = 4 + 2 + 4 + 2 + 4 + 2;
-        ChannelBuffer buffer = ChannelBuffers.dynamicBuffer(
+        ByteBuf buffer = channel.alloc().buffer(
             length + (columns.size() * (10 + columnSize))); // use 10 as an estimate for columnName length
 
         buffer.writeByte('T');
@@ -357,7 +398,7 @@ class Messages {
 
         int idx = 0;
         for (Field column : columns) {
-            byte[] nameBytes = column.path().outputName().getBytes(StandardCharsets.UTF_8);
+            byte[] nameBytes = column.path().sqlFqn().getBytes(StandardCharsets.UTF_8);
             length += nameBytes.length + 1;
             length += columnSize;
 
@@ -375,14 +416,9 @@ class Messages {
         }
 
         buffer.setInt(1, length);
-        ChannelFuture channelFuture = channel.write(buffer);
+        ChannelFuture channelFuture = channel.writeAndFlush(buffer);
         if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace("sentRowDescription");
-                }
-            });
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace("sentRowDescription"));
         }
     }
 
@@ -422,18 +458,13 @@ class Messages {
      * Send a message that just contains the msgType and the msg length
      */
     private static void sendShortMsg(Channel channel, char msgType, final String traceLogMsg) {
-        ChannelBuffer buffer = ChannelBuffers.buffer(5);
+        ByteBuf buffer = channel.alloc().buffer(5);
         buffer.writeByte(msgType);
         buffer.writeInt(4);
 
         ChannelFuture channelFuture = channel.write(buffer);
         if (LOGGER.isTraceEnabled()) {
-            channelFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    LOGGER.trace(traceLogMsg);
-                }
-            });
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace(traceLogMsg));
         }
     }
 
@@ -447,5 +478,30 @@ class Messages {
      */
     static void sendCloseComplete(Channel channel) {
         sendShortMsg(channel, '3', "sentCloseComplete");
+    }
+
+    /**
+     * AuthenticationCleartextPassword (B)
+     *
+     * Byte1('R')
+     * Identifies the message as an authentication request.
+     *
+     * Int32(8)
+     * Length of message contents in bytes, including self.
+     *
+     * Int32(3)
+     * Specifies that a clear-text password is required.
+     *
+     * @param channel The channel to write to.
+     */
+    static void sendAuthenticationCleartextPassword(Channel channel) {
+        ByteBuf buffer = channel.alloc().buffer(9);
+        buffer.writeByte('R');
+        buffer.writeInt(8);
+        buffer.writeInt(3);
+        ChannelFuture channelFuture = channel.writeAndFlush(buffer);
+        if (LOGGER.isTraceEnabled()) {
+            channelFuture.addListener((ChannelFutureListener) future -> LOGGER.trace("sentAuthenticationCleartextPassword"));
+        }
     }
 }

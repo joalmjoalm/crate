@@ -21,10 +21,14 @@
 
 package io.crate.breaker;
 
+import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.FixedWidthType;
+import io.crate.types.GeoShapeType;
 import io.crate.types.IpType;
+import io.crate.types.ObjectType;
 import io.crate.types.StringType;
+import io.crate.types.UndefinedType;
 
 import java.util.Locale;
 
@@ -33,9 +37,21 @@ public class SizeEstimatorFactory {
     @SuppressWarnings("unchecked")
     public static <T> SizeEstimator<T> create(DataType type) {
         switch (type.id()) {
+            case UndefinedType.ID:
+                return (SizeEstimator<T>) new ConstSizeEstimator(0);
             case StringType.ID:
             case IpType.ID:
-                return (SizeEstimator<T>) new BytesRefSizeEstimator();
+                return (SizeEstimator<T>) StringSizeEstimator.INSTANCE;
+            case ObjectType.ID:
+                // no type info for inner types so we just use an arbitrary constant size for now
+                return (SizeEstimator<T>) new ConstSizeEstimator(60);
+            case GeoShapeType.ID:
+                // no type info for inner types so we just use an arbitrary constant size for now
+                // geo_shapes are usually large objects, so estimated greater than regular object type
+                return (SizeEstimator<T>) new ConstSizeEstimator(120);
+            case ArrayType.ID:
+                var innerEstimator = create(((ArrayType<?>) type).innerType());
+                return (SizeEstimator<T>) ArraySizeEstimator.create(innerEstimator);
             default:
                 if (type instanceof FixedWidthType) {
                     return (SizeEstimator<T>) new ConstSizeEstimator(((FixedWidthType) type).fixedSize());

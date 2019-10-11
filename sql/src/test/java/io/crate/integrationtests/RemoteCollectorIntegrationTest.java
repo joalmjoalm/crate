@@ -24,22 +24,17 @@ package io.crate.integrationtests;
 
 import com.carrotsearch.hppc.cursors.ObjectCursor;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
-import org.elasticsearch.cluster.ClusterService;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
 import org.elasticsearch.cluster.routing.allocation.command.MoveAllocationCommand;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Priority;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Test;
-
-import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.Matchers.is;
 
 @ESIntegTestCase.ClusterScope(numDataNodes = 2)
-@UseJdbc
 public class RemoteCollectorIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -56,13 +51,13 @@ public class RemoteCollectorIntegrationTest extends SQLTransportIntegrationTest 
         PlanForNode plan = plan("update t set x = x * 2");
 
         ClusterService clusterService = internalCluster().getInstance(ClusterService.class);
-        IndexShardRoutingTable t = clusterService.state().routingTable().shardRoutingTable("t", 0);
+        IndexShardRoutingTable t = clusterService.state().routingTable().shardRoutingTable(getFqn("t"), 0);
 
         String sourceNodeId = t.primaryShard().currentNodeId();
         assert sourceNodeId != null;
         String targetNodeId = null;
 
-        for (ObjectCursor<String> cursor : clusterService.state().nodes().dataNodes().keys()) {
+        for (ObjectCursor<String> cursor : clusterService.state().nodes().getDataNodes().keys()) {
             if (!sourceNodeId.equals(cursor.value)) {
                 targetNodeId = cursor.value;
             }
@@ -70,15 +65,15 @@ public class RemoteCollectorIntegrationTest extends SQLTransportIntegrationTest 
         assert targetNodeId != null;
 
         client().admin().cluster().prepareReroute()
-            .add(new MoveAllocationCommand(new ShardId("t", 0), sourceNodeId, targetNodeId))
+            .add(new MoveAllocationCommand(getFqn("t"), 0, sourceNodeId, targetNodeId))
             .execute().actionGet();
 
-        client().admin().cluster().prepareHealth("t")
+        client().admin().cluster().prepareHealth(getFqn("t"))
             .setWaitForEvents(Priority.LANGUID)
-            .setWaitForRelocatingShards(0)
+            .setWaitForNoRelocatingShards(true)
             .setTimeout(TimeValue.timeValueSeconds(5)).execute().actionGet();
 
-        execute(plan).resultFuture().get(1, TimeUnit.SECONDS);
+        execute(plan).getResult();
 
         execute("refresh table t");
         assertThat(TestingHelpers.printedTable(execute("select * from t order by id").rows()),

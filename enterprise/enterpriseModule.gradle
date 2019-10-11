@@ -1,0 +1,22 @@
+apply from: "$rootDir/gradle/javaModule.gradle"
+
+task getVersion(dependsOn: [':es:es-server:getVersion']) {
+    doFirst {
+        project.version = project(':es:es-server').getVersion.version
+    }
+}
+
+checkstyle {
+    // only override enterprise specific properties
+    configProperties['licenseHeaderFile'] = "enterprise_header.txt"
+}
+
+
+jar {
+    doLast {
+        manifest {
+            attributes("Implementation-Title": description, "Implementation-Version": project.version)
+        }
+    }
+}
+jar.dependsOn('getVersion')

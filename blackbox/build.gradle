@@ -1,11 +1,9 @@
 def crateDist = file("$projectDir/tmp/crate/")
-def crateClient = file("$projectDir/tmp/crateClient/")
 
 apply plugin: 'base'
 
 evaluationDependsOn(':app')
-evaluationDependsOn(':client')
-evaluationDependsOn(':es-repository-hdfs')
+evaluationDependsOn(':es:es-repository-hdfs')
 
 task bootstrap(type: Exec) {
     inputs.file "$projectDir/bootstrap.sh"
@@ -14,77 +12,94 @@ task bootstrap(type: Exec) {
     commandLine 'sh', "$projectDir/bootstrap.sh"
 }
 
-task unpackDistTar(dependsOn: [project(':app').distTar, project(':client').jar]) << {
-    copy {
-        includeEmptyDirs = false
-        from(tarTree(project(':app').distTar.archivePath)) {
-            eachFile { details ->
-                details.path =
-                        details.path.substring(details.relativePath.segments[0].length())
+task deleteCrateDist(type: Delete) {
+    delete crateDist
+}
+
+task unpackDistTar(dependsOn: [project(':app').installDist, deleteCrateDist]) {
+    doLast {
+        copy {
+            from(project(':app').installDist.destinationDir) {
+                includeEmptyDirs = true
             }
+            into crateDist
         }
-        into crateDist
+        ignoreDiskThreshold()
     }
-    copy {
-        from(project(':client').jar)
-        into crateClient
-    }
+    outputs.dir crateDist
 }
 
-task lessLogging(dependsOn: unpackDistTar) << {
-    def file = new File("$projectDir/tmp/crate/config/logging.yml")
-    file.write(file.text.replaceAll('rootLogger: INFO', 'rootLogger: WARN'))
+task unpackCommunityEditionDistTar(dependsOn: [project(':app').installCommunityEditionDist, deleteCrateDist]) {
+    doLast {
+        copy {
+            from(project(':app').installCommunityEditionDist.destinationDir) {
+                includeEmptyDirs = true
+            }
+            into crateDist
+        }
+        ignoreDiskThreshold()
+    }
+    outputs.dir crateDist
 }
 
-task ignoreDiskThreshold(dependsOn: unpackDistTar) << {
+def ignoreDiskThreshold() {
     def file = new File("$projectDir/tmp/crate/config/crate.yml")
     file.write(file.text.replaceAll(
-            '# cluster.routing.allocation.disk.threshold_enabled: true',
-            'cluster.routing.allocation.disk.threshold_enabled: false')
+        '# cluster.routing.allocation.disk.threshold_enabled: true',
+        'cluster.routing.allocation.disk.threshold_enabled: false')
     )
-}
-
-task hdfsTest(type: Exec) {
-    commandLine "$projectDir/bin/hdfs-test"
-}
-
-task sigarTest(type: Exec) {
-    commandLine "$projectDir/bin/sigar-test"
-}
-
-task itest(type: Exec) {
-    commandLine "$projectDir/bin/test", '-1', '-t', '!process_test'
-}
-
-task gtest(type: Exec) {
-    commandLine "$projectDir/bin/test", '-1', '-t', 'process_test'
-}
-
-task logicTest(type: Exec) {
-    commandLine "$projectDir/bin/logic-test"
 }
 
 task buildDocs(type: Exec, dependsOn: bootstrap) {
     commandLine "$projectDir/bin/sphinx"
 }
 
+task developDocs(type: Exec, dependsOn: bootstrap) {
+    commandLine "$projectDir/bin/sphinx", "dev"
+}
 
-hdfsTest.dependsOn(unpackDistTar, bootstrap, lessLogging, ignoreDiskThreshold, project(':es-repository-hdfs').distZipHadoop2)
-sigarTest.dependsOn(unpackDistTar, bootstrap, lessLogging, ignoreDiskThreshold)
-itest.dependsOn(unpackDistTar, bootstrap, lessLogging, ignoreDiskThreshold)
-gtest.dependsOn(unpackDistTar, bootstrap, lessLogging, ignoreDiskThreshold)
-logicTest.dependsOn(unpackDistTar, bootstrap, lessLogging, ignoreDiskThreshold)
+task hdfsTest(type: Exec, dependsOn: ['bootstrap', 'unpackDistTar', project(':es:es-repository-hdfs').blackBoxTestJar]) {
+    commandLine "$projectDir/bin/test-hdfs"
+}
 
-task cleanDocs << {
-    FileCollection toDelete = files(
+task monitoringTest(type: Exec, dependsOn: ['bootstrap', 'unpackDistTar']) {
+    commandLine "$projectDir/bin/test-jmx"
+}
+
+task itest(type: Exec, dependsOn: ['bootstrap', 'unpackDistTar']) {
+    commandLine "$projectDir/bin/test-docs"
+}
+
+task gtest(type: Exec, dependsOn: ['bootstrap', 'unpackDistTar']) {
+    commandLine "$projectDir/bin/test-decommission"
+}
+
+task dnsDiscoveryTest(type: Exec, dependsOn: ['bootstrap', 'unpackDistTar']) {
+    commandLine "$projectDir/bin/test-dns-discovery"
+}
+
+task ceItest(type: Exec, dependsOn: ['bootstrap', 'unpackCommunityEditionDistTar']) {
+    commandLine "$projectDir/bin/test-ce-docs"
+}
+
+task ceNoEnterpriseTest(type: Exec, dependsOn: ['bootstrap', 'unpackCommunityEditionDistTar']) {
+    commandLine "$projectDir/bin/test-ce-no-enterprise"
+}
+
+task ceLicenseTest(type: Exec, dependsOn: ['bootstrap', 'unpackCommunityEditionDistTar']) {
+    commandLine "$projectDir/bin/test-ce-licensing"
+}
+
+task cleanDocs {
+    doLast {
+        FileCollection toDelete = files(
             crateDist,
-            "$projectDir/docs/out/text",
-            "$projectDir/docs/out/html",
-            "$projectDir/docs/clients/out/text",
-            "$projectDir/docs/clients/out/html"
-    )
-    toDelete.each {
-        File file -> delete file
+            "$projectDir/docs/_out/html",
+        )
+        toDelete.each {
+            File file -> delete file
+        }
     }
 }
-clean.dependsOn([cleanDocs, cleanBootstrap])
+
+clean.dependsOn([cleanDocs, cleanBootstrap, cleanUnpackDistTar, deleteCrateDist])

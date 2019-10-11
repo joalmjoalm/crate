@@ -21,54 +21,95 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.MoreObjects;
-import com.google.common.base.Objects;
-import com.google.common.base.Optional;
-import com.google.common.collect.ImmutableList;
+import io.crate.common.collections.Lists2;
 
 import javax.annotation.Nullable;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
 
-public class ObjectColumnType extends ColumnType {
+public class ObjectColumnType<T> extends ColumnType<T> {
 
-    private final Optional<String> objectType;
-    private final List<ColumnDefinition> nestedColumns;
+    private final Optional<ColumnPolicy> objectType;
+    private final List<ColumnDefinition<T>> nestedColumns;
 
-    public ObjectColumnType(@Nullable String objectType, @Nullable List<ColumnDefinition> nestedColumns) {
+    public ObjectColumnType(@Nullable String objectType, List<ColumnDefinition<T>> nestedColumns) {
         super("object");
-        this.objectType = Optional.fromNullable(objectType);
-        this.nestedColumns = MoreObjects.firstNonNull(nestedColumns, ImmutableList.<ColumnDefinition>of());
+        this.objectType = objectType == null ? Optional.empty() : Optional.of(ColumnPolicy.of(objectType));
+        this.nestedColumns = nestedColumns;
     }
 
-    public Optional<String> objectType() {
+    public Optional<ColumnPolicy> objectType() {
         return objectType;
     }
 
-    public List<ColumnDefinition> nestedColumns() {
+    public List<ColumnDefinition<T>> nestedColumns() {
         return nestedColumns;
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hashCode(name, objectType, nestedColumns);
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        if (!super.equals(o)) return false;
-
-        ObjectColumnType that = (ObjectColumnType) o;
-
-        if (!nestedColumns.equals(that.nestedColumns)) return false;
-        if (!objectType.equals(that.objectType)) return false;
-
-        return true;
     }
 
     @Override
     public <R, C> R accept(AstVisitor<R, C> visitor, C context) {
         return visitor.visitObjectColumnType(this, context);
+    }
+
+    @Override
+    public <U> ObjectColumnType<U> map(Function<? super T, ? extends U> mapper) {
+        String objectTypeString = null;
+        if (objectType.isPresent()) {
+            objectTypeString = objectType.get().lowerCaseName();
+        }
+        return new ObjectColumnType<>(
+            objectTypeString,
+            Lists2.map(nestedColumns, x -> x.map(mapper))
+        );
+    }
+
+    @Override
+    public <U> ColumnType<U> mapExpressions(ColumnType<U> mappedType,
+                                            Function<? super T, ? extends U> mapper) {
+        ObjectColumnType<U> mappedObjectType = (ObjectColumnType<U>) mappedType;
+        String objectTypeString = null;
+        if (objectType.isPresent()) {
+            objectTypeString = objectType.get().lowerCaseName();
+        }
+        ArrayList<ColumnDefinition<U>> nestedMappedColumns = new ArrayList<>(nestedColumns.size());
+        for (int i = 0; i < nestedColumns.size(); i++) {
+            ColumnDefinition<U> columnDefinition =
+                (ColumnDefinition<U>) nestedColumns.get(i).mapExpressions(mappedObjectType.nestedColumns.get(i), mapper);
+            nestedMappedColumns.add(columnDefinition);
+        }
+        return new ObjectColumnType<>(
+            objectTypeString,
+            nestedMappedColumns
+        );
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
+
+        ObjectColumnType that = (ObjectColumnType) o;
+
+        if (!objectType.equals(that.objectType)) {
+            return false;
+        }
+        return nestedColumns.equals(that.nestedColumns);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = super.hashCode();
+        result = 31 * result + objectType.hashCode();
+        result = 31 * result + nestedColumns.hashCode();
+        return result;
     }
 }

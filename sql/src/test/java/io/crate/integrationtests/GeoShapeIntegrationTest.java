@@ -24,10 +24,11 @@ package io.crate.integrationtests;
 
 import com.google.common.collect.ImmutableMap;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.UseRandomizedSchema;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static com.carrotsearch.randomizedtesting.RandomizedTest.$;
@@ -37,7 +38,6 @@ import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.core.Is.is;
 
-@UseJdbc
 public class GeoShapeIntegrationTest extends SQLTransportIntegrationTest {
 
     private static final Map GEO_SHAPE1 = ImmutableMap.of(
@@ -85,36 +85,11 @@ public class GeoShapeIntegrationTest extends SQLTransportIntegrationTest {
             "{coordinates=[[2.0, 2.0], [3.0, 3.0]], type=LineString}]\n"));
 //TODO: Re-enable once SQLResponse also includes the data types for the columns
 //        assertThat(response.columnTypes()[0], is((DataType) new ArrayType(DataTypes.GEO_SHAPE)));
-        assertThat(response.rows()[0][0], instanceOf(Object[].class));
+        assertThat(response.rows()[0][0], instanceOf(List.class));
     }
 
     @Test
-    public void testIndexWithES() throws Exception {
-        execute("create table test (shape geo_shape)");
-        ensureYellow();
-        client().prepareIndex("test", "default", "test").setSource(jsonBuilder().startObject()
-            .startObject("shape")
-            .field("type", "polygon")
-            .startArray("coordinates").startArray()
-            .startArray().value(-122.83).value(48.57).endArray()
-            .startArray().value(-122.77).value(48.56).endArray()
-            .startArray().value(-122.79).value(48.53).endArray()
-            .startArray().value(-122.83).value(48.57).endArray() // close the polygon
-            .endArray().endArray()
-            .endObject()
-            .endObject()).execute().actionGet();
-        execute("refresh table test");
-        execute("select shape from test");
-        assertThat(response.rowCount(), is(1L));
-        assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "{coordinates=[[[-122.83, 48.57], [-122.77, 48.56], [-122.79, 48.53], [-122.83, 48.57]]], type=polygon}\n"));
-//TODO: Re-enable once SQLResponse also includes the data types for the columns
-//        assertThat(response.columnTypes()[0], is((DataType) DataTypes.GEO_SHAPE));
-        assertThat(response.rows()[0][0], instanceOf(Map.class));
-
-    }
-
-    @Test
+    @UseRandomizedSchema(random = false)
     public void testShowCreateTable() throws Exception {
         execute("create table test (" +
                 "col1 geo_shape INDEX using QUADTREE with (precision='1m', distance_error_pct='0.25')" +
@@ -143,6 +118,7 @@ public class GeoShapeIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    @UseRandomizedSchema(random = false)
     public void testShowCreateTableWithDefaultValues() throws Exception {
         execute("create table test (" +
                 "col1 geo_shape" +
@@ -197,5 +173,22 @@ public class GeoShapeIntegrationTest extends SQLTransportIntegrationTest {
               " 12.995452 52.417497))"));
         assertThat(response.rowCount(), is(1L));
         assertThat(response.rows()[0][0], is((Object) 1L));
+    }
+
+    @Test
+    public void testGeoPointInPolygonQueryLuceneBug() {
+        // Relates to https://github.com/elastic/elasticsearch/issues/20333
+        // and fails if GeoPointInPolygonQuery is used in LuceneQueryBuilder.getPolygonQuery()
+        execute("create table test(id integer, geopos geo_point)");
+        ensureYellow();
+        execute("insert into test (id, geopos) values(1, 'POINT(-0.35842 51.46961)')");
+        execute("refresh table test");
+        execute("select * from test where within(geopos, 'POLYGON((-0.129089 51.536726, -0.126686 51.536726, " +
+                "-0.125999 51.536512, -0.125656 51.536512, -0.125312 51.536299, -0.125312 51.535444, " +
+                "-0.125656 51.535231, -0.128402 51.53395, -0.128746 51.53395, -0.129432 51.533736, " +
+                "-0.129776 51.533736, -0.130462 51.53395, -0.130805 51.53395, -0.131149 51.534163, " +
+                "-0.131835 51.534804, -0.131835 51.535017, -0.131492 51.535444, -0.129776 51.536512, " +
+                "-0.129089 51.536726))')");
+        assertThat(response.rowCount(), is(0L));
     }
 }

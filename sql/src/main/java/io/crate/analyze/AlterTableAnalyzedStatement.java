@@ -21,51 +21,50 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Optional;
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.doc.DocTableInfo;
+import io.crate.metadata.table.TableInfo;
 
 import javax.annotation.Nullable;
+import java.util.Optional;
 
-public class AlterTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
+public class AlterTableAnalyzedStatement {
 
-    private final Schemas schemas;
-    private DocTableInfo tableInfo;
-    private Optional<PartitionName> partitionName = Optional.absent();
-    private boolean excludePartitions = false;
 
-    public AlterTableAnalyzedStatement(Schemas schemas) {
-        this.schemas = schemas;
+    private final TableInfo tableInfo;
+    private final PartitionName partitionName;
+    private final TableParameter tableParameter;
+    private final boolean excludePartitions;
+    private final boolean partitioned;
+
+    public AlterTableAnalyzedStatement(TableInfo tableInfo,
+                                       @Nullable PartitionName partitionName,
+                                       TableParameter tableParameter,
+                                       boolean excludePartitions,
+                                       boolean partitioned) {
+        this.tableInfo = tableInfo;
+        this.partitionName = partitionName;
+        this.tableParameter = tableParameter;
+        this.excludePartitions = excludePartitions;
+        this.partitioned = partitioned;
     }
 
-    public void table(TableIdent tableIdent) {
-        tableInfo = schemas.getWritableTable(tableIdent);
-    }
-
-    public DocTableInfo table() {
+    public TableInfo table() {
         return tableInfo;
     }
 
-    public void partitionName(@Nullable PartitionName partitionName) {
-        this.partitionName = Optional.fromNullable(partitionName);
-    }
-
     public Optional<PartitionName> partitionName() {
-        return partitionName;
-    }
-
-    public void excludePartitions(boolean excludePartitions) {
-        this.excludePartitions = excludePartitions;
+        return Optional.ofNullable(partitionName);
     }
 
     public boolean excludePartitions() {
         return excludePartitions;
     }
 
-    @Override
-    public <C, R> R accept(AnalyzedStatementVisitor<C, R> analyzedStatementVisitor, C context) {
-        return analyzedStatementVisitor.visitAlterTableStatement(this, context);
+    public TableParameter tableParameter() {
+        return tableParameter;
+    }
+
+    public boolean isPartitioned() {
+        return partitioned;
     }
 }

@@ -24,62 +24,92 @@ package io.crate.metadata.shard;
 import com.google.common.collect.ImmutableMap;
 import io.crate.exceptions.ResourceUnknownException;
 import io.crate.exceptions.UnhandledServerException;
-import io.crate.metadata.*;
+import io.crate.execution.engine.collect.NestableCollectExpression;
+import io.crate.expression.NestableInput;
+import io.crate.expression.reference.ReferenceResolver;
+import io.crate.expression.reference.StaticTableReferenceResolver;
+import io.crate.expression.reference.sys.shard.ShardRowContext;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.IndexParts;
+import io.crate.metadata.MapBackedRefResolver;
+import io.crate.metadata.PartitionName;
+import io.crate.metadata.Reference;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.Schemas;
 import io.crate.metadata.doc.DocTableInfo;
-import io.crate.operation.reference.partitioned.PartitionedColumnExpression;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
+import io.crate.metadata.sys.SysShardsTableInfo;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.index.Index;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
-public class ShardReferenceResolver extends AbstractReferenceResolver {
+import static io.crate.execution.engine.collect.NestableCollectExpression.constant;
 
-    private static final ESLogger LOGGER = Loggers.getLogger(ShardReferenceResolver.class);
+public class ShardReferenceResolver implements ReferenceResolver<NestableInput<?>> {
 
-    @Inject
-    public ShardReferenceResolver(Index index,
-                                  Schemas schemas,
-                                  final Map<ReferenceIdent, ReferenceImplementation> globalImplementations,
-                                  final Map<ReferenceIdent, ShardReferenceImplementation> shardImplementations) {
-        ImmutableMap.Builder<ReferenceIdent, ReferenceImplementation> builder = ImmutableMap.builder();
-        builder.putAll(globalImplementations)
-            .putAll(shardImplementations);
+    private static final Logger LOGGER = LogManager.getLogger(ShardReferenceResolver.class);
+    private static final StaticTableReferenceResolver<ShardRowContext> SHARD_REFERENCE_RESOLVER_DELEGATE =
+        new StaticTableReferenceResolver<>(SysShardsTableInfo.expressions());
+    private static final ReferenceResolver<NestableInput<?>> EMPTY_RESOLVER =
+        new MapBackedRefResolver(Collections.emptyMap());
 
-        if (PartitionName.isPartition(index.name())) {
-            PartitionName partitionName;
-            try {
-                partitionName = PartitionName.fromIndexOrTemplate(index.name());
-            } catch (IllegalArgumentException e) {
-                throw new UnhandledServerException(String.format(Locale.ENGLISH,
-                    "Unable to load PARTITIONED BY columns from partition %s", index.name()), e);
-            }
-            TableIdent tableIdent = partitionName.tableIdent();
-            try {
-                DocTableInfo info = (DocTableInfo) schemas.getTableInfo(tableIdent);
-                if (!schemas.isOrphanedAlias(info)) {
-                    assert info.isPartitioned();
-                    int i = 0;
-                    int numPartitionedColumns = info.partitionedByColumns().size();
-
-                    assert partitionName.values().size() ==
-                           numPartitionedColumns : "invalid number of partitioned columns";
-                    for (Reference partitionedInfo : info.partitionedByColumns()) {
-                        builder.put(partitionedInfo.ident(), new PartitionedColumnExpression(
-                            partitionedInfo,
-                            partitionName.values().get(i)
-                        ));
-                        i++;
-                    }
-                } else {
-                    LOGGER.error("Orphaned partition '{}' with missing table '{}' found", index, tableIdent.fqn());
-                }
-            } catch (ResourceUnknownException e) {
-                LOGGER.error("Orphaned partition '{}' with missing table '{}' found", index, tableIdent.fqn());
-            }
+    private static ReferenceResolver<NestableInput<?>> createPartitionColumnResolver(Index index, Schemas schemas) {
+        PartitionName partitionName;
+        try {
+            partitionName = PartitionName.fromIndexOrTemplate(index.getName());
+        } catch (IllegalArgumentException e) {
+            throw new UnhandledServerException(String.format(Locale.ENGLISH,
+                "Unable to load PARTITIONED BY columns from partition %s", index.getName()), e);
         }
-        this.implementations.putAll(builder.build());
+        RelationName relationName = partitionName.relationName();
+        ImmutableMap.Builder<ColumnIdent, NestableInput> builder = ImmutableMap.builder();
+        try {
+            DocTableInfo info = schemas.getTableInfo(relationName);
+            assert info.isPartitioned() : "table must be partitioned";
+            int i = 0;
+            int numPartitionedColumns = info.partitionedByColumns().size();
+
+            List<String> partitionValue = partitionName.values();
+            assert partitionValue.size() ==
+                   numPartitionedColumns : "invalid number of partitioned columns";
+            for (Reference partitionedInfo : info.partitionedByColumns()) {
+                builder.put(
+                    partitionedInfo.column(),
+                    constant(partitionedInfo.valueType().value(partitionValue.get(i)))
+                );
+                i++;
+            }
+        } catch (ResourceUnknownException e) {
+            LOGGER.error("Orphaned partition '{}' with missing table '{}' found", index, relationName.fqn());
+        }
+        return new MapBackedRefResolver(builder.build());
+    }
+
+    private final ShardRowContext shardRowContext;
+    private final ReferenceResolver<NestableInput<?>> partitionColumnResolver;
+
+    public ShardReferenceResolver(Schemas schemas, ShardRowContext shardRowContext) {
+        this.shardRowContext = shardRowContext;
+        IndexParts indexParts = shardRowContext.indexParts();
+        if (indexParts.isPartitioned()) {
+            partitionColumnResolver = createPartitionColumnResolver(
+                shardRowContext.indexShard().shardId().getIndex(), schemas);
+        } else {
+            partitionColumnResolver = EMPTY_RESOLVER;
+        }
+    }
+
+    @Override
+    public NestableInput<?> getImplementation(Reference ref) {
+        NestableInput<?> partitionColImpl = partitionColumnResolver.getImplementation(ref);
+        if (partitionColImpl != null) {
+            return partitionColImpl;
+        }
+        NestableCollectExpression<ShardRowContext, ?> impl = SHARD_REFERENCE_RESOLVER_DELEGATE.getImplementation(ref);
+        impl.setNextRow(shardRowContext);
+        return impl;
     }
 }

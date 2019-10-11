@@ -21,23 +21,27 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.MoreObjects;
-import com.google.common.base.Objects;
-import com.google.common.collect.ImmutableList;
 
-import javax.annotation.Nullable;
+import io.crate.common.collections.Lists2;
+
 import java.util.List;
+import java.util.Objects;
+import java.util.function.Function;
 
-public class PartitionedBy extends CrateTableOption {
+public final class PartitionedBy<T> extends Node {
 
-    private final List<Expression> columns;
+    private final List<T> columns;
 
-    public PartitionedBy(@Nullable List<Expression> columns) {
-        this.columns = MoreObjects.firstNonNull(columns, ImmutableList.<Expression>of());
+    public PartitionedBy(List<T> columns) {
+        this.columns = columns;
     }
 
-    public List<Expression> columns() {
+    public List<T> columns() {
         return columns;
+    }
+
+    public <U> PartitionedBy<U> map(Function<? super T, ? extends U> mapper) {
+        return new PartitionedBy<>(Lists2.map(columns, mapper));
     }
 
     @Override
@@ -52,14 +56,14 @@ public class PartitionedBy extends CrateTableOption {
 
         PartitionedBy that = (PartitionedBy) o;
 
-        if (columns != null ? !columns.equals(that.columns) : that.columns != null) return false;
-
-        return true;
+        return Objects.equals(columns, that.columns);
     }
 
     @Override
     public String toString() {
-        return MoreObjects.toStringHelper(this).add("columns", columns).toString();
+        return "PartitionedBy{" +
+               "columns=" + columns +
+               '}';
     }
 
     @Override

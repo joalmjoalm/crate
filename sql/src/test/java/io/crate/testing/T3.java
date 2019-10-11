@@ -22,70 +22,126 @@
 
 package io.crate.testing;
 
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.analyze.relations.DocTableRelation;
-import io.crate.analyze.relations.TableRelation;
-import io.crate.metadata.MetaDataModule;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.doc.DocTableInfo;
-import io.crate.metadata.table.SchemaInfo;
-import io.crate.metadata.table.TableInfo;
-import io.crate.metadata.table.TestingTableInfo;
 import io.crate.sql.tree.QualifiedName;
-import io.crate.types.DataTypes;
+import org.elasticsearch.cluster.service.ClusterService;
 
+import java.io.IOException;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
-
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import java.util.stream.Collectors;
 
 public class T3 {
 
-    public static final DocTableInfo T1_INFO = new TestingTableInfo.Builder(new TableIdent(null, "t1"), null)
-        .add("a", DataTypes.STRING)
-        .add("x", DataTypes.INTEGER)
-        .add("i", DataTypes.INTEGER)
-        .build();
-    public static final DocTableRelation TR_1 = new DocTableRelation(T1_INFO);
+    public static final String T1_DEFINITION =
+        "create table doc.t1 (" +
+        "  a text," +
+        "  x int," +
+        "  i int" +
+        ")";
 
-    public static final DocTableInfo T2_INFO = new TestingTableInfo.Builder(new TableIdent(null, "t2"), null)
-        .add("b", DataTypes.STRING)
-        .add("y", DataTypes.INTEGER)
-        .add("i", DataTypes.INTEGER)
-        .build();
-    public static final DocTableRelation TR_2 = new DocTableRelation(T2_INFO);
+    public static final String T2_DEFINITION =
+        "create table doc.t2 (" +
+        "  b text," +
+        "  y int," +
+        "  i int" +
+        ")";
 
-    public static final TableInfo T3_INFO = new TestingTableInfo.Builder(new TableIdent(null, "t3"), null)
-        .add("c", DataTypes.STRING)
-        .add("z", DataTypes.INTEGER)
-        .build();
-    public static final TableRelation TR_3 = new TableRelation(T3_INFO);
+    public static final String T3_DEFINITION =
+        "create table doc.t3 (" +
+        "  c text," +
+        "  z int" +
+        ")";
 
-    public static final MetaDataModule META_DATA_MODULE = new MetaDataModule() {
-        @Override
-        protected void bindSchemas() {
-            super.bindSchemas();
-            SchemaInfo schemaInfo = mock(SchemaInfo.class);
-            when(schemaInfo.getTableInfo(T1_INFO.ident().name())).thenReturn(T1_INFO);
-            when(schemaInfo.getTableInfo(T2_INFO.ident().name())).thenReturn(T2_INFO);
-            when(schemaInfo.getTableInfo(T3_INFO.ident().name())).thenReturn(T3_INFO);
-            when(schemaInfo.name()).thenReturn(Schemas.DEFAULT_SCHEMA_NAME);
-            schemaBinder.addBinding(Schemas.DEFAULT_SCHEMA_NAME).toInstance(schemaInfo);
+    public static final String T4_DEFINITION =
+        "create table doc.t4 (" +
+        "  id int," +
+        "  obj object as (" +
+        "    i int" +
+        "  )," +
+        "  obj_array array(object as (" +
+        "    i int" +
+        "  ))" +
+        ")";
+
+    public static final String T5_DEFINITION =
+        "create table t5 (" +
+        "  i int," +
+        "  w bigint," +
+        "  ts_z timestamp with time zone," +
+        "  ts timestamp without time zone" +
+        ")";
+
+    public static final QualifiedName T1 = new QualifiedName(Arrays.asList(Schemas.DOC_SCHEMA_NAME, "t1"));
+    public static final QualifiedName T2 = new QualifiedName(Arrays.asList(Schemas.DOC_SCHEMA_NAME, "t2"));
+    public static final QualifiedName T3 = new QualifiedName(Arrays.asList(Schemas.DOC_SCHEMA_NAME, "t3"));
+    public static final QualifiedName T4 = new QualifiedName(Arrays.asList(Schemas.DOC_SCHEMA_NAME, "t4"));
+
+    public static final RelationName T1_RN = new RelationName(Schemas.DOC_SCHEMA_NAME, "t1");
+    public static final RelationName T2_RN = new RelationName(Schemas.DOC_SCHEMA_NAME, "t2");
+    public static final RelationName T3_RN = new RelationName(Schemas.DOC_SCHEMA_NAME, "t3");
+    public static final RelationName T4_RN = new RelationName(Schemas.DOC_SCHEMA_NAME, "t4");
+    public static final RelationName T5_RN = new RelationName(Schemas.DOC_SCHEMA_NAME, "t5");
+
+    private static final Map<RelationName, String> RELATION_DEFINITIONS = ImmutableMap.of(
+        T1_RN, T1_DEFINITION,
+        T2_RN, T2_DEFINITION,
+        T3_RN, T3_DEFINITION,
+        T4_RN, T4_DEFINITION,
+        T5_RN, T5_DEFINITION);
+
+    public static List<AnalyzedRelation> relations(ClusterService clusterService) {
+        SQLExecutor.Builder executorBuilder = SQLExecutor.builder(clusterService);
+        RELATION_DEFINITIONS.forEach((key, value) -> {
+            try {
+                executorBuilder.addTable(value);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        SQLExecutor executor = executorBuilder.build();
+        Schemas schemas = executor.schemas();
+
+        return RELATION_DEFINITIONS.keySet().stream()
+            .map(rn -> new DocTableRelation(schemas.getTableInfo(rn)))
+            .collect(Collectors.toList());
+    }
+
+    public static Map<QualifiedName, AnalyzedRelation> sources(ClusterService clusterService) {
+        return sources(RELATION_DEFINITIONS.keySet(), clusterService);
+    }
+
+    public static Map<QualifiedName, AnalyzedRelation> sources(Iterable<RelationName> relations, ClusterService clusterService) {
+        SQLExecutor.Builder executorBuilder = SQLExecutor.builder(clusterService);
+        relations.forEach(rn -> {
+            String tableDefinition = RELATION_DEFINITIONS.get(rn);
+            if (tableDefinition == null) {
+                throw new RuntimeException("Unknown relation " + rn);
+            }
+            try {
+                executorBuilder.addTable(tableDefinition);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        SQLExecutor executor = executorBuilder.build();
+        Schemas schemas = executor.schemas();
+
+        ImmutableMap.Builder<QualifiedName, AnalyzedRelation> builder = ImmutableMap.builder();
+        for (RelationName relationName : relations) {
+            builder.put(
+                new QualifiedName(Arrays.asList(relationName.schema(), relationName.name())),
+                new DocTableRelation(schemas.getTableInfo(relationName)));
         }
-    };
+        return builder.build();
+    }
 
-    public static final QualifiedName T1 = new QualifiedName(Arrays.asList(Schemas.DEFAULT_SCHEMA_NAME, "t1"));
-    public static final QualifiedName T2 = new QualifiedName(Arrays.asList(Schemas.DEFAULT_SCHEMA_NAME, "t2"));
-    public static final QualifiedName T3 = new QualifiedName(Arrays.asList(Schemas.DEFAULT_SCHEMA_NAME, "t3"));
-
-    public static final ImmutableList<AnalyzedRelation> RELATIONS = ImmutableList.<AnalyzedRelation>of(TR_1, TR_2, TR_3);
-    public static final Map<QualifiedName, AnalyzedRelation> SOURCES = ImmutableMap.<QualifiedName, AnalyzedRelation>of(
-        T1, TR_1,
-        T2, TR_2,
-        T3, TR_3
-    );
+    public static <R> R fromSource(RelationName relationName, Map<QualifiedName, AnalyzedRelation> sources) {
+        return (R) sources.get(new QualifiedName(Arrays.asList(relationName.schema(), relationName.name())));
+    }
 }

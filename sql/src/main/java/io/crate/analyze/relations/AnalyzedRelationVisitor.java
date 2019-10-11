@@ -21,7 +21,9 @@
 
 package io.crate.analyze.relations;
 
-import io.crate.analyze.*;
+import io.crate.analyze.ExplainAnalyzedStatement;
+import io.crate.analyze.MultiSourceSelect;
+import io.crate.analyze.QueriedSelectRelation;
 
 import javax.annotation.Nullable;
 import java.util.Locale;
@@ -36,16 +38,12 @@ public abstract class AnalyzedRelationVisitor<C, R> {
         throw new UnsupportedOperationException(String.format(Locale.ENGLISH, "relation \"%s\" is not supported", relation));
     }
 
-    public R visitQueriedTable(QueriedTable table, C context) {
-        return visitAnalyzedRelation(table, context);
-    }
-
-    public R visitQueriedDocTable(QueriedDocTable table, C context) {
-        return visitAnalyzedRelation(table, context);
-    }
-
     public R visitMultiSourceSelect(MultiSourceSelect multiSourceSelect, C context) {
         return visitAnalyzedRelation(multiSourceSelect, context);
+    }
+
+    public R visitUnionSelect(UnionSelect unionSelect, C context) {
+        return visitAnalyzedRelation(unionSelect, context);
     }
 
     public R visitTableRelation(TableRelation tableRelation, C context) {
@@ -56,26 +54,6 @@ public abstract class AnalyzedRelationVisitor<C, R> {
         return visitAnalyzedRelation(relation, context);
     }
 
-    public R visitPlanedAnalyzedRelation(PlannedAnalyzedRelation plannedAnalyzedRelation, C context) {
-        return visitAnalyzedRelation(plannedAnalyzedRelation, context);
-    }
-
-    public R visitInsertFromQuery(InsertFromSubQueryAnalyzedStatement insertFromSubQueryAnalyzedStatement, C context) {
-        return visitAnalyzedRelation(insertFromSubQueryAnalyzedStatement, context);
-    }
-
-    public R visitUpdateAnalyzedStatement(UpdateAnalyzedStatement updateAnalyzedStatement, C context) {
-        return visitAnalyzedRelation(updateAnalyzedStatement, context);
-    }
-
-    public R visitCopyToAnalyzedStatement(CopyToAnalyzedStatement statement, C context) {
-        return visitAnalyzedRelation(statement, context);
-    }
-
-    public R visitTwoTableJoin(TwoTableJoin twoTableJoin, C context) {
-        return visitAnalyzedRelation(twoTableJoin, context);
-    }
-
     public R visitExplain(ExplainAnalyzedStatement explainAnalyzedStatement, C context) {
         return visitAnalyzedRelation(explainAnalyzedStatement, context);
     }
@@ -84,7 +62,15 @@ public abstract class AnalyzedRelationVisitor<C, R> {
         return visitAnalyzedRelation(tableFunctionRelation, context);
     }
 
-    public R visitQueriedSelectRelation(QueriedSelectRelation relation, C context) {
+    public R visitQueriedSelectRelation(QueriedSelectRelation<?> relation, C context) {
         return visitAnalyzedRelation(relation, context);
+    }
+
+    public R visitView(AnalyzedView analyzedView, C context) {
+        return analyzedView.relation().accept(this, context);
+    }
+
+    public R visitAliasedAnalyzedRelation(AliasedAnalyzedRelation relation, C context) {
+        return relation.relation().accept(this, context);
     }
 }

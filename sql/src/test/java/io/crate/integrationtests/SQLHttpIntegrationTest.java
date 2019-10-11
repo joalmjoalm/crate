@@ -28,13 +28,13 @@ import org.apache.http.Header;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.methods.HttpPut;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.transport.InetSocketTransportAddress;
 import org.elasticsearch.http.HttpServerTransport;
 import org.junit.Before;
 
@@ -48,13 +48,29 @@ public abstract class SQLHttpIntegrationTest extends SQLTransportIntegrationTest
 
     private HttpPost httpPost;
     private InetSocketAddress address;
-    private CloseableHttpClient httpClient = HttpClients.createDefault();
+
+    protected final CloseableHttpClient httpClient;
+    private final boolean usesSSL;
+
+    public SQLHttpIntegrationTest() {
+        this(false);
+    }
+
+    public SQLHttpIntegrationTest(boolean useSSL) {
+        this.httpClient = HttpClients.custom()
+            .setSSLHostnameVerifier(new NoopHostnameVerifier()).build();
+        this.usesSSL = useSSL;
+    }
+
+    @Override
+    protected boolean addMockHttpTransport() {
+        return false;
+    }
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        return Settings.settingsBuilder()
+        return Settings.builder()
             .put(super.nodeSettings(nodeOrdinal))
-            .put("http.enabled", true)
             .put("http.host", "127.0.0.1")
             .build();
     }
@@ -62,9 +78,10 @@ public abstract class SQLHttpIntegrationTest extends SQLTransportIntegrationTest
     @Before
     public void setup() {
         HttpServerTransport httpServerTransport = internalCluster().getInstance(HttpServerTransport.class);
-        address = ((InetSocketTransportAddress) httpServerTransport.boundAddress().publishAddress())
-            .address();
-        httpPost = new HttpPost(String.format(Locale.ENGLISH, "http://%s:%s/_sql?error_trace", address.getHostName(), address.getPort()));
+        address = httpServerTransport.boundAddress().publishAddress().address();
+        httpPost = new HttpPost(String.format(Locale.ENGLISH,
+            "%s://%s:%s/_sql?error_trace",
+            usesSSL ? "https" : "http", address.getHostName(), address.getPort()));
     }
 
 
@@ -83,7 +100,7 @@ public abstract class SQLHttpIntegrationTest extends SQLTransportIntegrationTest
 
     protected String upload(String table, String content) throws IOException {
         String digest = blobDigest(content);
-        String url = Blobs.url(address, table, digest);
+        String url = Blobs.url(usesSSL, address, table, digest);
         HttpPut httpPut = new HttpPut(url);
         httpPut.setEntity(new StringEntity(content));
 

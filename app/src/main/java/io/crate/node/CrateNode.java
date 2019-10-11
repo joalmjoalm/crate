@@ -23,14 +23,22 @@
 package io.crate.node;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.plugin.*;
+import io.crate.plugin.BlobPlugin;
+import io.crate.plugin.CrateCommonPlugin;
+import io.crate.plugin.HttpTransportPlugin;
+import io.crate.plugin.PluginLoaderPlugin;
+import io.crate.plugin.SrvPlugin;
 import io.crate.udc.plugin.UDCPlugin;
-import org.elasticsearch.Version;
+import org.elasticsearch.analysis.common.CommonAnalysisPlugin;
+import org.elasticsearch.discovery.ec2.Ec2DiscoveryPlugin;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.node.Node;
-import org.elasticsearch.plugin.cloud.aws.CloudAwsPlugin;
-import org.elasticsearch.plugin.discovery.multicast.MulticastDiscoveryPlugin;
+import org.elasticsearch.plugin.analysis.AnalysisPhoneticPlugin;
+import org.elasticsearch.plugin.repository.url.URLRepositoryPlugin;
 import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.repositories.azure.AzureRepositoryPlugin;
+import org.elasticsearch.repositories.s3.S3RepositoryPlugin;
+import org.elasticsearch.transport.Netty4Plugin;
 
 import java.util.Collection;
 
@@ -38,15 +46,21 @@ public class CrateNode extends Node {
 
     private static final Collection<Class<? extends Plugin>> CLASSPATH_PLUGINS = ImmutableList.of(
         PluginLoaderPlugin.class,
-        CrateCorePlugin.class,
+        CrateCommonPlugin.class,
+        HttpTransportPlugin.class,
         BlobPlugin.class,
-        MulticastDiscoveryPlugin.class,
         SrvPlugin.class,
         UDCPlugin.class,
-        CloudAwsPlugin.class,
-        AdminUIPlugin.class);
+        URLRepositoryPlugin.class,
+        S3RepositoryPlugin.class,
+        AzureRepositoryPlugin.class,
+        Ec2DiscoveryPlugin.class,
+        CommonAnalysisPlugin.class,
+        AnalysisPhoneticPlugin.class,
+        Netty4Plugin.class);
 
-    public CrateNode(Environment environment) {
-        super(environment, Version.CURRENT, CLASSPATH_PLUGINS);
+    protected CrateNode(Environment environment) {
+        super(environment, CLASSPATH_PLUGINS, true);
     }
 }
+

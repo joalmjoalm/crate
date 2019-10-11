@@ -22,195 +22,224 @@
 package io.crate.metadata.doc;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.collect.*;
+import com.google.common.collect.ImmutableCollection;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ImmutableSortedSet;
 import io.crate.Constants;
-import io.crate.action.sql.SessionContext;
-import io.crate.analyze.AnalysisMetaData;
 import io.crate.analyze.NumberOfReplicas;
 import io.crate.analyze.ParamTypeHints;
-import io.crate.analyze.TableParameterInfo;
+import io.crate.analyze.TableParameters;
 import io.crate.analyze.expressions.ExpressionAnalysisContext;
 import io.crate.analyze.expressions.ExpressionAnalyzer;
 import io.crate.analyze.expressions.TableReferenceResolver;
-import io.crate.exceptions.TableAliasSchemaException;
-import io.crate.metadata.*;
-import io.crate.metadata.table.ColumnPolicy;
+import io.crate.analyze.relations.FieldProvider;
+import io.crate.common.collections.Lists2;
+import io.crate.common.collections.Maps;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
+import io.crate.metadata.GeneratedReference;
+import io.crate.metadata.GeoReference;
+import io.crate.metadata.IndexReference;
+import io.crate.metadata.Reference;
+import io.crate.metadata.ReferenceIdent;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.table.ColumnPolicies;
 import io.crate.metadata.table.Operation;
 import io.crate.sql.parser.SqlParser;
+import io.crate.sql.tree.ColumnPolicy;
 import io.crate.sql.tree.Expression;
 import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.action.admin.indices.alias.Alias;
-import org.elasticsearch.action.admin.indices.template.put.PutIndexTemplateRequest;
-import org.elasticsearch.action.admin.indices.template.put.TransportPutIndexTemplateAction;
+import io.crate.types.ObjectType;
+import org.elasticsearch.Version;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
 import org.elasticsearch.common.Booleans;
-import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.index.mapper.DateFieldMapper;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+import static org.elasticsearch.index.mapper.TypeParsers.DOC_VALUES;
 
 public class DocIndexMetaData {
 
     private static final String ID = "_id";
-    private final IndexMetaData metaData;
 
-    private final MappingMetaData defaultMappingMetaData;
-    private final Map<String, Object> defaultMappingMap;
+    private static final String SETTING_CLOSED = "closed";
 
+    private final Map<String, Object> mappingMap;
     private final Map<ColumnIdent, IndexReference.Builder> indicesBuilder = new HashMap<>();
 
-    private final ImmutableSortedSet.Builder<Reference> columnsBuilder = ImmutableSortedSet.orderedBy(new Comparator<Reference>() {
-        @Override
-        public int compare(Reference o1, Reference o2) {
-            return o1.ident().columnIdent().fqn().compareTo(o2.ident().columnIdent().fqn());
-        }
-    });
+    private final Comparator<Reference> sortByPositionThenName = Comparator
+        .comparing((Reference r) -> MoreObjects.firstNonNull(r.position(), 0))
+        .thenComparing(o -> o.column().fqn());
+    private final ImmutableSortedSet.Builder<Reference> columnsBuilder = ImmutableSortedSet.orderedBy(sortByPositionThenName);
 
-    // columns should be ordered
-    private final ImmutableMap.Builder<ColumnIdent, Reference> referencesBuilder = ImmutableSortedMap.naturalOrder();
-    private final ImmutableList.Builder<Reference> partitionedByColumnsBuilder = ImmutableList.builder();
+    private final List<Reference> nestedColumns = new ArrayList<>();
     private final ImmutableList.Builder<GeneratedReference> generatedColumnReferencesBuilder = ImmutableList.builder();
 
     private final Functions functions;
-    private final TableIdent ident;
+    private final RelationName ident;
     private final int numberOfShards;
-    private final BytesRef numberOfReplicas;
-    private final ImmutableMap<String, Object> tableParameters;
+    private final String numberOfReplicas;
+    private final Map<String, Object> tableParameters;
     private final Map<String, Object> indicesMap;
-    private final List<List<String>> partitionedByList;
+    private final ImmutableList<ColumnIdent> partitionedBy;
     private final Set<Operation> supportedOperations;
-    private ImmutableList<Reference> columns;
+    private Collection<Reference> columns;
     private ImmutableMap<ColumnIdent, IndexReference> indices;
-    private ImmutableList<Reference> partitionedByColumns;
+    private List<Reference> partitionedByColumns;
     private ImmutableList<GeneratedReference> generatedColumnReferences;
-    private ImmutableMap<ColumnIdent, Reference> references;
+    private Map<ColumnIdent, Reference> references;
     private ImmutableList<ColumnIdent> primaryKey;
     private ImmutableCollection<ColumnIdent> notNullColumns;
     private ColumnIdent routingCol;
-    private ImmutableList<ColumnIdent> partitionedBy;
-    private final boolean isAlias;
-    private final Set<String> aliases;
     private boolean hasAutoGeneratedPrimaryKey = false;
+    private boolean closed;
 
-    private ColumnPolicy columnPolicy = ColumnPolicy.DYNAMIC;
+    private ColumnPolicy columnPolicy = ColumnPolicy.STRICT;
     private Map<String, String> generatedColumns;
 
-    public DocIndexMetaData(Functions functions, IndexMetaData metaData, TableIdent ident) throws IOException {
+    @Nullable
+    private final Version versionCreated;
+    @Nullable
+    private final Version versionUpgraded;
+
+    /**
+     * Analyzer used for Column Default expressions
+     */
+    private final ExpressionAnalyzer expressionAnalyzer;
+
+    DocIndexMetaData(Functions functions, IndexMetaData metaData, RelationName ident) throws IOException {
         this.functions = functions;
         this.ident = ident;
-        this.metaData = metaData;
-        this.isAlias = !metaData.getIndex().equals(ident.indexName());
         this.numberOfShards = metaData.getNumberOfShards();
         Settings settings = metaData.getSettings();
         this.numberOfReplicas = NumberOfReplicas.fromSettings(settings);
-        this.aliases = ImmutableSet.copyOf(metaData.getAliases().keys().toArray(String.class));
-        this.defaultMappingMetaData = this.metaData.mappingOrDefault(Constants.DEFAULT_MAPPING_TYPE);
-        if (defaultMappingMetaData == null) {
-            this.defaultMappingMap = ImmutableMap.of();
-        } else {
-            this.defaultMappingMap = this.defaultMappingMetaData.sourceAsMap();
+        this.mappingMap = getMappingMap(metaData);
+        this.tableParameters = TableParameters.tableParametersFromIndexMetaData(metaData);
+
+        Map<String, Object> metaMap = Maps.get(mappingMap, "_meta");
+        indicesMap = Maps.getOrDefault(metaMap, "indices", ImmutableMap.of());
+        List<List<String>> partitionedByList = Maps.getOrDefault(metaMap, "partitioned_by", List.of());
+        this.partitionedBy = getPartitionedBy(partitionedByList);
+        generatedColumns = Maps.getOrDefault(metaMap, "generated_columns", ImmutableMap.of());
+        IndexMetaData.State state = isClosed(metaData, mappingMap, !partitionedByList.isEmpty()) ?
+            IndexMetaData.State.CLOSE : IndexMetaData.State.OPEN;
+        supportedOperations = Operation.buildFromIndexSettingsAndState(metaData.getSettings(), state);
+        versionCreated = IndexMetaData.SETTING_INDEX_VERSION_CREATED.get(settings);
+        versionUpgraded = settings.getAsVersion(IndexMetaData.SETTING_VERSION_UPGRADED, null);
+        closed = state == IndexMetaData.State.CLOSE;
+
+        this.expressionAnalyzer = new ExpressionAnalyzer(
+            functions,
+            CoordinatorTxnCtx.systemTransactionContext(),
+            ParamTypeHints.EMPTY,
+            FieldProvider.UNSUPPORTED,
+            null);
+    }
+
+    private static Map<String, Object> getMappingMap(IndexMetaData metaData) {
+        MappingMetaData mappingMetaData = metaData.mappingOrDefault(Constants.DEFAULT_MAPPING_TYPE);
+        if (mappingMetaData == null) {
+            return ImmutableMap.of();
         }
-        this.tableParameters = TableParameterInfo.tableParametersFromIndexMetaData(metaData);
+        return mappingMetaData.sourceAsMap();
+    }
 
-        Map<String, Object> metaMap = getNested(defaultMappingMap, "_meta");
-        indicesMap = getNested(metaMap, "indices", ImmutableMap.<String, Object>of());
-        partitionedByList = getNested(metaMap, "partitioned_by", ImmutableList.<List<String>>of());
-        generatedColumns = getNested(metaMap, "generated_columns", ImmutableMap.<String, String>of());
-        if (isAlias && partitionedByList.isEmpty()) {
-            supportedOperations = Operation.READ_ONLY;
-        } else {
-            supportedOperations = Operation.buildFromIndexSettings(metaData.getSettings());
+    public static boolean isClosed(IndexMetaData indexMetaData, Map<String, Object> mappingMap, boolean isPartitioned) {
+        // Checking here for whether the closed flag exists on the template metadata, as partitioned tables that are
+        // empty (and thus have no indexes who have states) need a way to set their state.
+        if (isPartitioned) {
+            return Maps.getOrDefault(
+                Maps.getOrDefault(mappingMap, "_meta", null),
+                SETTING_CLOSED,
+                false);
         }
+        return indexMetaData.getState() == IndexMetaData.State.CLOSE;
     }
 
-    @SuppressWarnings("unchecked")
-    private static <T> T getNested(Map map, String key) {
-        return (T) map.get(key);
-    }
-
-    private static <T> T getNested(@Nullable Map map, String key, T defaultValue) {
-        if (map == null) {
-            return defaultValue;
-        }
-        Object o = map.get(key);
-        if (o == null) {
-            return defaultValue;
-        }
-        //noinspection unchecked
-        return (T) o;
-    }
-
-    private void addPartitioned(ColumnIdent column, DataType type) {
-        add(column, type, ColumnPolicy.DYNAMIC, Reference.IndexType.NOT_ANALYZED, true, true);
-    }
-
-    private void add(ColumnIdent column, DataType type, Reference.IndexType indexType, boolean isNotNull) {
-        add(column, type, ColumnPolicy.DYNAMIC, indexType, false, isNotNull);
-    }
-
-    private void add(ColumnIdent column,
+    private void add(Integer position,
+                     ColumnIdent column,
                      DataType type,
+                     @Nullable String defaultExpression,
                      ColumnPolicy columnPolicy,
                      Reference.IndexType indexType,
-                     boolean partitioned,
-                     boolean isNotNull) {
-        Reference info;
+                     boolean isNotNull,
+                     boolean columnStoreEnabled) {
+        Reference ref;
+        boolean partitionByColumn = partitionedBy.contains(column);
         String generatedExpression = generatedColumns.get(column.fqn());
+        if (partitionByColumn) {
+            indexType = Reference.IndexType.NOT_ANALYZED;
+        }
         if (generatedExpression == null) {
-            info = newInfo(column, type, columnPolicy, indexType, isNotNull);
+            ref = newInfo(position, column, type, defaultExpression, columnPolicy, indexType, isNotNull, columnStoreEnabled);
         } else {
-            info = newGeneratedColumnInfo(column, type, columnPolicy, indexType, generatedExpression, isNotNull);
+            ref = newGeneratedColumnInfo(position, column, type, columnPolicy, indexType, generatedExpression, isNotNull);
         }
-
-        // don't add it if there is a partitioned equivalent of this column
-        if (partitioned || !(partitionedBy != null && partitionedBy.contains(column))) {
-            if (info.ident().isColumn()) {
-                columnsBuilder.add(info);
-            }
-            referencesBuilder.put(info.ident().columnIdent(), info);
-            if (info instanceof GeneratedReference) {
-                generatedColumnReferencesBuilder.add((GeneratedReference) info);
-            }
+        if (column.isTopLevel()) {
+            columnsBuilder.add(ref);
+        } else {
+            nestedColumns.add(ref);
         }
-        if (partitioned) {
-            partitionedByColumnsBuilder.add(info);
+        if (ref instanceof GeneratedReference) {
+            generatedColumnReferencesBuilder.add((GeneratedReference) ref);
         }
     }
 
-    private void addGeoReference(ColumnIdent column,
+    private void addGeoReference(Integer position, ColumnIdent column,
                                  @Nullable String tree,
                                  @Nullable String precision,
                                  @Nullable Integer treeLevels,
                                  @Nullable Double distanceErrorPct) {
         GeoReference info = new GeoReference(
+            position,
             refIdent(column),
             tree,
             precision,
             treeLevels,
             distanceErrorPct);
         columnsBuilder.add(info);
-        referencesBuilder.put(column, info);
     }
 
     private ReferenceIdent refIdent(ColumnIdent column) {
         return new ReferenceIdent(ident, column);
     }
 
-    private GeneratedReference newGeneratedColumnInfo(ColumnIdent column,
+    private GeneratedReference newGeneratedColumnInfo(Integer position,
+                                                      ColumnIdent column,
                                                       DataType type,
                                                       ColumnPolicy columnPolicy,
                                                       Reference.IndexType indexType,
                                                       String generatedExpression,
                                                       boolean isNotNull) {
         return new GeneratedReference(
-            refIdent(column), granularity(column), type, columnPolicy, indexType, generatedExpression, isNotNull);
+            position,
+            refIdent(column),
+            granularity(column),
+            type,
+            columnPolicy,
+            indexType,
+            generatedExpression,
+            isNotNull);
     }
 
     private RowGranularity granularity(ColumnIdent column) {
@@ -220,12 +249,30 @@ public class DocIndexMetaData {
         return RowGranularity.DOC;
     }
 
-    private Reference newInfo(ColumnIdent column,
+    private Reference newInfo(Integer position,
+                              ColumnIdent column,
                               DataType type,
+                              @Nullable String formattedDefaultExpression,
                               ColumnPolicy columnPolicy,
                               Reference.IndexType indexType,
-                              boolean nullable) {
-        return new Reference(refIdent(column), granularity(column), type, columnPolicy, indexType, nullable);
+                              boolean nullable,
+                              boolean columnStoreEnabled) {
+        Symbol defaultExpression = null;
+        if (formattedDefaultExpression != null) {
+            Expression expression = SqlParser.createExpression(formattedDefaultExpression);
+            defaultExpression = expressionAnalyzer.convert(expression, new ExpressionAnalysisContext());
+        }
+        return new Reference(
+            refIdent(column),
+            granularity(column),
+            type,
+            columnPolicy,
+            indexType,
+            nullable,
+            columnStoreEnabled,
+            position,
+            defaultExpression
+        );
     }
 
     /**
@@ -234,45 +281,94 @@ public class DocIndexMetaData {
      * @param columnProperties map of String to Object containing column properties
      * @return dataType of the column with columnProperties
      */
-    public static DataType getColumnDataType(Map<String, Object> columnProperties) {
+    static DataType getColumnDataType(Map<String, Object> columnProperties) {
         DataType type;
         String typeName = (String) columnProperties.get("type");
 
         if (typeName == null) {
-            if (columnProperties.containsKey("properties")) {
-                type = DataTypes.OBJECT;
+            Map<String, Object> innerProperties = (Map<String, Object>) columnProperties.get("properties");
+            if (innerProperties != null) {
+                ObjectType.Builder builder = ObjectType.builder();
+                for (Map.Entry<String, Object> entry : innerProperties.entrySet()) {
+                    builder.setInnerType(entry.getKey(), getColumnDataType((Map<String, Object>) entry.getValue()));
+                }
+                type = builder.build();
             } else {
-                return DataTypes.NOT_SUPPORTED;
+                type = DataTypes.NOT_SUPPORTED;
             }
         } else if (typeName.equalsIgnoreCase("array")) {
 
-            Map<String, Object> innerProperties = getNested(columnProperties, "inner");
+            Map<String, Object> innerProperties = Maps.get(columnProperties, "inner");
             DataType innerType = getColumnDataType(innerProperties);
             type = new ArrayType(innerType);
         } else {
             typeName = typeName.toLowerCase(Locale.ENGLISH);
+            if (DateFieldMapper.CONTENT_TYPE.equals(typeName)) {
+                Boolean ignoreTimezone = (Boolean) columnProperties.get("ignore_timezone");
+                if (ignoreTimezone != null && ignoreTimezone) {
+                    return DataTypes.TIMESTAMP;
+                } else {
+                    return DataTypes.TIMESTAMPZ;
+                }
+            }
             type = MoreObjects.firstNonNull(DataTypes.ofMappingName(typeName), DataTypes.NOT_SUPPORTED);
         }
         return type;
     }
 
-    private Reference.IndexType getColumnIndexType(Map<String, Object> columnProperties) {
-        String indexType = (String) columnProperties.get("index");
-        String analyzerName = (String) columnProperties.get("analyzer");
-        if (indexType != null) {
-            if (indexType.equals(Reference.IndexType.NOT_ANALYZED.toString())) {
-                return Reference.IndexType.NOT_ANALYZED;
-            } else if (indexType.equals(Reference.IndexType.NO.toString())) {
-                return Reference.IndexType.NO;
-            } else if (indexType.equals(Reference.IndexType.ANALYZED.toString())
-                       && analyzerName != null && !analyzerName.equals("keyword")) {
+    /**
+     * Get the IndexType from columnProperties.
+     * <br />
+     * Properties might look like:
+     * <pre>
+     *     {
+     *         "type": "integer"
+     *     }
+     *
+     *
+     *     {
+     *         "type": "text",
+     *         "analyzer": "english"
+     *     }
+     *
+     *
+     *     {
+     *          "type": "text",
+     *          "fields": {
+     *              "keyword": {
+     *                  "type": "keyword",
+     *                  "ignore_above": "256"
+     *              }
+     *          }
+     *     }
+     *
+     *     {
+     *         "type": "date",
+     *         "index": "no"
+     *     }
+     *
+     *     {
+     *          "type": "keyword",
+     *          "index": false
+     *     }
+     * </pre>
+     */
+    private static Reference.IndexType getColumnIndexType(Map<String, Object> columnProperties) {
+        Object index = columnProperties.get("index");
+        if (index == null) {
+            if ("text".equals(columnProperties.get("type"))) {
                 return Reference.IndexType.ANALYZED;
             }
-        } // default indexType is analyzed so need to check analyzerName if indexType is null
-        else if (analyzerName != null && !analyzerName.equals("keyword")) {
-            return Reference.IndexType.ANALYZED;
+            return Reference.IndexType.NOT_ANALYZED;
         }
-        return Reference.IndexType.NOT_ANALYZED;
+        if (Boolean.FALSE.equals(index) || "no".equals(index) || "false".equals(index)) {
+            return Reference.IndexType.NO;
+        }
+
+        if ("not_analyzed".equals(index)) {
+            return Reference.IndexType.NOT_ANALYZED;
+        }
+        return Reference.IndexType.ANALYZED;
     }
 
     private static ColumnIdent childIdent(@Nullable ColumnIdent ident, String name) {
@@ -296,35 +392,39 @@ public class DocIndexMetaData {
             DataType columnDataType = getColumnDataType(columnProperties);
             ColumnIdent newIdent = childIdent(columnIdent, columnEntry.getKey());
 
+
             boolean nullable = !notNullColumns.contains(newIdent);
             columnProperties = furtherColumnProperties(columnProperties);
+            Integer position = (Integer) columnProperties.getOrDefault("position", null);
+            String defaultExpression = (String) columnProperties.getOrDefault("default_expr", null);
             Reference.IndexType columnIndexType = getColumnIndexType(columnProperties);
+            boolean columnsStoreDisabled = !Booleans.parseBoolean(
+                columnProperties.getOrDefault(DOC_VALUES, true).toString());
             if (columnDataType == DataTypes.GEO_SHAPE) {
                 String geoTree = (String) columnProperties.get("tree");
                 String precision = (String) columnProperties.get("precision");
                 Integer treeLevels = (Integer) columnProperties.get("tree_levels");
                 Double distanceErrorPct = (Double) columnProperties.get("distance_error_pct");
-                addGeoReference(newIdent, geoTree, precision, treeLevels, distanceErrorPct);
-            } else if (columnDataType == DataTypes.OBJECT
+                addGeoReference(position, newIdent, geoTree, precision, treeLevels, distanceErrorPct);
+            } else if (columnDataType.id() == ObjectType.ID
                        || (columnDataType.id() == ArrayType.ID
-                           && ((ArrayType) columnDataType).innerType() == DataTypes.OBJECT)) {
-                ColumnPolicy columnPolicy =
-                    ColumnPolicy.of(columnProperties.get("dynamic"));
-                add(newIdent, columnDataType, columnPolicy, Reference.IndexType.NO, false, nullable);
+                           && ((ArrayType) columnDataType).innerType().id() == ObjectType.ID)) {
+                ColumnPolicy columnPolicy = ColumnPolicies.decodeMappingValue(columnProperties.get("dynamic"));
+                add(position, newIdent, columnDataType, defaultExpression, columnPolicy, Reference.IndexType.NO, nullable, false);
 
                 if (columnProperties.get("properties") != null) {
                     // walk nested
                     internalExtractColumnDefinitions(newIdent, (Map<String, Object>) columnProperties.get("properties"));
                 }
             } else if (columnDataType != DataTypes.NOT_SUPPORTED) {
-                List<String> copyToColumns = getNested(columnProperties, "copy_to");
+                List<String> copyToColumns = Maps.get(columnProperties, "copy_to");
 
                 // extract columns this column is copied to, needed for indices
                 if (copyToColumns != null) {
                     for (String copyToColumn : copyToColumns) {
                         ColumnIdent targetIdent = ColumnIdent.fromPath(copyToColumn);
                         IndexReference.Builder builder = getOrCreateIndexBuilder(targetIdent);
-                        builder.addColumn(newInfo(newIdent, columnDataType, ColumnPolicy.DYNAMIC, columnIndexType, false));
+                        builder.addColumn(newInfo(position, newIdent, columnDataType, defaultExpression, ColumnPolicy.DYNAMIC, columnIndexType, false, columnsStoreDisabled));
                     }
                 }
                 // is it an index?
@@ -333,7 +433,7 @@ public class DocIndexMetaData {
                     builder.indexType(columnIndexType)
                         .analyzer((String) columnProperties.get("analyzer"));
                 } else {
-                    add(newIdent, columnDataType, columnIndexType, nullable);
+                    add(position, newIdent, columnDataType, defaultExpression, ColumnPolicy.DYNAMIC, columnIndexType, nullable, columnsStoreDisabled);
                 }
             }
         }
@@ -352,16 +452,11 @@ public class DocIndexMetaData {
     }
 
     private IndexReference.Builder getOrCreateIndexBuilder(ColumnIdent ident) {
-        IndexReference.Builder builder = indicesBuilder.get(ident);
-        if (builder == null) {
-            builder = new IndexReference.Builder(refIdent(ident));
-            indicesBuilder.put(ident, builder);
-        }
-        return builder;
+        return indicesBuilder.computeIfAbsent(ident, k -> new IndexReference.Builder(refIdent(ident)));
     }
 
     private ImmutableList<ColumnIdent> getPrimaryKey() {
-        Map<String, Object> metaMap = getNested(defaultMappingMap, "_meta");
+        Map<String, Object> metaMap = Maps.get(mappingMap, "_meta");
         if (metaMap != null) {
             ImmutableList.Builder<ColumnIdent> builder = ImmutableList.builder();
             Object pKeys = metaMap.get("primary_keys");
@@ -380,7 +475,7 @@ public class DocIndexMetaData {
                 }
             }
         }
-        if (getCustomRoutingCol() == null && partitionedByList.isEmpty()) {
+        if (getCustomRoutingCol() == null && partitionedBy.isEmpty()) {
             hasAutoGeneratedPrimaryKey = true;
             return ImmutableList.of(DocSysColumns.ID);
         }
@@ -388,10 +483,10 @@ public class DocIndexMetaData {
     }
 
     private ImmutableCollection<ColumnIdent> getNotNullColumns() {
-        Map<String, Object> metaMap = getNested(defaultMappingMap, "_meta");
+        Map<String, Object> metaMap = Maps.get(mappingMap, "_meta");
         if (metaMap != null) {
             ImmutableSet.Builder<ColumnIdent> builder = ImmutableSet.builder();
-            Map<String, Object> constraintsMap = getNested(metaMap, "constraints");
+            Map<String, Object> constraintsMap = Maps.get(metaMap, "constraints");
             if (constraintsMap != null) {
                 Object notNullColumnsMeta = constraintsMap.get("not_null");
                 if (notNullColumnsMeta != null) {
@@ -408,7 +503,7 @@ public class DocIndexMetaData {
         return ImmutableList.of();
     }
 
-    private ImmutableList<ColumnIdent> getPartitionedBy() {
+    private static ImmutableList<ColumnIdent> getPartitionedBy(List<List<String>> partitionedByList) {
         ImmutableList.Builder<ColumnIdent> builder = ImmutableList.builder();
         for (List<String> partitionedByInfo : partitionedByList) {
             builder.add(ColumnIdent.fromPath(partitionedByInfo.get(0)));
@@ -417,20 +512,12 @@ public class DocIndexMetaData {
     }
 
     private ColumnPolicy getColumnPolicy() {
-        Object dynamic = getNested(defaultMappingMap, "dynamic");
-        if (ColumnPolicy.STRICT.value().equals(String.valueOf(dynamic).toLowerCase(Locale.ENGLISH))) {
-            return ColumnPolicy.STRICT;
-        } else if (Booleans.isExplicitFalse(String.valueOf(dynamic))) {
-            return ColumnPolicy.IGNORED;
-        } else {
-            return ColumnPolicy.DYNAMIC;
-        }
+        return ColumnPolicies.decodeMappingValue(mappingMap.get("dynamic"));
     }
 
     private void createColumnDefinitions() {
-        Map<String, Object> propertiesMap = getNested(defaultMappingMap, "properties");
+        Map<String, Object> propertiesMap = Maps.get(mappingMap, "properties");
         internalExtractColumnDefinitions(null, propertiesMap);
-        extractPartitionedByColumns();
     }
 
     private ImmutableMap<ColumnIdent, IndexReference> createIndexDefinitions() {
@@ -442,15 +529,9 @@ public class DocIndexMetaData {
         return indices;
     }
 
-    private void extractPartitionedByColumns() {
-        for (Tuple<ColumnIdent, DataType> partitioned : PartitionedByMappingExtractor.extractPartitionedByColumns(partitionedByList)) {
-            addPartitioned(partitioned.v1(), partitioned.v2());
-        }
-    }
-
     private ColumnIdent getCustomRoutingCol() {
-        if (defaultMappingMetaData != null) {
-            Map<String, Object> metaMap = getNested(defaultMappingMap, "_meta");
+        if (mappingMap != null) {
+            Map<String, Object> metaMap = Maps.get(mappingMap, "_meta");
             if (metaMap != null) {
                 String routingPath = (String) metaMap.get("routing");
                 if (routingPath != null && !routingPath.equals(ID)) {
@@ -477,11 +558,10 @@ public class DocIndexMetaData {
             return;
         }
         Collection<Reference> references = this.references.values();
-        TableReferenceResolver tableReferenceResolver = new TableReferenceResolver(references);
+        TableReferenceResolver tableReferenceResolver = new TableReferenceResolver(references, ident);
         ExpressionAnalyzer expressionAnalyzer = new ExpressionAnalyzer(
-            new AnalysisMetaData(functions, null, null),
-            SessionContext.SYSTEM_SESSION, ParamTypeHints.EMPTY, tableReferenceResolver, null);
-        ExpressionAnalysisContext context = new ExpressionAnalysisContext(new StmtCtx());
+            functions, CoordinatorTxnCtx.systemTransactionContext(), ParamTypeHints.EMPTY, tableReferenceResolver, null);
+        ExpressionAnalysisContext context = new ExpressionAnalysisContext();
         for (Reference reference : generatedColumnReferences) {
             GeneratedReference generatedReference = (GeneratedReference) reference;
             Expression expression = SqlParser.createExpression(generatedReference.formattedGeneratedExpression());
@@ -493,17 +573,23 @@ public class DocIndexMetaData {
 
     public DocIndexMetaData build() {
         notNullColumns = getNotNullColumns();
-        partitionedBy = getPartitionedBy();
         columnPolicy = getColumnPolicy();
         createColumnDefinitions();
         indices = createIndexDefinitions();
-        columns = ImmutableList.copyOf(columnsBuilder.build());
-        partitionedByColumns = partitionedByColumnsBuilder.build();
-
-        for (Tuple<ColumnIdent, Reference> sysColumn : DocSysColumns.forTable(ident)) {
-            referencesBuilder.put(sysColumn.v1(), sysColumn.v2());
+        columns = columnsBuilder.build();
+        references = new LinkedHashMap<>();
+        DocSysColumns.forTable(ident, references::put);
+        nestedColumns.sort(sortByPositionThenName);
+        for (Reference ref : columns) {
+            references.put(ref.column(), ref);
+            for (Reference nestedColumn : nestedColumns) {
+                if (nestedColumn.column().getRoot().equals(ref.column())) {
+                    references.put(nestedColumn.column(), nestedColumn);
+                }
+            }
         }
-        references = referencesBuilder.build();
+        // Order of the partitionedByColumns is important; Must be the same order as `partitionedBy` is in.
+        partitionedByColumns = Lists2.map(partitionedBy, references::get);
         generatedColumnReferences = generatedColumnReferencesBuilder.build();
         primaryKey = getPrimaryKey();
         routingCol = getRoutingCol();
@@ -512,11 +598,11 @@ public class DocIndexMetaData {
         return this;
     }
 
-    public ImmutableMap<ColumnIdent, Reference> references() {
+    public Map<ColumnIdent, Reference> references() {
         return references;
     }
 
-    public ImmutableList<Reference> columns() {
+    public Collection<Reference> columns() {
         return columns;
     }
 
@@ -524,103 +610,27 @@ public class DocIndexMetaData {
         return indices;
     }
 
-    public ImmutableList<Reference> partitionedByColumns() {
+    public List<Reference> partitionedByColumns() {
         return partitionedByColumns;
     }
 
-    public ImmutableList<GeneratedReference> generatedColumnReferences() {
+    ImmutableList<GeneratedReference> generatedColumnReferences() {
         return generatedColumnReferences;
+    }
+
+    ImmutableCollection<ColumnIdent> notNullColumns() {
+        return notNullColumns;
     }
 
     public ImmutableList<ColumnIdent> primaryKey() {
         return primaryKey;
     }
 
-    public ColumnIdent routingCol() {
+    ColumnIdent routingCol() {
         return routingCol;
     }
 
-    /**
-     * Returns true if the schema of this and <code>other</code> is the same,
-     * this includes the table name, as this is reflected in the ReferenceIdents of
-     * the columns.
-     */
-    public boolean schemaEquals(DocIndexMetaData other) {
-        if (this == other) return true;
-        if (other == null) return false;
-
-        // TODO: when analyzers are exposed in the info, equality has to be checked on them
-        // see: TransportSQLActionTest.testSelectTableAliasSchemaExceptionColumnDefinition
-        if (columns != null ? !columns.equals(other.columns) : other.columns != null) return false;
-        if (primaryKey != null ? !primaryKey.equals(other.primaryKey) : other.primaryKey != null) return false;
-        if (indices != null ? !indices.equals(other.indices) : other.indices != null) return false;
-        if (references != null ? !references.equals(other.references) : other.references != null) return false;
-        if (routingCol != null ? !routingCol.equals(other.routingCol) : other.routingCol != null) return false;
-
-        return true;
-    }
-
-    protected DocIndexMetaData merge(DocIndexMetaData other,
-                                     TransportPutIndexTemplateAction transportPutIndexTemplateAction,
-                                     boolean thisIsCreatedFromTemplate) throws IOException {
-        if (schemaEquals(other)) {
-            return this;
-        } else if (thisIsCreatedFromTemplate) {
-            if (this.references.size() < other.references.size()) {
-                // this is older, update template and return other
-                // settings in template are always authoritative for table information about
-                // number_of_shards and number_of_replicas
-                updateTemplate(other, transportPutIndexTemplateAction, this.metaData.getSettings());
-                // merge the new mapping with the template settings
-                return new DocIndexMetaData(
-                    functions,
-                    IndexMetaData.builder(other.metaData).settings(this.metaData.getSettings()).build(),
-                    other.ident).build();
-            } else if (references().size() == other.references().size() &&
-                       !references().keySet().equals(other.references().keySet())) {
-                XContentHelper.update(defaultMappingMap, other.defaultMappingMap, false);
-                // update the template with new information
-                updateTemplate(this, transportPutIndexTemplateAction, this.metaData.getSettings());
-                return this;
-            }
-            // other is older, just return this
-            return this;
-        } else {
-            throw new TableAliasSchemaException(other.ident.name());
-        }
-    }
-
-    private void updateTemplate(DocIndexMetaData md,
-                                TransportPutIndexTemplateAction transportPutIndexTemplateAction,
-                                Settings updateSettings) {
-        String templateName = PartitionName.templateName(ident.schema(), ident.name());
-        PutIndexTemplateRequest request = new PutIndexTemplateRequest(templateName)
-            .mapping(Constants.DEFAULT_MAPPING_TYPE, md.defaultMappingMap)
-            .create(false)
-            .settings(updateSettings)
-            .template(templateName + "*");
-        for (String alias : md.aliases()) {
-            request = request.alias(new Alias(alias));
-        }
-        transportPutIndexTemplateAction.execute(request);
-    }
-
-    /**
-     * @return the name of the underlying index even if this table is referenced by alias
-     */
-    public String concreteIndexName() {
-        return metaData.getIndex();
-    }
-
-    public boolean isAlias() {
-        return isAlias;
-    }
-
-    public Set<String> aliases() {
-        return aliases;
-    }
-
-    public boolean hasAutoGeneratedPrimaryKey() {
+    boolean hasAutoGeneratedPrimaryKey() {
         return hasAutoGeneratedPrimaryKey;
     }
 
@@ -628,7 +638,7 @@ public class DocIndexMetaData {
         return numberOfShards;
     }
 
-    public BytesRef numberOfReplicas() {
+    public String numberOfReplicas() {
         return numberOfReplicas;
     }
 
@@ -640,7 +650,7 @@ public class DocIndexMetaData {
         return columnPolicy;
     }
 
-    public ImmutableMap<String, Object> tableParameters() {
+    public Map<String, Object> tableParameters() {
         return tableParameters;
     }
 
@@ -651,9 +661,9 @@ public class DocIndexMetaData {
             DataType columnDataType = getColumnDataType(columnProperties);
             ColumnIdent newIdent = childIdent(columnIdent, columnEntry.getKey());
             columnProperties = furtherColumnProperties(columnProperties);
-            if (columnDataType == DataTypes.OBJECT
+            if (columnDataType.id() == ObjectType.ID
                 || (columnDataType.id() == ArrayType.ID
-                    && ((ArrayType) columnDataType).innerType() == DataTypes.OBJECT)) {
+                    && ((ArrayType) columnDataType).innerType().id() == ObjectType.ID)) {
                 if (columnProperties.get("properties") != null) {
                     builder.putAll(getAnalyzers(newIdent, (Map<String, Object>) columnProperties.get("properties")));
                 }
@@ -666,8 +676,8 @@ public class DocIndexMetaData {
         return builder.build();
     }
 
-    public ImmutableMap<ColumnIdent, String> analyzers() {
-        Map<String, Object> propertiesMap = getNested(defaultMappingMap, "properties");
+    ImmutableMap<ColumnIdent, String> analyzers() {
+        Map<String, Object> propertiesMap = Maps.get(mappingMap, "properties");
         if (propertiesMap == null) {
             return ImmutableMap.of();
         } else {
@@ -675,7 +685,21 @@ public class DocIndexMetaData {
         }
     }
 
-    public Set<Operation> supportedOperations() {
+    Set<Operation> supportedOperations() {
         return supportedOperations;
+    }
+
+    @Nullable
+    public Version versionCreated() {
+        return versionCreated;
+    }
+
+    @Nullable
+    public Version versionUpgraded() {
+        return versionUpgraded;
+    }
+
+    public boolean isClosed() {
+        return closed;
     }
 }

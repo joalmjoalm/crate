@@ -21,173 +21,155 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
 import io.crate.analyze.expressions.ExpressionAnalysisContext;
 import io.crate.analyze.expressions.ExpressionAnalyzer;
+import io.crate.analyze.expressions.SubqueryAnalyzer;
 import io.crate.analyze.expressions.ValueNormalizer;
-import io.crate.analyze.relations.*;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.Symbols;
-import io.crate.analyze.where.WhereClauseAnalyzer;
-import io.crate.exceptions.ColumnValidationException;
-import io.crate.exceptions.UnsupportedFeatureException;
+import io.crate.analyze.relations.AbstractTableRelation;
+import io.crate.analyze.relations.AnalyzedRelation;
+import io.crate.analyze.relations.FullQualifiedNameFieldProvider;
+import io.crate.analyze.relations.NameFieldProvider;
+import io.crate.analyze.relations.RelationAnalysisContext;
+import io.crate.analyze.relations.RelationAnalyzer;
+import io.crate.analyze.relations.StatementAnalysisContext;
+import io.crate.expression.eval.EvaluatingNormalizer;
+import io.crate.expression.symbol.Symbol;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
 import io.crate.metadata.Reference;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.doc.DocSysColumns;
 import io.crate.metadata.table.Operation;
 import io.crate.metadata.table.TableInfo;
 import io.crate.sql.tree.Assignment;
+import io.crate.sql.tree.AstVisitor;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.LongLiteral;
+import io.crate.sql.tree.SubscriptExpression;
 import io.crate.sql.tree.Update;
 import io.crate.types.ArrayType;
-import io.crate.types.DataTypes;
+import io.crate.types.ObjectType;
 
-import javax.annotation.Nullable;
-import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.RandomAccess;
+import java.util.function.Predicate;
 
+/**
+ * Used to analyze statements like: `UPDATE t1 SET col1 = ? WHERE id = ?`
+ */
+public final class UpdateAnalyzer {
 
-public class UpdateAnalyzer {
+    private static final Predicate<Reference> IS_OBJECT_ARRAY =
+        input -> input.valueType().id() == ArrayType.ID
+                 && ((ArrayType) input.valueType()).innerType().id() == ObjectType.ID;
 
-    public static final String VERSION_SEARCH_EX_MSG =
-        "_version is not allowed in update queries without specifying a primary key";
-    private static final UnsupportedFeatureException VERSION_SEARCH_EX = new UnsupportedFeatureException(
-        VERSION_SEARCH_EX_MSG);
-
-
-    private static final Predicate<Reference> IS_OBJECT_ARRAY = new Predicate<Reference>() {
-        @Override
-        public boolean apply(@Nullable Reference input) {
-            return input != null
-                   && input.valueType().id() == ArrayType.ID
-                   && ((ArrayType) input.valueType()).innerType().equals(DataTypes.OBJECT);
-        }
-    };
-
-
-    private final AnalysisMetaData analysisMetaData;
+    private final Functions functions;
     private final RelationAnalyzer relationAnalyzer;
-    private final ValueNormalizer valueNormalizer;
 
-
-    UpdateAnalyzer(AnalysisMetaData analysisMetaData, RelationAnalyzer relationAnalyzer) {
-        this.analysisMetaData = analysisMetaData;
+    UpdateAnalyzer(Functions functions, RelationAnalyzer relationAnalyzer) {
+        this.functions = functions;
         this.relationAnalyzer = relationAnalyzer;
-        this.valueNormalizer = new ValueNormalizer(analysisMetaData.schemas(), new EvaluatingNormalizer(
-            analysisMetaData.functions(), RowGranularity.CLUSTER, analysisMetaData.referenceResolver()));
     }
 
-    public AnalyzedStatement analyze(Update node, Analysis analysis) {
-        StatementAnalysisContext statementAnalysisContext = new StatementAnalysisContext(
-            analysis.sessionContext(),
-            analysis.parameterContext(),
-            analysis.statementContext(),
-            analysisMetaData,
-            Operation.UPDATE);
-        RelationAnalysisContext currentRelationContext = statementAnalysisContext.startRelation();
-        AnalyzedRelation analyzedRelation = relationAnalyzer.analyze(node.relation(), statementAnalysisContext);
+    public AnalyzedUpdateStatement analyze(Update update, ParamTypeHints typeHints, CoordinatorTxnCtx txnCtx) {
+        /* UPDATE t1 SET col1 = ?, col2 = ? WHERE id = ?`
+         *               ^^^^^^^^^^^^^^^^^^       ^^^^^^
+         *               assignments               whereClause
+         *
+         *               col1 = ?
+         *               |      |
+         *               |     source
+         *             columnName/target
+         */
+        StatementAnalysisContext stmtCtx = new StatementAnalysisContext(typeHints, Operation.UPDATE, txnCtx);
+        final RelationAnalysisContext relCtx = stmtCtx.startRelation();
+        AnalyzedRelation relation = relationAnalyzer.analyze(update.relation(), stmtCtx);
+        stmtCtx.endRelation();
 
-        FieldResolver fieldResolver = (FieldResolver) analyzedRelation;
-        FieldProvider columnFieldProvider = new NameFieldProvider(analyzedRelation);
-        ExpressionAnalyzer columnExpressionAnalyzer =
-            new ExpressionAnalyzer(
-                analysisMetaData,
-                analysis.sessionContext(),
-                analysis.parameterContext(),
-                columnFieldProvider,
-                fieldResolver);
-        columnExpressionAnalyzer.setResolveFieldsOperation(Operation.UPDATE);
+        MaybeAliasedStatement maybeAliasedStatement = MaybeAliasedStatement.analyze(relation);
+        relation = maybeAliasedStatement.nonAliasedRelation();
 
-        assert Iterables.getOnlyElement(currentRelationContext.sources().values()) == analyzedRelation;
-        ExpressionAnalyzer expressionAnalyzer =
-            new ExpressionAnalyzer(
-                analysisMetaData,
-                analysis.sessionContext(),
-                analysis.parameterContext(),
-                new FullQualifedNameFieldProvider(currentRelationContext.sources()),
-                fieldResolver);
-        ExpressionAnalysisContext expressionAnalysisContext = new ExpressionAnalysisContext(analysis.statementContext());
-
-        int numNested = 1;
-        if (analysis.parameterContext().numBulkParams() > 0) {
-            numNested = analysis.parameterContext().numBulkParams();
+        if (!(relation instanceof AbstractTableRelation)) {
+            throw new UnsupportedOperationException("UPDATE is only supported on base-tables");
         }
+        AbstractTableRelation table = (AbstractTableRelation) relation;
+        EvaluatingNormalizer normalizer = new EvaluatingNormalizer(functions, RowGranularity.CLUSTER, null, table);
+        SubqueryAnalyzer subqueryAnalyzer =
+            new SubqueryAnalyzer(relationAnalyzer, new StatementAnalysisContext(typeHints, Operation.READ, txnCtx));
+        ExpressionAnalyzer sourceExprAnalyzer = new ExpressionAnalyzer(
+            functions,
+            txnCtx,
+            typeHints,
+            new FullQualifiedNameFieldProvider(
+                relCtx.sources(),
+                relCtx.parentSources(),
+                txnCtx.sessionContext().searchPath().currentSchema()
+            ),
+            subqueryAnalyzer
+        );
+        ExpressionAnalysisContext exprCtx = new ExpressionAnalysisContext();
 
-        WhereClauseAnalyzer whereClauseAnalyzer = null;
-        if (analyzedRelation instanceof DocTableRelation) {
-            whereClauseAnalyzer = new WhereClauseAnalyzer(analysisMetaData, ((DocTableRelation) analyzedRelation));
-        }
-        TableInfo tableInfo = ((AbstractTableRelation) analyzedRelation).tableInfo();
+        Map<Reference, Symbol> assignmentByTargetCol = getAssignments(
+            update.assignments(), typeHints, txnCtx, table, normalizer, subqueryAnalyzer, sourceExprAnalyzer, exprCtx);
 
-        List<UpdateAnalyzedStatement.NestedAnalyzedStatement> nestedAnalyzedStatements = new ArrayList<>(numNested);
-        for (int i = 0; i < numNested; i++) {
-            analysis.parameterContext().setBulkIdx(i);
+        Symbol query = sourceExprAnalyzer.generateQuerySymbol(update.whereClause(), exprCtx);
+        query = maybeAliasedStatement.maybeMapFields(query);
 
-            WhereClause whereClause = expressionAnalyzer.generateWhereClause(node.whereClause(), expressionAnalysisContext);
-            if (whereClauseAnalyzer != null) {
-                whereClause = whereClauseAnalyzer.analyze(whereClause, analysis.statementContext());
-            }
-
-            if (!whereClause.docKeys().isPresent() &&
-                Symbols.containsColumn(whereClause.query(), DocSysColumns.VERSION)) {
-                throw VERSION_SEARCH_EX;
-            }
-
-            UpdateAnalyzedStatement.NestedAnalyzedStatement nestedAnalyzedStatement =
-                new UpdateAnalyzedStatement.NestedAnalyzedStatement(whereClause);
-
-            for (Assignment assignment : node.assignements()) {
-                analyzeAssignment(
-                    assignment,
-                    nestedAnalyzedStatement,
-                    tableInfo,
-                    expressionAnalyzer,
-                    columnExpressionAnalyzer,
-                    expressionAnalysisContext
-                );
-            }
-            nestedAnalyzedStatements.add(nestedAnalyzedStatement);
-        }
-
-        statementAnalysisContext.endRelation();
-        return new UpdateAnalyzedStatement(analyzedRelation, nestedAnalyzedStatements);
+        Symbol normalizedQuery = normalizer.normalize(query, txnCtx);
+        return new AnalyzedUpdateStatement(table, assignmentByTargetCol, normalizedQuery);
     }
 
-    private void analyzeAssignment(Assignment node,
-                                   UpdateAnalyzedStatement.NestedAnalyzedStatement nestedAnalyzedStatement,
-                                   TableInfo tableInfo,
-                                   ExpressionAnalyzer expressionAnalyzer,
-                                   ExpressionAnalyzer columnExpressionAnalyzer,
-                                   ExpressionAnalysisContext expressionAnalysisContext) {
-        // unknown columns in strict objects handled in here
-        Reference reference = (Reference) columnExpressionAnalyzer.normalize(
-            columnExpressionAnalyzer.convert(node.columnName(), expressionAnalysisContext),
-            expressionAnalysisContext.statementContext());
+    private HashMap<Reference, Symbol> getAssignments(List<Assignment<Expression>> assignments,
+                                                      ParamTypeHints typeHints,
+                                                      CoordinatorTxnCtx txnCtx,
+                                                      AbstractTableRelation table,
+                                                      EvaluatingNormalizer normalizer,
+                                                      SubqueryAnalyzer subqueryAnalyzer,
+                                                      ExpressionAnalyzer sourceExprAnalyzer,
+                                                      ExpressionAnalysisContext exprCtx) {
+        HashMap<Reference, Symbol> assignmentByTargetCol = new HashMap<>();
+        ExpressionAnalyzer targetExprAnalyzer = new ExpressionAnalyzer(
+            functions,
+            txnCtx,
+            typeHints,
+            new NameFieldProvider(table),
+            subqueryAnalyzer,
+            Operation.UPDATE
+        );
+        assert assignments instanceof RandomAccess
+            : "assignments should implement RandomAccess for indexed loop to avoid iterator allocations";
+        TableInfo tableInfo = table.tableInfo();
+        for (int i = 0; i < assignments.size(); i++) {
+            Assignment<Expression> assignment = assignments.get(i);
+            AssignmentNameValidator.ensureNoArrayElementUpdate(assignment.columnName());
 
-        final ColumnIdent ident = reference.ident().columnIdent();
-        if (hasMatchingParent(tableInfo, reference, IS_OBJECT_ARRAY)) {
-            // cannot update fields of object arrays
-            throw new IllegalArgumentException("Updating fields of object arrays is not supported");
-        }
-        Symbol value = expressionAnalyzer.normalize(
-            expressionAnalyzer.convert(node.expression(), expressionAnalysisContext),
-            expressionAnalysisContext.statementContext());
-        try {
-            value = valueNormalizer.normalizeInputForReference(value, reference, expressionAnalysisContext.statementContext());
-        } catch (IllegalArgumentException | UnsupportedOperationException e) {
-            throw new ColumnValidationException(ident.sqlFqn(), e);
-        }
+            Symbol target = normalizer.normalize(targetExprAnalyzer.convert(assignment.columnName(), exprCtx), txnCtx);
+            assert target instanceof Reference : "AstBuilder restricts left side of assignments to Columns/Subscripts";
+            Reference targetCol = (Reference) target;
+            if (hasMatchingParent(tableInfo, targetCol, IS_OBJECT_ARRAY)) {
+                // cannot update fields of object arrays
+                throw new IllegalArgumentException("Updating fields of object arrays is not supported");
+            }
 
-        nestedAnalyzedStatement.addAssignment(reference, value);
+            Symbol source = ValueNormalizer.normalizeInputForReference(
+                normalizer.normalize(sourceExprAnalyzer.convert(assignment.expression(), exprCtx), txnCtx),
+                targetCol,
+                tableInfo
+            );
+            if (assignmentByTargetCol.put(targetCol, source) != null) {
+                throw new IllegalArgumentException("Target expression repeated: " + targetCol.column().sqlFqn());
+            }
+        }
+        return assignmentByTargetCol;
     }
 
-
-    private boolean hasMatchingParent(TableInfo tableInfo, Reference info, Predicate<Reference> parentMatchPredicate) {
-        ColumnIdent parent = info.ident().columnIdent().getParent();
+    private static boolean hasMatchingParent(TableInfo tableInfo, Reference info, Predicate<Reference> parentMatchPredicate) {
+        ColumnIdent parent = info.column().getParent();
         while (parent != null) {
             Reference parentInfo = tableInfo.getReference(parent);
-            if (parentMatchPredicate.apply(parentInfo)) {
+            if (parentMatchPredicate.test(parentInfo)) {
                 return true;
             }
             parent = parent.getParent();
@@ -195,4 +177,26 @@ public class UpdateAnalyzer {
         return false;
     }
 
+    private static class AssignmentNameValidator extends AstVisitor<Void, Boolean> {
+
+        private static final AssignmentNameValidator INSTANCE = new AssignmentNameValidator();
+
+        static void ensureNoArrayElementUpdate(Expression expression) {
+            expression.accept(INSTANCE, false);
+        }
+
+        @Override
+        protected Void visitSubscriptExpression(SubscriptExpression node, Boolean childOfSubscript) {
+            node.index().accept(this, true);
+            return super.visitSubscriptExpression(node, childOfSubscript);
+        }
+
+        @Override
+        protected Void visitLongLiteral(LongLiteral node, Boolean childOfSubscript) {
+            if (childOfSubscript) {
+                throw new IllegalArgumentException("Updating a single element of an array is not supported");
+            }
+            return null;
+        }
+    }
 }

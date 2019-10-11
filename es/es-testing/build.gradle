@@ -1,0 +1,20 @@
+apply plugin: 'java-library'
+
+dependencies {
+    implementation project(':es:es-server')
+
+    api "com.carrotsearch.randomizedtesting:randomizedtesting-runner:${versions.randomizedrunner}"
+    api "junit:junit:${versions.junit}"
+    api "org.hamcrest:hamcrest:${versions.hamcrest}"
+    api "org.apache.lucene:lucene-test-framework:${versions.lucene}"
+    api "org.apache.lucene:lucene-codecs:${versions.lucene}"
+    api "org.mockito:mockito-core:${versions.mockito}"
+    implementation "org.apache.httpcomponents:httpclient:${versions.httpclient}"
+    implementation "org.apache.httpcomponents:httpcore:${versions.httpcore}"
+    implementation "commons-logging:commons-logging:${versions.commonslogging}"
+    implementation "commons-codec:commons-codec:${versions.commonscodec}"
+
+    // crate extra dependencies
+    implementation "com.google.code.findbugs:jsr305:${versions.jsr305}"
+    implementation "com.google.guava:guava:${versions.guava}"
+}

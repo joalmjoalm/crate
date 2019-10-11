@@ -23,16 +23,16 @@ package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
+import org.hamcrest.Matchers;
 import org.junit.Test;
 
+import java.util.List;
 import java.util.Locale;
 
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.core.Is.is;
 
-
-@UseJdbc
 public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -147,7 +147,7 @@ public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
             2.2d, 9});
         execute("refresh table t");
 
-        execute("select i from t where round(d) = i order by i");
+        execute("select i from t where round(d)::integer = i order by i");
         assertThat(response.rowCount(), is(2L));
         assertThat((Integer) response.rows()[0][0], is(1));
         assertThat((Integer) response.rows()[1][0], is(2));
@@ -164,14 +164,14 @@ public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
         });
         execute("refresh table t");
 
-        execute("select x, base, log(x, base) from t where log(x, base) = 2.0 order by x");
+        execute("select x, base, round(log(x, base)) from t where round(log(x, base)) = 2 order by x");
         assertThat(response.rowCount(), is(2L));
         assertThat((Long) response.rows()[0][0], is(9L));
         assertThat((Long) response.rows()[0][1], is(3L));
-        assertThat((Double) response.rows()[0][2], is(2.0));
+        assertThat((Long) response.rows()[0][2], is(2L));
         assertThat((Long) response.rows()[1][0], is(144L));
         assertThat((Long) response.rows()[1][1], is(12L));
-        assertThat((Double) response.rows()[1][2], is(2.0));
+        assertThat((Long) response.rows()[1][2], is(2L));
     }
 
     @Test
@@ -209,7 +209,7 @@ public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
 
         execute("select regexp_matches(s, '^(bar).*') from regex_noindex order by i");
         assertThat(response.rows()[0][0], nullValue());
-        assertThat((Object[]) response.rows()[1][0], arrayContaining(new Object[]{"bar"}));
+        assertThat((List<Object>) response.rows()[1][0], Matchers.contains("bar"));
         assertThat(response.rows()[2][0], nullValue());
     }
 
@@ -227,23 +227,23 @@ public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
 
         execute("select regexp_replace(s, 'is', 'was') from regex_fulltext order by i");
         assertThat(response.rowCount(), is(4L));
-        assertThat((String) response.rows()[0][0], is("foo was first"));
-        assertThat((String) response.rows()[1][0], is("bar was second"));
-        assertThat((String) response.rows()[2][0], is("foobar was great"));
-        assertThat((String) response.rows()[3][0], is("crate was greater"));
+        assertThat(response.rows()[0][0], is("foo was first"));
+        assertThat(response.rows()[1][0], is("bar was second"));
+        assertThat(response.rows()[2][0], is("foobar was great"));
+        assertThat(response.rows()[3][0], is("crate was greater"));
 
         execute("select regexp_matches(s, '(\\w+) is (\\w+)') from regex_fulltext order by i");
-        Object[] match1 = (Object[]) response.rows()[0][0];
-        assertThat(match1, arrayContaining(new Object[]{"foo", "first"}));
+        List<Object> match1 = (List<Object>) response.rows()[0][0];
+        assertThat(match1, Matchers.contains("foo", "first"));
 
-        Object[] match2 = (Object[]) response.rows()[1][0];
-        assertThat(match2, arrayContaining(new Object[]{"bar", "second"}));
+        List<Object> match2 = (List<Object>) response.rows()[1][0];
+        assertThat(match2, Matchers.contains("bar", "second"));
 
-        Object[] match3 = (Object[]) response.rows()[2][0];
-        assertThat(match3, arrayContaining(new Object[]{"foobar", "great"}));
+        List<Object> match3 = (List<Object>) response.rows()[2][0];
+        assertThat(match3, Matchers.contains("foobar", "great"));
 
-        Object[] match4 = (Object[]) response.rows()[3][0];
-        assertThat(match4, arrayContaining(new Object[]{"crate", "greater"}));
+        List<Object> match4 = (List<Object>) response.rows()[3][0];
+        assertThat(match4, Matchers.contains("crate", "greater"));
     }
 
     @Test
@@ -276,15 +276,15 @@ public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
         assertThat(response.rowCount(), is(1L));
         assertThat(TestingHelpers.printedTable(response.rows()), is("4\n"));
 
-        execute("select l from t where i * 2 = l");
+        execute("select l from t where cast(i * 2  as long) = l");
         assertThat(response.rowCount(), is(1L));
         assertThat(TestingHelpers.printedTable(response.rows()), is("2\n"));
 
         execute("select i%3, sum(l) from t where i+1 > 2 group by i%3 order by sum(l)");
         assertThat(response.rowCount(), is(2L));
         assertThat(TestingHelpers.printedTable(response.rows()), is(
-            "2| 5.0\n" +
-            "1| 3.1234594454E10\n"));
+            "2| 5\n" +
+            "1| 31234594454\n"));
     }
 
     @Test
@@ -330,11 +330,19 @@ public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testArithmeticScalarFunctionsOnAllTypes() throws Exception {
+    public void testArithmeticScalarFunctionsOnAllTypes() {
         // this test validates that no exception is thrown
-        execute("create table t (b byte, s short, i integer, l long, f float, d double, t timestamp) with (number_of_replicas=0)");
-        ensureYellow();
-        execute("insert into t (b, s, i, l, f, d, t) values (1, 2, 3, 4, 5.7, 6.3, '2014-07-30')");
+        execute("create table t (" +
+                "   b byte, " +
+                "   s short, " +
+                "   i integer, " +
+                "   l long, " +
+                "   f float, " +
+                "   d double, " +
+                "   tz timestamp with time zone, " +
+                "   t timestamp without time zone " +
+                ") with (number_of_replicas=0)");
+        execute("insert into t (b, s, i, l, f, d, tz, t) values (1, 2, 3, 4, 5.7, 6.3, '2014-07-30', '2018-07-30')");
         refresh();
 
         String[] functionCalls = new String[]{
@@ -348,6 +356,7 @@ public class ArithmeticIntegrationTest extends SQLTransportIntegrationTest {
             "round(%s)",
             "sqrt(%s)"
         };
+        execute("select b + b, s + s, i + i, l + l, f + f, d + d, tz + tz, t + t from t");
 
         for (String functionCall : functionCalls) {
             String byteCall = String.format(Locale.ENGLISH, functionCall, "b");

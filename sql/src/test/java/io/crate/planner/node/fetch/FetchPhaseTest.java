@@ -26,11 +26,13 @@ import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
+import io.crate.execution.dsl.phases.FetchPhase;
 import io.crate.metadata.Reference;
 import io.crate.metadata.ReferenceIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
-import io.crate.planner.node.ExecutionPhases;
+import io.crate.metadata.Schemas;
+import io.crate.execution.dsl.phases.ExecutionPhases;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -46,19 +48,19 @@ public class FetchPhaseTest {
     @Test
     public void testStreaming() throws Exception {
 
-        TableIdent t1 = new TableIdent(null, "t1");
+        RelationName t1 = new RelationName(Schemas.DOC_SCHEMA_NAME, "t1");
 
         TreeMap<String, Integer> bases = new TreeMap<String, Integer>();
         bases.put(t1.name(), 0);
         bases.put("i2", 1);
 
-        Multimap<TableIdent, String> tableIndices = HashMultimap.create();
+        Multimap<RelationName, String> tableIndices = HashMultimap.create();
         tableIndices.put(t1, t1.name());
-        tableIndices.put(new TableIdent(null, "i2"), "i2_s1");
-        tableIndices.put(new TableIdent(null, "i2"), "i2_s2");
+        tableIndices.put(new RelationName(Schemas.DOC_SCHEMA_NAME, "i2"), "i2_s1");
+        tableIndices.put(new RelationName(Schemas.DOC_SCHEMA_NAME, "i2"), "i2_s2");
 
         ReferenceIdent nameIdent = new ReferenceIdent(t1, "name");
-        Reference name = new Reference(nameIdent, RowGranularity.DOC, DataTypes.STRING);
+        Reference name = new Reference(nameIdent, RowGranularity.DOC, DataTypes.STRING, null, null);
 
         FetchPhase orig = new FetchPhase(
             1,
@@ -71,11 +73,11 @@ public class FetchPhaseTest {
         BytesStreamOutput out = new BytesStreamOutput();
         ExecutionPhases.toStream(out, orig);
 
-        StreamInput in = StreamInput.wrap(out.bytes());
+        StreamInput in = out.bytes().streamInput();
         FetchPhase streamed = (FetchPhase) ExecutionPhases.fromStream(in);
 
-        assertThat(orig.executionPhaseId(), is(streamed.executionPhaseId()));
-        assertThat(orig.executionNodes(), is(streamed.executionNodes()));
+        assertThat(orig.phaseId(), is(streamed.phaseId()));
+        assertThat(orig.nodeIds(), is(streamed.nodeIds()));
         assertThat(orig.fetchRefs(), is(streamed.fetchRefs()));
         assertThat(orig.bases(), is(streamed.bases()));
         assertThat(orig.tableIndices(), is(streamed.tableIndices()));

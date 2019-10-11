@@ -21,6 +21,7 @@
 
 package io.crate.metadata;
 
+import io.crate.metadata.cluster.DDLClusterStateService;
 import io.crate.metadata.table.SchemaInfo;
 import io.crate.metadata.tablefunctions.TableFunctionImplementation;
 import org.elasticsearch.common.inject.AbstractModule;
@@ -28,31 +29,21 @@ import org.elasticsearch.common.inject.multibindings.MapBinder;
 
 public class MetaDataModule extends AbstractModule {
 
-    protected MapBinder<ReferenceIdent, ReferenceImplementation> referenceBinder;
-    protected MapBinder<FunctionIdent, FunctionImplementation> functionBinder;
-    protected MapBinder<String, SchemaInfo> schemaBinder;
-
     @Override
     protected void configure() {
-        bindReferences();
         bindFunctions();
         bindSchemas();
+        bind(DDLClusterStateService.class).asEagerSingleton();
     }
 
-    protected void bindReferences() {
-        referenceBinder = MapBinder.newMapBinder(binder(), ReferenceIdent.class, ReferenceImplementation.class);
-        bind(NestedReferenceResolver.class).to(GlobalReferenceResolver.class).asEagerSingleton();
-    }
-
-    protected void bindFunctions() {
-        functionBinder = MapBinder.newMapBinder(binder(), FunctionIdent.class, FunctionImplementation.class);
-        MapBinder.newMapBinder(binder(), String.class, DynamicFunctionResolver.class);
+    private void bindFunctions() {
+        MapBinder.newMapBinder(binder(), String.class, FunctionResolver.class);
         MapBinder.newMapBinder(binder(), String.class, TableFunctionImplementation.class);
         bind(Functions.class).asEagerSingleton();
     }
 
-    protected void bindSchemas() {
-        schemaBinder = MapBinder.newMapBinder(binder(), String.class, SchemaInfo.class);
-        bind(Schemas.class).to(ReferenceInfos.class).asEagerSingleton();
+    private void bindSchemas() {
+        MapBinder.newMapBinder(binder(), String.class, SchemaInfo.class);
+        bind(Schemas.class).asEagerSingleton();
     }
 }

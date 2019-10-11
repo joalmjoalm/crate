@@ -22,18 +22,19 @@
 package io.crate.integrationtests;
 
 import com.carrotsearch.randomizedtesting.LifecycleScope;
+import com.google.common.collect.ImmutableList;
 import io.crate.action.sql.SQLActionException;
-import io.crate.action.sql.SQLResponse;
-import io.crate.testing.TestingHelpers;
+import io.crate.testing.SQLResponse;
+import io.crate.testing.UseJdbc;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-import java.io.BufferedWriter;
 import java.io.File;
-import java.io.FileWriter;
-import java.net.URI;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
@@ -41,18 +42,34 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 import static com.carrotsearch.randomizedtesting.RandomizedTest.newTempDir;
-import static org.hamcrest.Matchers.*;
+import static io.crate.testing.TestingHelpers.printedTable;
+import static org.hamcrest.Matchers.both;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.core.Is.is;
 
-@ESIntegTestCase.ClusterScope(numDataNodes = 2, randomDynamicTemplates = false)
+@ESIntegTestCase.ClusterScope(numDataNodes = 2)
 public class CopyIntegrationTest extends SQLHttpIntegrationTest {
 
-    private String copyFilePath = Paths.get(getClass().getResource("/essetup/data/copy").toURI()).toUri().toString();
-    private String nestedArrayCopyFilePath = Paths.get(getClass().getResource("/essetup/data/nested_array").toURI()).toUri().toString();
+    private final String copyFilePath =
+        Paths.get(getClass().getResource("/essetup/data/copy").toURI()).toUri().toString();
+    private final String copyFilePathShared =
+        Paths.get(getClass().getResource("/essetup/data/copy/shared").toURI()).toUri().toString();
+    private final String nestedArrayCopyFilePath =
+        Paths.get(getClass().getResource("/essetup/data/nested_array").toURI()).toUri().toString();
 
     private Setup setup = new Setup(sqlExecutor);
 
@@ -63,7 +80,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
     }
 
     @Test
-    public void testCopyFromFile() throws Exception {
+    public void testCopyFromFileWithJsonExtension() throws Exception {
         execute("create table quotes (id int primary key, " +
                 "quote string index using fulltext) with (number_of_replicas = 0)");
         ensureYellow();
@@ -77,7 +94,25 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         assertThat(response.rows()[0].length, is(2));
 
         execute("select quote from quotes where id = 1");
-        assertThat((String) response.rows()[0][0], is("Don't pa\u00f1ic."));
+        assertThat(response.rows()[0][0], is("Don't pa\u00f1ic."));
+    }
+
+    @Test
+    public void testCopyFromFileWithCSVOption() {
+        execute("create table quotes (id int primary key, " +
+            "quote string index using fulltext) with (number_of_replicas = 0)");
+        ensureYellow();
+
+        execute("copy quotes from ? with (format='csv')", new Object[]{copyFilePath + "test_copy_from_csv.ext"});
+        assertEquals(3L, response.rowCount());
+        refresh();
+
+        execute("select * from quotes");
+        assertEquals(3L, response.rowCount());
+        assertThat(response.rows()[0].length, is(2));
+
+        execute("select quote from quotes where id = 1");
+        assertThat(response.rows()[0][0], is("Don't pa\u00f1ic."));
     }
 
     @Test
@@ -136,31 +171,17 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
     }
 
     @Test
-    public void testCopyFromDirectory() throws Exception {
+    public void testCopyFromFilePattern() {
         execute("create table quotes (id int primary key, " +
                 "quote string index using fulltext) with (number_of_replicas=0)");
         ensureYellow();
 
-        execute("copy quotes from ? with (shared=true)", new Object[]{copyFilePath + "test_copy_from.json"});
-        assertEquals(3L, response.rowCount());
+        execute("copy quotes from ?", new Object[]{copyFilePathShared + "*.json"});
+        assertEquals(6L, response.rowCount());
         refresh();
 
         execute("select * from quotes");
-        assertEquals(3L, response.rowCount());
-    }
-
-    @Test
-    public void testCopyFromFilePattern() throws Exception {
-        execute("create table quotes (id int primary key, " +
-                "quote string index using fulltext) with (number_of_replicas=0)");
-        ensureYellow();
-
-        execute("copy quotes from ?", new Object[]{copyFilePath + "test_copy_from.json"});
-        assertEquals(3L, response.rowCount());
-        refresh();
-
-        execute("select * from quotes");
-        assertEquals(3L, response.rowCount());
+        assertEquals(6L, response.rowCount());
     }
 
     @Test
@@ -169,18 +190,54 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         ensureYellow();
         File newFile = folder.newFile();
 
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(newFile))) {
-            writer.write("{id:1}\n");
+        try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(newFile), StandardCharsets.UTF_8)) {
+            writer.write("{\"id\":1}\n");
             writer.write("\n");
-            writer.write("{id:2}\n");
+            writer.write("{\"id\":2}\n");
         }
         execute("copy foo from ?", new Object[]{Paths.get(newFile.toURI()).toUri().toString()});
         assertEquals(2L, response.rowCount());
         refresh();
 
         execute("select * from foo order by id");
-        assertThat((Integer) response.rows()[0][0], is(1));
-        assertThat((Integer) response.rows()[1][0], is(2));
+        assertThat(response.rows()[0][0], is(1));
+        assertThat(response.rows()[1][0], is(2));
+    }
+
+    /**
+     * Disable JDBC/PSQL as object values are streamed via JSON on the PSQL wire protocol which is not type safe.
+     */
+    @UseJdbc(0)
+    @Test
+    public void testCopyFromFileWithInvalidColumns() throws Exception {
+        execute("create table foo (id integer primary key) clustered into 1 shards " +
+                "with (number_of_replicas=0, column_policy='dynamic')");
+        ensureYellow();
+        File newFile = folder.newFile();
+
+        try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(newFile), StandardCharsets.UTF_8)) {
+            writer.write("{\"id\":1, \"_invalid\":1}\n");
+            writer.write("{\"id\":2, \"invalid['index']\":2}\n");
+            writer.write("{\"id\":3, \"invalid['_invalid']\":3}\n");
+            writer.write("{\"id\":4, \"valid\": {\"_valid\": 4}}\n");
+        }
+
+        execute("copy foo from ?", new Object[]{Paths.get(newFile.toURI()).toUri().toString()});
+        assertEquals(1L, response.rowCount());
+        refresh();
+
+        execute("select * from foo order by id");
+
+        // Check columns.
+        assertEquals(2L, response.cols().length);
+        assertEquals("valid", response.cols()[1]);
+
+        // Check data of column.
+        assertThat(response.rows()[0][0], is(4));
+        HashMap data = (HashMap)response.rows()[0][1];
+        // The inner value will result in an Long type as we rely on ES mappers here and the dynamic ES parsing
+        // will define integers as longs (no concrete type was specified so use long to be safe)
+        assertThat(data.get("_valid"), is(4L));
     }
 
     @Test
@@ -188,23 +245,22 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         execute("create table foo (id integer primary key) clustered into 1 shards with (number_of_replicas=0)");
         ensureYellow();
         File newFile = folder.newFile();
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(newFile))) {
+        try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(newFile), StandardCharsets.UTF_8)) {
             writer.write("{|}");
         }
-        expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("Failed to parse JSON in line: 1 in file:");
         execute("copy foo from ?", new Object[]{Paths.get(newFile.toURI()).toUri().toString()});
+        assertThat(response.rowCount(), is(0L));
     }
 
     @Test
-    public void testCopyFromFileWithPartition() throws Exception {
-        execute("create table quotes (id int, " +
-                "quote string) partitioned by (id)");
+    public void testCopyFromFileIntoSinglePartition() throws Exception {
+        execute("CREATE TABLE quotes (id INTEGER, quote STRING) PARTITIONED BY (id)");
         ensureGreen();
-        execute("copy quotes partition (id = 1) from ? with (shared=true)", new Object[]{copyFilePath + "test_copy_from.json"});
+        execute("COPY quotes PARTITION (id = 1) FROM ? WITH (shared = true)", new Object[]{
+            copyFilePath + "test_copy_from.json"});
         refresh();
 
-        execute("select * from quotes");
+        execute("SELECT * FROM quotes");
         assertEquals(3L, response.rowCount());
     }
 
@@ -271,9 +327,9 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
     }
 
     @Test
-    public void testCopyFromToPartitionedTableWithNullValue() throws Exception {
+    public void testCopyFromToPartitionedTableWithNullValue() {
         execute("CREATE TABLE times (" +
-                " time timestamp" +
+                "   time timestamp with time zone" +
                 ") partitioned by (time)");
         ensureYellow();
 
@@ -296,7 +352,8 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
                 ") partitioned by (id_str)");
         ensureYellow();
 
-        execute("copy quotes partition (id_str = 1) from ? with (shared=true)", new Object[]{copyFilePath + "test_copy_from.json"});
+        execute("copy quotes partition (id_str = 1) from ? with (shared=true)", new Object[]{
+            copyFilePath + "test_copy_from.json"});
         assertThat(response.rowCount(), is(3L));
         refresh();
 
@@ -307,7 +364,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
     @Test
     public void testCopyToFile() throws Exception {
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage(containsString("Using COPY TO without specifying a DIRECTORY is deprecated"));
+        expectedException.expectMessage(containsString("Using COPY TO without specifying a DIRECTORY is not supported"));
 
         execute("create table singleshard (name string) clustered into 1 shards with (number_of_replicas = 0)");
         ensureYellow();
@@ -323,6 +380,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         SQLResponse response = execute("copy characters to DIRECTORY ?", new Object[]{uriTemplate});
         assertThat(response.rowCount(), is(7L));
         String[] list = folder.getRoot().list();
+        assertThat(list, is(notNullValue()));
         assertThat(list.length, greaterThanOrEqualTo(1));
         for (String file : list) {
             assertThat(file, startsWith("characters_"));
@@ -353,6 +411,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         assertThat(response.rowCount(), is(1L));
 
         String[] list = folder.getRoot().list();
+        assertThat(list, is(notNullValue()));
         assertThat(list.length, is(1));
         String file = list[0];
         assertThat(file, both(startsWith("singleshard_")).and(endsWith(".json.gz")));
@@ -403,6 +462,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         assertThat(response.rowCount(), is(1L));
 
         String[] list = folder.getRoot().list();
+        assertThat(list, is(notNullValue()));
         assertThat(list.length, is(1));
         List<String> lines = Files.readAllLines(
             Paths.get(folder.getRoot().toURI().resolve(list[0])), StandardCharsets.UTF_8);
@@ -424,6 +484,17 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
     }
 
     @Test
+    public void testCopyToWithWhereOnPrimaryKey() throws Exception {
+        execute("create table t1 (id int primary key) with (number_of_replicas = 0)");
+        execute("insert into t1 (id) values (1)");
+        execute("refresh table t1");
+
+        String uriTemplate = Paths.get(folder.getRoot().toURI()).toUri().toString();
+        SQLResponse response = execute("copy t1 where id = 1 to DIRECTORY ?", new Object[]{uriTemplate});
+        assertThat(response.rowCount(), is(1L));
+    }
+
+    @Test
     public void testCopyToWithWhereNoMatch() throws Exception {
         this.setup.groupBySetup();
 
@@ -436,27 +507,27 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
     public void testCopyFromNestedArrayRow() throws Exception {
         // assert that rows with nested arrays aren't imported
         execute("create table users (id int, " +
-                "name string) with (number_of_replicas=0)");
+            "name string) with (number_of_replicas=0)");
         ensureYellow();
-        execute("copy users from ? with (shared=true)", new Object[]{nestedArrayCopyFilePath + "nested_array_copy_from.json"});
+        execute("copy users from ? with (shared=true)", new Object[]{
+            nestedArrayCopyFilePath + "nested_array_copy_from.json"});
         assertEquals(1L, response.rowCount()); // only 1 document got inserted
         refresh();
 
         execute("select * from users");
         assertThat(response.rowCount(), is(1L));
 
-        assertThat(TestingHelpers.printedTable(response.rows()), is("2| Trillian\n"));
+        assertThat(printedTable(response.rows()), is("2| Trillian\n"));
     }
 
     @Test
-    public void testCopyToWithGeneratedColumn() throws Exception {
-        execute("CREATE TABLE foo (\n" +
-                "day TIMESTAMP GENERATED ALWAYS AS date_trunc('day', timestamp),\n" +
-                "timestamp TIMESTAMP\n" +
-                ")\n" +
-                "PARTITIONED BY (day)");
+    public void testCopyToWithGeneratedColumn() {
+        execute("CREATE TABLE foo (" +
+                "   day TIMESTAMP WITH TIME ZONE GENERATED ALWAYS AS date_trunc('day', timestamp)," +
+                "   timestamp TIMESTAMP WITH TIME ZONE" +
+                ") PARTITIONED BY (day)");
         ensureYellow();
-        execute("insert into foo ( timestamp) values (1454454000377)");
+        execute("insert into foo (timestamp) values (1454454000377)");
         refresh();
         String uriTemplate = Paths.get(folder.getRoot().toURI()).toUri().toString();
         SQLResponse response = execute("copy foo to DIRECTORY ?", new Object[]{uriTemplate});
@@ -466,7 +537,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
     @Test
     public void testCopyFromWithRoutingInPK() throws Exception {
         execute("create table t (i int primary key, c string primary key, a int)" +
-                " clustered by (c) with (number_of_replicas=0)");
+            " clustered by (c) with (number_of_replicas=0)");
         ensureGreen();
         execute("insert into t (i, c) values (1, 'clusteredbyvalue'), (2, 'clusteredbyvalue')");
         refresh();
@@ -483,8 +554,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
 
         // only one shard should have all imported rows, since we have the same routing for both rows
         response = execute("select count(*) from sys.shards where num_docs>0 and table_name='t'");
-        assertThat((long) response.rows()[0][0], is(1L));
-
+        assertThat(response.rows()[0][0], is(1L));
     }
 
     @Test
@@ -501,7 +571,7 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         assertThat(response.rowCount(), is(2L));
         execute("refresh table names");
         execute("select name from names order by id");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("Marvin\nSlartibartfast\n"));
+        assertThat(printedTable(response.rows()), is("Marvin\nSlartibartfast\n"));
     }
 
     @Test
@@ -521,6 +591,205 @@ public class CopyIntegrationTest extends SQLHttpIntegrationTest {
         assertThat(response.rowCount(), is(2L));
         execute("refresh table names");
         execute("select name from names order by id");
-        assertThat(TestingHelpers.printedTable(response.rows()), is("Arthur\nSlartibartfast\n"));
+        assertThat(printedTable(response.rows()), is("Arthur\nSlartibartfast\n"));
+    }
+
+    @Test
+    public void testCopyFromIntoTableWithClusterBy() throws Exception {
+        execute("create table quotes (id int, quote string) " +
+            "clustered by (id)" +
+            "with (number_of_replicas = 0)");
+        ensureYellow();
+
+        execute("copy quotes from ? with (shared = true)", new Object[]{copyFilePath + "test_copy_from.json"});
+        assertEquals(3L, response.rowCount());
+        refresh();
+
+        execute("select quote from quotes where id = 2");
+        assertThat((String) response.rows()[0][0], containsString("lot of time"));
+    }
+
+    @Test
+    public void testCopyFromIntoTableWithPkAndClusterBy() throws Exception {
+        execute("create table quotes (id int primary key, quote string) " +
+            "clustered by (id)" +
+            "with (number_of_replicas = 0)");
+        ensureYellow();
+
+        execute("copy quotes from ?", new Object[]{copyFilePath + "test_copy_from.json"});
+        assertEquals(3L, response.rowCount());
+        refresh();
+
+        execute("select quote from quotes where id = 3");
+        assertThat((String) response.rows()[0][0], containsString("Time is an illusion."));
+    }
+
+    private Path setUpTableAndSymlink(String tableName) throws IOException {
+        execute(String.format(Locale.ENGLISH,
+            "create table %s (a int) with (number_of_replicas = 0)",
+            tableName));
+
+        String r1 = "{\"a\": 1}";
+        String r2 = "{\"a\": 2}";
+        String r3 = "{\"a\": 3}";
+        return tmpFileWithLines(ImmutableList.of(r1, r2, r3));
+    }
+
+    private static Path tmpFileWithLines(Iterable<String> lines) throws IOException {
+        Path tmpDir = newTempDir(LifecycleScope.TEST);
+        Path target = Files.createDirectories(tmpDir.resolve("target"));
+        tmpFileWithLines(lines, "data.json", target);
+        return Files.createSymbolicLink(tmpDir.resolve("link"), target);
+    }
+
+    private static void tmpFileWithLines(Iterable<String> lines, String filename, Path target) throws IOException {
+        File file = new File(target.toFile(), filename);
+        Files.write(file.toPath(), lines, StandardCharsets.UTF_8);
+    }
+
+    @Test
+    public void testCopyFromSymlinkFolderWithWildcard() throws Exception {
+        Path link = setUpTableAndSymlink("t");
+        execute("copy t from ? with (shared=true)", new Object[]{
+            link.toUri().toString() + "*"
+        });
+        assertThat(response.rowCount(), is(3L));
+    }
+
+    @Test
+    public void testCopyFromSymlinkFolderWithPrefixedWildcard() throws Exception {
+        Path link = setUpTableAndSymlink("t");
+        execute("copy t from ? with (shared=true)", new Object[]{
+            link.toUri().toString() + "d*"
+        });
+        assertThat(response.rowCount(), is(3L));
+    }
+
+    @Test
+    public void testCopyFromSymlinkFolderWithSuffixedWildcard() throws Exception {
+        Path link = setUpTableAndSymlink("t");
+        execute("copy t from ? with (shared=true)", new Object[]{
+            link.toUri().toString() + "*.json"
+        });
+        assertThat(response.rowCount(), is(3L));
+    }
+
+    @Test
+    public void testCopyFromFileInSymlinkFolder() throws Exception {
+        Path link = setUpTableAndSymlink("t");
+        execute("copy t from ? with (shared=true)", new Object[]{
+            link.toUri().toString() + "data.json"
+        });
+        assertThat(response.rowCount(), is(3L));
+    }
+
+    @Test
+    public void testCopyWithGeneratedPartitionColumnThatIsPartOfPrimaryKey() throws Exception {
+        execute(
+            "create table t1 (" +
+            "   guid string," +
+            "   ts timestamp with time zone," +
+            "   g_ts_month timestamp with time zone generated always as date_trunc('month', ts)," +
+            "   primary key (guid, g_ts_month)" +
+            ") partitioned by (g_ts_month)");
+        ensureYellow();
+
+        Path path = tmpFileWithLines(Arrays.asList(
+            "{\"guid\": \"a\", \"ts\": 1496275200000}",
+            "{\"guid\": \"b\", \"ts\": 1496275300000}"
+        ));
+        execute("copy t1 from ? with (shared=true)", new Object[] { path.toUri().toString() + "*.json"});
+        assertThat(response.rowCount(), is(2L));
+
+        execute("copy t1 partition (g_ts_month = 1496275200000) from ? with (shared=true, overwrite_duplicates=true)",
+            new Object[] { path.toUri().toString() + "*.json"});
+        assertThat(response.rowCount(), is(2L));
+    }
+
+    @UseJdbc(0) // copy from returning does not support unbound analysis (prepared statements)
+    @Test
+    public void testCopyFromReturnSummaryWithFailedRows() throws Exception {
+        execute("create table t1 (id int primary key, ts timestamp with time zone)");
+
+        Path tmpDir = newTempDir(LifecycleScope.TEST);
+        Path target = Files.createDirectories(tmpDir.resolve("target"));
+
+        tmpFileWithLines(Arrays.asList(
+            "{\"id\": 1, \"ts\": 1496275200000}",
+            "{\"id\": 2, \"ts\": 1496275300000}"
+        ), "data1.json", target);
+        tmpFileWithLines(Arrays.asList(
+            "{\"id\": 2, \"ts\": 1496275200000}",       // <-- duplicate key
+            "{\"id\": 3, \"ts\": 1496275300000}"
+        ), "data2.json", target);
+        tmpFileWithLines(Arrays.asList(
+            "{\"id\": 4, \"ts\": 1496275200000}",
+            "{\"id\": 5, \"ts\": \"May\"}",              // <-- invalid timestamp
+            "{\"id\": 7, \"ts\": \"Juli\"}"              // <-- invalid timestamp
+        ), "data3.json", target);
+        tmpFileWithLines(Arrays.asList(
+            "foo",                                      // <-- invalid json
+            "{\"id\": 6, \"ts\": 1496275200000}"
+        ), "data4.json", target);
+
+        execute("copy t1 from ? with (shared=true) return summary", new Object[]{target.toUri().toString() + "*"});
+        String result = printedTable(response.rows());
+
+        // one of the first files should be processed without any error
+        assertThat(result, containsString("| 2| 0| {}"));
+        // one of the first files will have a duplicate key error
+        assertThat(result, containsString("| 1| 1| {A document with the same primary key exists already={count=1, line_numbers=["));
+        // file `data3.json` has a invalid timestamp error
+        assertThat(result, containsString("data3.json| 1| 2| {failed to parse field [ts] of type [date]={count=2, line_numbers=["));
+        // file `data4.json` has an invalid json item entry
+        assertThat(result, containsString("data4.json| 1| 1| {JSON parser error: "));
+    }
+
+    @UseJdbc(0) // copy from returning does not support unbound analysis (prepared statements)
+    @Test
+    public void testCopyFromReturnSummaryWithFailedURI() throws Exception {
+        execute("create table t1 (id int primary key, ts timestamp with time zone)");
+
+        Path tmpDir = newTempDir(LifecycleScope.TEST);
+        String tmpDirStr = tmpDir.toUri().toString();
+
+        String filename = "nonexistingfile.json";
+        execute("copy t1 from ? return summary", new Object[]{tmpDirStr + filename});
+        assertThat(response.rowCount(), is((long) internalCluster().numDataNodes()));
+
+        boolean isRunningOnWindows = System.getProperty("os.name").startsWith("Windows");
+        String expected = "(No such file or directory)";
+        if (isRunningOnWindows) {
+            expected = "(The system cannot find the file specified)";
+        }
+        for (Object[] row : response.rows()) {
+            assertThat((String) row[1], endsWith(filename));
+            assertThat(row[2], nullValue());
+            assertThat(row[3], nullValue());
+            assertThat(((Map<String, Object>) row[4]).keySet(), contains(containsString(expected)));
+        }
+
+        // with shared=true, only 1 data node must try to process the uri
+        execute("copy t1 from ? with (shared=true) return summary", new Object[]{tmpDirStr + filename});
+        assertThat(response.rowCount(), is(1L));
+
+        for (Object[] row : response.rows()) {
+            assertThat((String) row[1], endsWith(filename));
+            assertThat(row[2], nullValue());
+            assertThat(row[3], nullValue());
+            assertThat(((Map<String, Object>) row[4]).keySet(), contains(containsString(expected)));
+        }
+
+        // with shared=true and wildcards all nodes will try to match a file
+        filename =  "*.json";
+        execute("copy t1 from ? with (shared=true) return summary", new Object[]{tmpDirStr + filename});
+        assertThat(response.rowCount(), is((long) internalCluster().numDataNodes()));
+
+        for (Object[] row : response.rows()) {
+            assertThat((String) row[1], endsWith("*.json"));
+            assertThat(row[2], nullValue());
+            assertThat(row[3], nullValue());
+            assertThat(((Map<String, Object>) row[4]).keySet(), contains(containsString("Cannot find any URI matching:")));
+        }
     }
 }

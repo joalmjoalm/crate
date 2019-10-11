@@ -22,18 +22,12 @@
 
 package io.crate.analyze.repositories;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.Optional;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import io.crate.analyze.GenericPropertiesConverter;
-import io.crate.analyze.ParameterContext;
-import io.crate.metadata.settings.SettingsApplier;
-import io.crate.metadata.settings.SettingsAppliers;
-import io.crate.metadata.settings.StringSetting;
 import io.crate.sql.tree.GenericProperties;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.inject.Singleton;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 
 import java.util.Locale;
@@ -49,36 +43,40 @@ public class RepositoryParamValidator {
         typeSettings = repositoryTypeSettings;
     }
 
-    public Settings convertAndValidate(String type, Optional<GenericProperties> genericProperties, ParameterContext parameterContext) {
+    public void validate(String type, GenericProperties<?> genericProperties, Settings settings) {
+        TypeSettings typeSettings = settingsForType(type);
+        Map<String, Setting<?>> allSettings = typeSettings.all();
+
+        // create string settings for all dynamic settings
+        GenericProperties<?> dynamicProperties = typeSettings.dynamicProperties(genericProperties);
+        if (!dynamicProperties.isEmpty()) {
+            // allSettings are immutable by default, copy map
+            allSettings = Maps.newHashMap(allSettings);
+            for (String key : dynamicProperties.properties().keySet()) {
+                allSettings.put(key, Setting.simpleString(key));
+            }
+        }
+
+        // validate all settings
+        Set<String> names = settings.keySet();
+        Sets.SetView<String> missingRequiredSettings = Sets.difference(typeSettings.required().keySet(), names);
+        if (!missingRequiredSettings.isEmpty()) {
+            throw new IllegalArgumentException(
+                String.format(
+                    Locale.ENGLISH,
+                    "The following required parameters are missing to create a repository of type \"%s\": [%s]",
+                    type,
+                    String.join(", ", missingRequiredSettings))
+            );
+        }
+    }
+
+    public TypeSettings settingsForType(String type) {
         TypeSettings typeSettings = this.typeSettings.get(type);
         if (typeSettings == null) {
             throw new IllegalArgumentException(String.format(Locale.ENGLISH, "Invalid repository type \"%s\"", type));
         }
 
-        Map<String, SettingsApplier> allSettings = typeSettings.all();
-
-        // create string settings applier for all dynamic settings
-        Optional<GenericProperties> dynamicProperties = typeSettings.dynamicProperties(genericProperties);
-        if (dynamicProperties.isPresent()) {
-            // allSettings are immutable by default, copy map
-            allSettings = Maps.newHashMap(allSettings);
-            for (String key : dynamicProperties.get().properties().keySet()) {
-                allSettings.put(key, new SettingsAppliers.StringSettingsApplier(new StringSetting(key, true)));
-            }
-        }
-
-        // convert and validate all settings
-        Settings settings = GenericPropertiesConverter.settingsFromProperties(
-            genericProperties, parameterContext, allSettings).build();
-
-        Set<String> names = settings.getAsMap().keySet();
-        Sets.SetView<String> missingRequiredSettings = Sets.difference(typeSettings.required().keySet(), names);
-        if (!missingRequiredSettings.isEmpty()) {
-            throw new IllegalArgumentException(String.format(Locale.ENGLISH,
-                "The following required parameters are missing to create a repository of type \"%s\": [%s]",
-                type, Joiner.on(", ").join(missingRequiredSettings)));
-        }
-
-        return settings;
+        return typeSettings;
     }
 }

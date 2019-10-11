@@ -23,32 +23,41 @@
 package io.crate.plugin;
 
 import com.google.common.annotations.VisibleForTesting;
-import io.crate.module.PluginLoaderModule;
-import org.elasticsearch.action.ActionModule;
-import org.elasticsearch.cluster.ClusterModule;
+import io.crate.common.collections.Lists2;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.cluster.metadata.IndexMetaData;
+import org.elasticsearch.cluster.metadata.IndexTemplateMetaData;
+import org.elasticsearch.cluster.routing.allocation.decider.AllocationDecider;
 import org.elasticsearch.common.component.LifecycleComponent;
 import org.elasticsearch.common.inject.Module;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
+import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.indices.IndicesModule;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.index.IndexModule;
+import org.elasticsearch.index.mapper.Mapper;
+import org.elasticsearch.plugins.ActionPlugin;
+import org.elasticsearch.plugins.ClusterPlugin;
+import org.elasticsearch.plugins.MapperPlugin;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.rest.RestModule;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
-import java.io.Closeable;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.function.UnaryOperator;
 
-public class PluginLoaderPlugin extends Plugin {
+public class PluginLoaderPlugin extends Plugin implements ActionPlugin, MapperPlugin, ClusterPlugin {
 
-    private static final ESLogger LOGGER = Loggers.getLogger(PluginLoaderPlugin.class);
+    private static final Logger LOGGER = LogManager.getLogger(PluginLoaderPlugin.class);
 
     @VisibleForTesting
     final PluginLoader pluginLoader;
@@ -58,6 +67,7 @@ public class PluginLoaderPlugin extends Plugin {
 
     private final SQLPlugin sqlPlugin;
     private final Settings additionalSettings;
+    private final List<Setting<?>> settingList = new ArrayList<>();
 
     public PluginLoaderPlugin(Settings settings) {
         pluginLoader = new PluginLoader(settings);
@@ -66,11 +76,15 @@ public class PluginLoaderPlugin extends Plugin {
             .put(settings)
             .build();
         // SQLPlugin contains modules which use settings which may be overwritten by CratePlugins,
-        // so the SQLPLugin needs to be created here with settings that incl. pluginLoader.additionalSettings
+        // so the SQLPlugin needs to be created here with settings that incl. pluginLoader.additionalSettings
         sqlPlugin = new SQLPlugin(this.settings);
         additionalSettings = Settings.builder()
             .put(pluginLoader.additionalSettings())
             .put(sqlPlugin.additionalSettings()).build();
+
+        settingList.add(PluginLoader.SETTING_CRATE_PLUGINS_PATH);
+        settingList.addAll(pluginLoader.getSettings());
+        settingList.addAll(sqlPlugin.getSettings());
 
         try {
             initializeTrustStore();
@@ -80,90 +94,58 @@ public class PluginLoaderPlugin extends Plugin {
     }
 
     @Override
-    public String name() {
-        return "crate";
-    }
-
-    @Override
-    public String description() {
-        return "Crate PluginLoader plugin";
-    }
-
-    @Override
     public Settings additionalSettings() {
         return additionalSettings;
     }
 
     @Override
-    public Collection<Class<? extends LifecycleComponent>> nodeServices() {
-        Collection<Class<? extends LifecycleComponent>> nodeServices = new ArrayList<>();
-        nodeServices.addAll(sqlPlugin.nodeServices());
-        nodeServices.addAll(pluginLoader.nodeServices());
-        return nodeServices;
+    public List<Setting<?>> getSettings() {
+        return settingList;
     }
 
     @Override
-    public Collection<Module> nodeModules() {
-        Collection<Module> modules = new ArrayList<>();
-        modules.add(new PluginLoaderModule(settings, pluginLoader));
-        modules.addAll(pluginLoader.nodeModules());
-        modules.addAll(sqlPlugin.nodeModules());
-        return modules;
+    public Collection<Class<? extends LifecycleComponent>> getGuiceServiceClasses() {
+        return Lists2.concat(sqlPlugin.getGuiceServiceClasses(), pluginLoader.getGuiceServiceClasses());
     }
 
     @Override
-    public Collection<Class<? extends Closeable>> indexServices() {
-        Collection<Class<? extends Closeable>> indexServices = new ArrayList<>();
-        indexServices.addAll(sqlPlugin.indexServices());
-        indexServices.addAll(pluginLoader.indexServices());
-        return indexServices;
+    public Collection<Module> createGuiceModules() {
+        return Lists2.concat(pluginLoader.createGuiceModules(), sqlPlugin.createGuiceModules());
     }
 
     @Override
-    public Collection<Module> indexModules(Settings indexSettings) {
-        Collection<Module> indexModules = new ArrayList<>();
-        indexModules.addAll(sqlPlugin.indexModules(indexSettings));
-        indexModules.addAll(pluginLoader.indexModules(indexSettings));
-        return indexModules;
+    public Map<String, Mapper.TypeParser> getMappers() {
+        return sqlPlugin.getMappers();
     }
 
     @Override
-    public Collection<Class<? extends Closeable>> shardServices() {
-        Collection<Class<? extends Closeable>> shardServices = new ArrayList<>();
-        shardServices.addAll(sqlPlugin.shardServices());
-        shardServices.addAll(pluginLoader.shardServices());
-        return shardServices;
+    public Collection<AllocationDecider> createAllocationDeciders(Settings settings, ClusterSettings clusterSettings) {
+        return sqlPlugin.createAllocationDeciders(settings, clusterSettings);
     }
 
     @Override
-    public Collection<Module> shardModules(Settings indexSettings) {
-        if (settings.getAsBoolean("node.client", false)) {
-            return Collections.emptyList();
-        }
-        Collection<Module> shardModules = new ArrayList<>();
-        shardModules.addAll(sqlPlugin.shardModules(indexSettings));
-        shardModules.addAll(pluginLoader.shardModules(indexSettings));
-        return shardModules;
+    public void onIndexModule(IndexModule indexModule) {
+        sqlPlugin.onIndexModule(indexModule);
     }
 
-    public void onModule(ActionModule module) {
-        sqlPlugin.onModule(module);
+    @Override
+    public List<NamedWriteableRegistry.Entry> getNamedWriteables() {
+        return sqlPlugin.getNamedWriteables();
     }
 
-    public void onModule(IndicesModule module) {
-        sqlPlugin.onModule(module);
+    @Override
+    public List<NamedXContentRegistry.Entry> getNamedXContent() {
+        return sqlPlugin.getNamedXContent();
     }
 
-    public void onModule(RestModule module) {
-        sqlPlugin.onModule(module);
+    @Override
+    public UnaryOperator<IndexMetaData> getIndexMetaDataUpgrader() {
+        return sqlPlugin.getIndexMetaDataUpgrader();
     }
 
-    public void onModule(ClusterModule module) {
-        sqlPlugin.onModule(module);
-    }
-
-    public void onModule(Module module) {
-        pluginLoader.processModule(module);
+    @Override
+    public UnaryOperator<Map<String, IndexTemplateMetaData>> getIndexTemplateMetaDataUpgrader() {
+        return sqlPlugin.getIndexTemplateMetaDataUpgrader();
     }
 
     /*

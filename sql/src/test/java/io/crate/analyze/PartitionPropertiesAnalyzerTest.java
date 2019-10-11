@@ -21,52 +21,53 @@
 
 package io.crate.analyze;
 
-import com.google.common.collect.ImmutableMap;
-import io.crate.core.collections.Row;
-import io.crate.metadata.MetaDataModule;
+import io.crate.data.Row;
 import io.crate.metadata.PartitionName;
-import io.crate.metadata.Routing;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.doc.DocTableInfo;
-import io.crate.metadata.table.TestingTableInfo;
 import io.crate.sql.tree.Assignment;
 import io.crate.sql.tree.QualifiedName;
 import io.crate.sql.tree.QualifiedNameReference;
 import io.crate.sql.tree.StringLiteral;
-import io.crate.testing.MockedClusterServiceModule;
-import io.crate.types.DataTypes;
-import org.elasticsearch.common.inject.Module;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.SQLExecutor;
 import org.junit.Test;
 
 import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
 
 import static org.hamcrest.Matchers.is;
 
-public class PartitionPropertiesAnalyzerTest extends BaseAnalyzerTest {
+public class PartitionPropertiesAnalyzerTest extends CrateDummyClusterServiceUnitTest {
 
-    @Override
-    protected List<Module> getModules() {
-        List<Module> modules = super.getModules();
-        modules.add(new MockedClusterServiceModule());
-        modules.add(new MetaDataModule());
-        return modules;
-    }
-
-    @Test
-    public void testPartitionNameFromAssignmentWithBytesRef() throws Exception {
-        DocTableInfo tableInfo = TestingTableInfo.builder(new TableIdent("doc", "users"),
-            new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()))
-            .add("name", DataTypes.STRING, null, true)
-            .addPrimaryKey("name").build();
-
-        PartitionName partitionName = PartitionPropertiesAnalyzer.toPartitionName(
+    private PartitionName getPartitionName(DocTableInfo tableInfo) {
+        return PartitionPropertiesAnalyzer.toPartitionName(
             tableInfo,
             Arrays.asList(new Assignment(
                 new QualifiedNameReference(new QualifiedName("name")),
                 new StringLiteral("foo"))),
             Row.EMPTY);
+    }
+
+    @Test
+    public void testPartitionNameFromAssignmentWithBytesRef() {
+        DocTableInfo tableInfo = SQLExecutor.partitionedTableInfo(
+            new RelationName("doc", "users"),
+            "create table doc.users (name text primary key) partitioned by (name)",
+            clusterService);
+
+        PartitionName partitionName = getPartitionName(tableInfo);
         assertThat(partitionName.asIndexName(), is(".partitioned.users.0426crrf"));
+    }
+
+    @Test
+    public void testPartitionNameOnRegularTable() {
+        DocTableInfo tableInfo = SQLExecutor.tableInfo(
+            new RelationName("doc", "users"),
+            "create table doc.users (name text primary key)",
+            clusterService);
+
+        expectedException.expect(IllegalArgumentException.class);
+        expectedException.expectMessage("table 'doc.users' is not partitioned");
+        getPartitionName(tableInfo);
     }
 }

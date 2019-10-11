@@ -21,147 +21,121 @@
 
 package io.crate.node;
 
-import io.crate.Constants;
+import io.crate.action.sql.SQLOperations;
+import io.crate.action.sql.Session;
+import io.crate.test.integration.CrateUnitTest;
+import io.crate.testing.SQLResponse;
+import io.crate.testing.SQLTransportExecutor;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
-import org.apache.log4j.varia.NullAppender;
-import org.elasticsearch.client.Client;
-import org.elasticsearch.common.cli.Terminal;
-import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.env.Environment;
-import org.elasticsearch.node.Node;
-import org.elasticsearch.node.NodeBuilder;
-import org.elasticsearch.node.internal.CrateSettingsPreparer;
+import org.elasticsearch.node.InternalSettingsPreparer;
+import org.hamcrest.Matchers;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.yaml.snakeyaml.Yaml;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.IOException;
-import java.net.URISyntaxException;
+import java.io.Writer;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.elasticsearch.env.Environment.PATH_DATA_SETTING;
+import static org.elasticsearch.env.Environment.PATH_HOME_SETTING;
+import static org.elasticsearch.env.Environment.PATH_LOGS_SETTING;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.is;
 
-
-public class NodeSettingsTest {
+public class NodeSettingsTest extends CrateUnitTest {
 
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 
-    protected Node node;
-    protected Client client;
+    private CrateNode node;
     private boolean loggingConfigured = false;
+    private SQLOperations sqlOperations;
 
-    private final String CRATE_CONFIG_PATH = Paths.get(getClass().getResource("/crate").toURI()).toString();
+    private Path createConfigPath() throws IOException {
+        File config = tmp.newFolder("crate", "config");
 
-    public NodeSettingsTest() throws URISyntaxException {
+        HashMap<String, String> pathSettings = new HashMap<>();
+        pathSettings.put(PATH_DATA_SETTING.getKey(), tmp.newFolder("crate", "data").getPath());
+        pathSettings.put(PATH_LOGS_SETTING.getKey(), tmp.newFolder("crate", "logs").getPath());
+
+        try (Writer writer = new FileWriter(Paths.get(config.getPath(), "crate.yml").toFile())) {
+            Yaml yaml = new Yaml();
+            yaml.dump(pathSettings, writer);
+        }
+
+        new FileOutputStream(new File(config.getPath(), "log4j2.properties")).close();
+
+        return config.toPath();
     }
 
-    private void doSetup() throws IOException {
+    @Before
+    public void doSetup() throws Exception {
         // mute log4j warning by configuring a dummy logger
         if (!loggingConfigured) {
             Logger root = Logger.getRootLogger();
             root.removeAllAppenders();
             root.setLevel(Level.OFF);
-            root.addAppender(new NullAppender());
             loggingConfigured = true;
         }
         tmp.create();
-        Settings.Builder builder = Settings.settingsBuilder()
-            .put("node.name", "node-test")
-            .put("node.data", true)
-            .put("index.store.type", "default")
-            .put("index.store.fs.memory.enabled", "true")
-            .put("gateway.type", "default")
-            .put("path.home", CRATE_CONFIG_PATH)
-            .put("index.number_of_shards", "1")
-            .put("index.number_of_replicas", "0")
-            .put("cluster.routing.schedule", "50ms")
-            .put("node.local", true);
+        Path configPath = createConfigPath();
+        Map<String, String> settings = new HashMap<>();
+        settings.put("node.name", "node-test");
+        settings.put("node.data", "true");
+        settings.put(PATH_HOME_SETTING.getKey(), configPath.toString());
+        // Avoid connecting to other test nodes
+        settings.put("discovery.type", "single-node");
 
-        Terminal terminal = Terminal.DEFAULT;
-        Environment environment = CrateSettingsPreparer.prepareEnvironment(builder.build(), terminal);
-        node = NodeBuilder.nodeBuilder()
-            .settings(environment.settings())
-            .build();
+        Environment environment = InternalSettingsPreparer.prepareEnvironment(Settings.EMPTY, settings, configPath, () -> "node-test");
+        node = new CrateNode(environment);
         node.start();
-        client = node.client();
-        client.admin().indices().prepareCreate("test").execute().actionGet();
+        sqlOperations = node.injector().getInstance(SQLOperations.class);
     }
 
     @After
-    public void tearDown() throws IOException {
-        if (client != null) {
-            client.admin().indices().prepareDelete("test").execute().actionGet();
-            client = null;
+    public void shutDownNodeAndClient() throws IOException {
+        if (sqlOperations != null) {
+            sqlOperations = null;
         }
         if (node != null) {
-            Releasables.close(node);
+            node.close();
             node = null;
         }
-
-
     }
 
     /**
      * The default cluster name is "crate" if not set differently in crate settings
      */
     @Test
-    public void testClusterName() throws IOException {
-        doSetup();
-        assertEquals("crate",
-            client.admin().cluster().prepareHealth().
-                setWaitForGreenStatus().execute().actionGet().getClusterName());
-    }
-
-    /**
-     * The default cluster name is "crate" if not set differently in crate settings
-     */
-    @Test
-    public void testClusterNameSystemProp() throws IOException {
-        System.setProperty("es.cluster.name", "system");
-        doSetup();
-        assertEquals("system",
-            client.admin().cluster().prepareHealth().
-                setWaitForGreenStatus().execute().actionGet().getClusterName());
-        System.clearProperty("es.cluster.name");
-
+    public void testClusterName() {
+        try (Session session = sqlOperations.newSystemSession()) {
+            SQLResponse response = SQLTransportExecutor.execute(
+                "select name from sys.cluster",
+                new Object[0],
+                session)
+                .actionGet(SQLTransportExecutor.REQUEST_TIMEOUT);
+            assertThat(response.rows()[0][0], is("crate"));
+        }
     }
 
     @Test
-    public void testDefaultPaths() throws Exception {
-        doSetup();
-        assertTrue(node.settings().get("path.data").endsWith("data"));
-        assertTrue(node.settings().get("path.logs").endsWith("logs"));
-    }
-
-    @Test
-    public void testCustomPaths() throws Exception {
-        File data1 = new File(tmp.getRoot(), "data1");
-        File data2 = new File(tmp.getRoot(), "data2");
-        System.setProperty("es.path.data", data1.getAbsolutePath() + "," + data2.getAbsolutePath());
-        doSetup();
-        String[] paths = node.settings().getAsArray("path.data");
-        assertTrue(paths[0].endsWith("data1"));
-        assertTrue(paths[1].endsWith("data2"));
-        System.clearProperty("es.path.data");
-    }
-
-    @Test
-    public void testDefaultPorts() throws IOException {
-        doSetup();
-
-        assertEquals(
-            Constants.HTTP_PORT_RANGE,
-            node.settings().get("http.port")
-        );
-        assertEquals(
-            Constants.TRANSPORT_PORT_RANGE,
-            node.settings().get("transport.tcp.port")
-        );
+    public void testDefaultPaths() {
+        assertThat(PATH_DATA_SETTING.get(node.settings()), contains(
+            Matchers.endsWith("data")
+        ));
+        assertTrue(node.settings().get(PATH_LOGS_SETTING.getKey()).endsWith("logs"));
     }
 }

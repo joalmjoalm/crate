@@ -21,88 +21,87 @@
 
 package io.crate.planner;
 
-import com.google.common.base.Function;
-import com.google.common.collect.FluentIterable;
+import com.carrotsearch.hppc.IntIndexedContainer;
+import com.carrotsearch.hppc.cursors.IntCursor;
 import com.google.common.collect.ImmutableMap;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.format.SymbolPrinter;
+import io.crate.execution.dsl.phases.AbstractProjectionsPhase;
+import io.crate.execution.dsl.phases.CollectPhase;
+import io.crate.execution.dsl.phases.CountPhase;
+import io.crate.execution.dsl.phases.ExecutionPhase;
+import io.crate.execution.dsl.phases.ExecutionPhaseVisitor;
+import io.crate.execution.dsl.phases.FetchPhase;
+import io.crate.execution.dsl.phases.HashJoinPhase;
+import io.crate.execution.dsl.phases.JoinPhase;
+import io.crate.execution.dsl.phases.MergePhase;
+import io.crate.execution.dsl.phases.NestedLoopPhase;
+import io.crate.execution.dsl.phases.RoutedCollectPhase;
+import io.crate.execution.dsl.phases.UpstreamPhase;
+import io.crate.execution.dsl.projection.Projection;
 import io.crate.planner.distribution.DistributionInfo;
-import io.crate.planner.distribution.UpstreamPhase;
-import io.crate.planner.node.ExecutionPhase;
-import io.crate.planner.node.ExecutionPhaseVisitor;
-import io.crate.planner.node.dml.InsertFromSubQuery;
-import io.crate.planner.node.dql.*;
-import io.crate.planner.node.dql.join.NestedLoop;
-import io.crate.planner.node.dql.join.NestedLoopPhase;
-import io.crate.planner.node.fetch.FetchPhase;
-import io.crate.planner.projection.Projection;
-import io.crate.planner.projection.ProjectionVisitor;
-import io.crate.planner.projection.TopNProjection;
+import io.crate.planner.node.dql.Collect;
+import io.crate.planner.node.dql.CountPlan;
+import io.crate.planner.node.dql.QueryThenFetch;
+import io.crate.planner.node.dql.join.Join;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class PlanPrinter {
+public final class PlanPrinter {
 
     private PlanPrinter() {
     }
 
-    public static Map<String, Object> objectMap(Plan plan) {
-        return Plan2MapVisitor.toMap(plan);
-    }
-
-    private static List<Object> refs(Collection<? extends Symbol> symbols) {
-        List<Object> refs = new ArrayList<>(symbols.size());
-        for (Symbol s : symbols) {
-            refs.add(SymbolPrinter.INSTANCE.print(s, SymbolPrinter.Style.FULL_QUALIFIED));
-        }
-        return refs;
+    public static Map<String, Object> objectMap(ExecutionPlan executionPlan) {
+        return ExecutionPlan2MapVisitor.createMap(executionPlan);
     }
 
     private static class ExecutionPhase2MapVisitor extends ExecutionPhaseVisitor<Void, ImmutableMap.Builder<String, Object>> {
 
         public static final ExecutionPhase2MapVisitor INSTANCE = new ExecutionPhase2MapVisitor();
 
-        private ExecutionPhase2MapVisitor() {
+        private static ImmutableMap.Builder<String, Object> createMap(ExecutionPhase executionPhase,
+                                                                      ImmutableMap.Builder<String, Object> subMap) {
+            return ImmutableMap.<String, Object>builder()
+                .put(executionPhase.type().toString(), subMap.build());
         }
 
-        static ImmutableMap.Builder<String, Object> toBuilder(ExecutionPhase node) {
-            assert node != null;
-            return INSTANCE.process(node, null);
+        private static ImmutableMap.Builder<String, Object> createSubMap(ExecutionPhase phase) {
+            return ImmutableMap.<String, Object>builder()
+                .put("type", "executionPhase")
+                .put("id", phase.phaseId())
+                // Converting TreeMap.keySet() to be able to stream
+                .put("executionNodes", new ArrayList<>(phase.nodeIds()));
         }
 
-        private static Iterable<Map<String, Object>> projections(Iterable<Projection> projections) {
-            return FluentIterable.from(projections).transform(new Function<Projection, Map<String, Object>>() {
-                @Nullable
-                @Override
-                public Map<String, Object> apply(@Nullable Projection input) {
-                    assert input != null;
-                    return Projection2MapVisitor.toBuilder(input).build();
-                }
-            }).toList();
-            // need to use a List because this is part of a map which is streamed to the client.
+        static ImmutableMap.Builder<String, Object> toBuilder(ExecutionPhase executionPhase) {
+            assert executionPhase != null : "executionPhase must not be null";
+            return INSTANCE.process(executionPhase, null);
+        }
+
+        private static List<Map<String, Object>> projections(Iterable<Projection> projections) {
+            // need to return a List because this is part of a map which is streamed to the client.
             // Map streaming uses StreamOutput#writeGenericValue which can't handle Iterable
+            ArrayList<Map<String, Object>> result = new ArrayList<>();
+            for (Projection projection : projections) {
+                result.add(projection.mapRepresentation());
+            }
+            return result;
         }
 
-        private static ImmutableMap.Builder<String, Object> newBuilder() {
-            return ImmutableMap.builder();
+
+        private ExecutionPhase2MapVisitor() {
         }
 
         @Override
         protected ImmutableMap.Builder<String, Object> visitExecutionPhase(ExecutionPhase phase, Void context) {
-            return newBuilder()
-                .put("phaseType", phase.type().toString())
-                .put("id", phase.executionPhaseId())
-                // Converting TreeMap.keySet() to be able to stream
-                .put("executionNodes", new ArrayList<>(phase.executionNodes())
-                );
+            return createMap(phase, createSubMap(phase));
         }
 
         private ImmutableMap.Builder<String, Object> process(DistributionInfo info) {
-            return newBuilder()
+            return ImmutableMap.<String, Object>builder()
                 .put("distributedByColumn", info.distributeByColumn())
                 .put("type", info.distributionType().toString());
         }
@@ -120,81 +119,76 @@ public class PlanPrinter {
 
         @Override
         public ImmutableMap.Builder<String, Object> visitRoutedCollectPhase(RoutedCollectPhase phase, Void context) {
-            ImmutableMap.Builder<String, Object> builder = visitCollectPhase(phase, context);
+            ImmutableMap.Builder<String, Object> builder = upstreamPhase(phase, createSubMap(phase));
+            builder.put("toCollect", ExplainLeaf.printList(phase.toCollect()));
             builder = dqlPlanNode(phase, builder);
-            builder.put("routing", phase.routing().locations());
-            return builder;
+            builder.put("routing", xContentSafeRoutingLocations(phase.routing().locations()));
+            builder.put("where", phase.where().representation());
+            return createMap(phase, builder);
         }
 
         @Override
         public ImmutableMap.Builder<String, Object> visitCollectPhase(CollectPhase phase, Void context) {
-            ImmutableMap.Builder<String, Object> builder = upstreamPhase(phase, visitExecutionPhase(phase, context));
-            builder.put("toCollect", refs(phase.toCollect()));
-            return builder;
+            ImmutableMap.Builder<String, Object> builder = upstreamPhase(phase, createSubMap(phase));
+            builder.put("toCollect", ExplainLeaf.printList(phase.toCollect()));
+            return createMap(phase, builder);
         }
 
         @Override
         public ImmutableMap.Builder<String, Object> visitCountPhase(CountPhase phase, Void context) {
-            return upstreamPhase(phase, visitExecutionPhase(phase, context));
+            ImmutableMap.Builder<String, Object> builder = upstreamPhase(phase, visitExecutionPhase(phase, context));
+            builder.put("routing", xContentSafeRoutingLocations(phase.routing().locations()));
+            builder.put("where", phase.where().representation());
+            return builder;
         }
 
         @Override
         public ImmutableMap.Builder<String, Object> visitFetchPhase(FetchPhase phase, Void context) {
-            return visitExecutionPhase(phase, context)
-                .put("fetchRefs", refs(phase.fetchRefs()));
+            return createMap(phase, createSubMap(phase)
+                .put("fetchRefs", ExplainLeaf.printList(phase.fetchRefs())));
         }
 
         @Override
         public ImmutableMap.Builder<String, Object> visitMergePhase(MergePhase phase, Void context) {
-            ImmutableMap.Builder<String, Object> b = upstreamPhase(phase, visitExecutionPhase(phase, context));
-            return dqlPlanNode(phase, b);
+            ImmutableMap.Builder<String, Object> b = upstreamPhase(phase, createSubMap(phase));
+            return createMap(phase, dqlPlanNode(phase, b));
         }
 
         @Override
         public ImmutableMap.Builder<String, Object> visitNestedLoopPhase(NestedLoopPhase phase, Void context) {
-            ImmutableMap.Builder<String, Object> b = upstreamPhase(phase, visitExecutionPhase(phase, context));
-            return dqlPlanNode(phase, b);
+            return getBuilderForJoinPhase(phase);
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitHashJoinPhase(HashJoinPhase phase, Void context) {
+            return getBuilderForJoinPhase(phase);
+        }
+
+        private ImmutableMap.Builder<String, Object> getBuilderForJoinPhase(JoinPhase phase) {
+            ImmutableMap.Builder<String, Object> b = upstreamPhase(
+                phase,
+                createSubMap(phase).put("joinType", phase.joinType()));
+            return createMap(phase, dqlPlanNode(phase, b));
         }
     }
 
+    private static class ExecutionPlan2MapVisitor extends ExecutionPlanVisitor<Void, ImmutableMap.Builder<String, Object>> {
 
-    private static class Projection2MapVisitor extends ProjectionVisitor<Void, ImmutableMap.Builder<String, Object>> {
+        private static final ExecutionPlan2MapVisitor INSTANCE = new ExecutionPlan2MapVisitor();
 
-        private static final Projection2MapVisitor INSTANCE = new Projection2MapVisitor();
-
-        private static ImmutableMap.Builder<String, Object> newBuilder() {
-            return ImmutableMap.builder();
+        private static ImmutableMap.Builder<String, Object> createMap(ExecutionPlan executionPlan,
+                                                                      ImmutableMap.Builder<String, Object> subMap) {
+            return ImmutableMap.<String, Object>builder()
+                .put(executionPlan.getClass().getSimpleName(), subMap.build());
         }
 
-        static ImmutableMap.Builder<String, Object> toBuilder(Projection projection) {
-            assert projection != null;
-            return INSTANCE.process(projection, null);
-        }
-
-        @Override
-        protected ImmutableMap.Builder<String, Object> visitProjection(Projection projection, Void context) {
-            return newBuilder().put("type", projection.projectionType().toString());
+        private static ImmutableMap.Builder<String, Object> createSubMap() {
+            return ImmutableMap.<String, Object>builder().put("type", "executionPlan");
         }
 
         @Override
-        public ImmutableMap.Builder<String, Object> visitTopNProjection(TopNProjection projection, Void context) {
-            return visitProjection(projection, context)
-                .put("rows", projection.offset() + "-" + projection.limit());
-        }
-    }
-
-    private static class Plan2MapVisitor extends PlanVisitor<Void, ImmutableMap.Builder<String, Object>> {
-
-        private static final Plan2MapVisitor INSTANCE = new Plan2MapVisitor();
-
-        private static ImmutableMap.Builder<String, Object> newBuilder() {
-            return ImmutableMap.builder();
-        }
-
-        @Override
-        protected ImmutableMap.Builder<String, Object> visitPlan(Plan plan, Void context) {
-            return newBuilder()
-                .put("planType", plan.getClass().getSimpleName());
+        protected ImmutableMap.Builder<String, Object> visitPlan(ExecutionPlan executionPlan, Void context) {
+            return createMap(executionPlan, createSubMap());
         }
 
         private static Map<String, Object> phaseMap(@Nullable ExecutionPhase node) {
@@ -205,56 +199,75 @@ public class PlanPrinter {
             }
         }
 
-        static Map<String, Object> toMap(Plan plan) {
-            assert plan != null;
-            return INSTANCE.process(plan, null).build();
+        static Map<String, Object> createMap(ExecutionPlan executionPlan) {
+            assert executionPlan != null : "plan must not be null";
+            return INSTANCE.process(executionPlan, null).build();
         }
 
         @Override
-        public ImmutableMap.Builder<String, Object> visitCollectAndMerge(CollectAndMerge plan, Void context) {
-            ImmutableMap.Builder<String, Object> b = visitPlan(plan, context)
-                .put("collectPhase", phaseMap(plan.collectPhase()));
-            if (plan.localMerge() != null) {
-                b.put("localMerge", phaseMap(plan.localMerge()));
-            }
-            return b;
+        public ImmutableMap.Builder<String, Object> visitCollect(Collect plan, Void context) {
+            return createMap(plan, createSubMap()
+                .put("collectPhase", phaseMap(plan.collectPhase())));
         }
 
         @Override
-        public ImmutableMap.Builder<String, Object> visitInsertByQuery(InsertFromSubQuery node, Void context) {
-            ImmutableMap.Builder<String, Object> builder = visitPlan(node, context);
-            builder.put("innerPlan", process(node.innerPlan(), context).build());
-
-            if (node.handlerMergeNode().isPresent()) {
-                builder.put("localMerge", phaseMap(node.handlerMergeNode().get()));
-            }
-            return builder;
-        }
-
-        @Override
-        public ImmutableMap.Builder<String, Object> visitNestedLoop(NestedLoop plan, Void context) {
-            ImmutableMap.Builder<String, Object> builder = newBuilder()
-                .put("planType", plan.getClass().getSimpleName())
-                .put("left", process(plan.left().plan(), context).build())
-                .put("right", process(plan.right().plan(), context).build())
-                .put("nestedLoopPhase", phaseMap(plan.nestedLoopPhase()));
-
-            MergePhase mergePhase = plan.localMerge();
-            if (mergePhase != null) {
-                builder.put("localMerge", phaseMap(mergePhase));
-            }
-            return builder;
+        public ImmutableMap.Builder<String, Object> visitJoin(Join plan, Void context) {
+            return createMap(plan, createSubMap()
+                .put("left", process(plan.left(), context).build())
+                .put("right", process(plan.right(), context).build())
+                .put("joinPhase", phaseMap(plan.joinPhase())));
         }
 
         @Override
         public ImmutableMap.Builder<String, Object> visitQueryThenFetch(QueryThenFetch plan, Void context) {
-            ImmutableMap.Builder<String, Object> b = visitPlan(plan, context)
-                .put("subPlan", toMap(plan.subPlan()));
-            if (plan.localMerge() != null) {
-                b.put("localMerge", phaseMap(plan.localMerge()));
-            }
-            b.put("fetchPhase", phaseMap(plan.fetchPhase()));
-            return b;
+            return createMap(plan, createSubMap()
+                .put("subPlan", createMap(plan.subPlan()))
+                .put("fetchPhase", phaseMap(plan.fetchPhase())));
         }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitMerge(Merge merge, Void context) {
+            return createMap(merge, createSubMap()
+                .put("subPlan", createMap(merge.subPlan()))
+                .put("mergePhase", phaseMap(merge.mergePhase())));
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitUnionPlan(UnionExecutionPlan unionExecutionPlan, Void context) {
+            return createMap(unionExecutionPlan, createSubMap()
+                .put("left", createMap(unionExecutionPlan.left()))
+                .put("right", createMap(unionExecutionPlan.right()))
+                .put("mergePhase", phaseMap(unionExecutionPlan.mergePhase())));
+        }
+
+        @Override
+        public ImmutableMap.Builder<String, Object> visitCountPlan(CountPlan countPlan, Void context) {
+            return visitPlan(countPlan, context)
+                .put("countPhase", phaseMap(countPlan.countPhase()))
+                .put("mergePhase", phaseMap(countPlan.mergePhase()));
+        }
+    }
+
+    /**
+     * Converts the shardId's of each node->table from a {@link IntIndexedContainer} to a list of Integers as custom
+     * classes are not supported by the {@link org.elasticsearch.common.xcontent.XContentBuilder}.
+     */
+    private static Map<String, Map<String, List<Integer>>> xContentSafeRoutingLocations(
+        Map<String, Map<String, IntIndexedContainer>> locations) {
+        HashMap<String, Map<String, List<Integer>>> safeLocations = new HashMap<>(locations.size(), 1f);
+        for (Map.Entry<String, Map<String, IntIndexedContainer>> nodeEntry : locations.entrySet()) {
+            HashMap<String, List<Integer>> tableShards = new HashMap<>(nodeEntry.getValue().size(), 1f);
+            for (Map.Entry<String, IntIndexedContainer> tableEntry : nodeEntry.getValue().entrySet()) {
+                ArrayList<Integer> shardList = new ArrayList<>(tableEntry.getValue().size());
+                for (IntCursor cursor : tableEntry.getValue()) {
+                    shardList.add(cursor.value);
+                }
+                // ensure a deterministic shard list by sorting it (important for test assertions but maybe also for apps)
+                shardList.sort(Integer::compareTo);
+                tableShards.put(tableEntry.getKey(), shardList);
+            }
+            safeLocations.put(nodeEntry.getKey(), tableShards);
+        }
+        return safeLocations;
     }
 }

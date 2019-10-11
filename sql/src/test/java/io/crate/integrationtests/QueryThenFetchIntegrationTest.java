@@ -22,20 +22,18 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.operation.Paging;
+import io.crate.data.Paging;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 
-@UseJdbc
 public class QueryThenFetchIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testCrateSearchServiceSupportsOrderByOnFunctionWithBooleanReturnType() throws Exception {
-        execute("create table t (name string, b byte) with (number_of_replicas = 0)");
+        execute("create table t (b byte, name string) with (number_of_replicas = 0)");
         execute("insert into t (name, b) values ('Marvin', 0), ('Trillian', 1), ('Arthur', 2), ('Max', 3)");
         execute("refresh table t");
         ensureGreen();
@@ -62,8 +60,11 @@ public class QueryThenFetchIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testTestWithTimestampThatIsInIntegerRange() throws Exception {
-        execute("create table t (ts timestamp) clustered into 1 shards with (number_of_replicas = 0)");
+    public void testTestWithTimestampThatIsInIntegerRange() {
+        execute(
+            "create table t (" +
+            "   ts timestamp with time zone" +
+            ") clustered into 1 shards with (number_of_replicas = 0)");
         ensureYellow();
         execute("insert into t (ts) values (0)");
         execute("insert into t (ts) values (1425980155)");

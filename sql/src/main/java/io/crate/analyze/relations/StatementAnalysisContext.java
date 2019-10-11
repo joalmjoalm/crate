@@ -21,40 +21,33 @@
 
 package io.crate.analyze.relations;
 
-import com.google.common.base.Function;
 import io.crate.action.sql.SessionContext;
-import io.crate.analyze.AnalysisMetaData;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.metadata.StmtCtx;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
 import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.ParameterExpression;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 public class StatementAnalysisContext {
 
     private final Operation currentOperation;
-    private final SessionContext sessionContext;
+    private final CoordinatorTxnCtx coordinatorTxnCtx;
     private final Function<ParameterExpression, Symbol> convertParamFunction;
-    private final StmtCtx stmtCtx;
-    private final AnalysisMetaData analysisMetaData;
     private final List<RelationAnalysisContext> lastRelationContextQueue = new ArrayList<>();
 
-    public StatementAnalysisContext(SessionContext sessionContext,
-                                    Function<ParameterExpression, Symbol> convertParamFunction,
-                                    StmtCtx stmtCtx,
-                                    AnalysisMetaData analysisMetaData,
-                                    Operation currentOperation) {
-        this.sessionContext = sessionContext;
+    public StatementAnalysisContext(Function<ParameterExpression, Symbol> convertParamFunction,
+                                    Operation currentOperation,
+                                    CoordinatorTxnCtx coordinatorTxnCtx) {
         this.convertParamFunction = convertParamFunction;
-        this.stmtCtx = stmtCtx;
-        this.analysisMetaData = analysisMetaData;
         this.currentOperation = currentOperation;
+        this.coordinatorTxnCtx = coordinatorTxnCtx;
     }
 
-    public StmtCtx stmtCtx() {
-        return stmtCtx;
+    public CoordinatorTxnCtx transactionContext() {
+        return coordinatorTxnCtx;
     }
 
     Operation currentOperation() {
@@ -66,8 +59,15 @@ public class StatementAnalysisContext {
     }
 
     RelationAnalysisContext startRelation(boolean aliasedRelation) {
-        RelationAnalysisContext currentRelationContext = new RelationAnalysisContext(
-            sessionContext, convertParamFunction, stmtCtx, analysisMetaData, aliasedRelation);
+        ParentRelations parentRelations;
+        if (lastRelationContextQueue.isEmpty()) {
+            parentRelations = ParentRelations.NO_PARENTS;
+        } else {
+            RelationAnalysisContext parentCtx = lastRelationContextQueue.get(lastRelationContextQueue.size() - 1);
+            parentRelations = parentCtx.parentSources().newLevel(parentCtx.sources());
+        }
+        RelationAnalysisContext currentRelationContext =
+            new RelationAnalysisContext(aliasedRelation, parentRelations);
         lastRelationContextQueue.add(currentRelationContext);
         return currentRelationContext;
     }
@@ -84,7 +84,7 @@ public class StatementAnalysisContext {
     }
 
     public SessionContext sessionContext() {
-        return sessionContext;
+        return coordinatorTxnCtx.sessionContext();
     }
 
     public Function<ParameterExpression,Symbol> convertParamFunction() {

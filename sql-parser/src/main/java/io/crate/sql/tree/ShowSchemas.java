@@ -22,22 +22,25 @@
 package io.crate.sql.tree;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Optional;
 
 import javax.annotation.Nullable;
 import java.util.Objects;
+import java.util.Optional;
 
 public class ShowSchemas extends Statement {
 
-    private final Optional<String> likePattern;
+    @Nullable
+    private final String likePattern;
     private final Optional<Expression> whereExpression;
 
-    public ShowSchemas(@Nullable String likePattern, @Nullable Expression whereExpr) {
-        this.likePattern = Optional.fromNullable(likePattern);
-        this.whereExpression = Optional.fromNullable(whereExpr);
+    public ShowSchemas(@Nullable String likePattern,
+                       Optional<Expression> whereExpr) {
+        this.likePattern = likePattern;
+        this.whereExpression = whereExpr;
     }
 
-    public Optional<String> likePattern() {
+    @Nullable
+    public String likePattern() {
         return likePattern;
     }
 
@@ -56,7 +59,7 @@ public class ShowSchemas extends Statement {
         if (o == null || getClass() != o.getClass()) return false;
         ShowSchemas that = (ShowSchemas) o;
         return Objects.equals(likePattern, that.likePattern) &&
-               Objects.equals(whereExpression, that.whereExpression);
+            Objects.equals(whereExpression, that.whereExpression);
     }
 
     @Override

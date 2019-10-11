@@ -22,64 +22,57 @@
 
 package io.crate.analyze.expressions;
 
-import com.google.common.base.Preconditions;
-import io.crate.analyze.EvaluatingNormalizer;
-import io.crate.analyze.symbol.DynamicReference;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.format.SymbolFormatter;
-import io.crate.analyze.symbol.format.SymbolPrinter;
 import io.crate.exceptions.ColumnUnknownException;
 import io.crate.exceptions.ColumnValidationException;
 import io.crate.exceptions.ConversionException;
+import io.crate.expression.symbol.DynamicReference;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.format.SymbolFormatter;
+import io.crate.expression.symbol.format.SymbolPrinter;
 import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.Reference;
-import io.crate.metadata.Schemas;
-import io.crate.metadata.StmtCtx;
+import io.crate.metadata.Scalar;
 import io.crate.metadata.doc.DocTableInfo;
-import io.crate.metadata.table.ColumnPolicy;
 import io.crate.metadata.table.TableInfo;
+import io.crate.sql.tree.ColumnPolicy;
 import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import io.crate.types.ObjectType;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-public class ValueNormalizer {
+public final class ValueNormalizer {
 
-    private Schemas schemas;
-    private EvaluatingNormalizer normalizer;
-
-    public ValueNormalizer(Schemas schemas, EvaluatingNormalizer normalizer) {
-        this.schemas = schemas;
-        this.normalizer = normalizer;
+    private ValueNormalizer() {
     }
 
     /**
      * normalize and validate given value according to the corresponding {@link io.crate.metadata.Reference}
      *
-     * @param valueSymbol the value to normalize, might be anything from {@link io.crate.metadata.Scalar} to {@link io.crate.analyze.symbol.Literal}
+     * @param valueSymbol the value to normalize, might be anything from {@link Scalar} to {@link io.crate.expression.symbol.Literal}
      * @param reference   the reference to which the value has to comply in terms of type-compatibility
      * @return the normalized Symbol, should be a literal
      * @throws io.crate.exceptions.ColumnValidationException
      */
-    public Symbol normalizeInputForReference(Symbol valueSymbol, Reference reference, StmtCtx stmtCtx) {
-        valueSymbol = normalizer.normalize(valueSymbol, stmtCtx);
+    public static Symbol normalizeInputForReference(Symbol valueSymbol, Reference reference, TableInfo tableInfo) {
         assert valueSymbol != null : "valueSymbol must not be null";
 
         DataType<?> targetType = getTargetType(valueSymbol, reference);
         if (!(valueSymbol instanceof Literal)) {
-            return ExpressionAnalyzer.castIfNeededOrFail(valueSymbol, targetType);
+            return ExpressionAnalyzer.cast(valueSymbol, targetType);
         }
         Literal literal = (Literal) valueSymbol;
         try {
             literal = Literal.convert(literal, reference.valueType());
         } catch (ConversionException e) {
             throw new ColumnValidationException(
-                reference.ident().columnIdent().name(),
-                String.format(Locale.ENGLISH, "%s cannot be cast to type %s", SymbolPrinter.INSTANCE.printSimple(valueSymbol),
+                reference.column().name(),
+                tableInfo.ident(),
+                String.format(Locale.ENGLISH, "Cannot cast %s to type %s", SymbolPrinter.INSTANCE.printUnqualified(valueSymbol),
                     reference.valueType().getName()));
         }
         Object value = literal.value();
@@ -87,15 +80,16 @@ public class ValueNormalizer {
             return literal;
         }
         try {
-            if (targetType == DataTypes.OBJECT) {
+            if (targetType.id() == ObjectType.ID) {
                 //noinspection unchecked
-                normalizeObjectValue((Map) value, reference);
+                normalizeObjectValue((Map) value, reference, tableInfo);
             } else if (isObjectArray(targetType)) {
-                normalizeObjectArrayValue((Object[]) value, reference);
+                normalizeObjectArrayValue((List<Map<String, Object>>) value, reference, tableInfo);
             }
         } catch (ConversionException e) {
             throw new ColumnValidationException(
-                reference.ident().columnIdent().name(),
+                reference.column().name(),
+                tableInfo.ident(),
                 SymbolFormatter.format(
                     "\"%s\" has a type that can't be implicitly cast to that of \"%s\" (" +
                     reference.valueType().getName() + ")",
@@ -118,10 +112,9 @@ public class ValueNormalizer {
     }
 
     @SuppressWarnings("unchecked")
-    private void normalizeObjectValue(Map<String, Object> value, Reference info) {
+    private static void normalizeObjectValue(Map<String, Object> value, Reference info, TableInfo tableInfo) {
         for (Map.Entry<String, Object> entry : value.entrySet()) {
-            ColumnIdent nestedIdent = ColumnIdent.getChild(info.ident().columnIdent(), entry.getKey());
-            TableInfo tableInfo = schemas.getTableInfo(info.ident().tableIdent());
+            ColumnIdent nestedIdent = ColumnIdent.getChildSafe(info.column(), entry.getKey());
             Reference nestedInfo = tableInfo.getReference(nestedIdent);
             if (nestedInfo == null) {
                 if (info.columnPolicy() == ColumnPolicy.IGNORED) {
@@ -132,11 +125,12 @@ public class ValueNormalizer {
                     dynamicReference = ((DocTableInfo) tableInfo).getDynamic(nestedIdent, true);
                 }
                 if (dynamicReference == null) {
-                    throw new ColumnUnknownException(nestedIdent.sqlFqn());
+                    throw new ColumnUnknownException(nestedIdent.sqlFqn(), tableInfo.ident());
                 }
                 DataType type = DataTypes.guessType(entry.getValue());
                 if (type == null) {
-                    throw new ColumnValidationException(info.ident().columnIdent().sqlFqn(), "Invalid value");
+                    throw new ColumnValidationException(
+                        info.column().sqlFqn(), tableInfo.ident(), "Invalid value");
                 }
                 dynamicReference.valueType(type);
                 nestedInfo = dynamicReference;
@@ -145,10 +139,10 @@ public class ValueNormalizer {
                     continue;
                 }
             }
-            if (nestedInfo.valueType() == DataTypes.OBJECT && entry.getValue() instanceof Map) {
-                normalizeObjectValue((Map<String, Object>) entry.getValue(), nestedInfo);
-            } else if (isObjectArray(nestedInfo.valueType()) && entry.getValue() instanceof Object[]) {
-                normalizeObjectArrayValue((Object[]) entry.getValue(), nestedInfo);
+            if (nestedInfo.valueType().id() == ObjectType.ID && entry.getValue() instanceof Map) {
+                normalizeObjectValue((Map<String, Object>) entry.getValue(), nestedInfo, tableInfo);
+            } else if (isObjectArray(nestedInfo.valueType()) && entry.getValue() instanceof List) {
+                normalizeObjectArrayValue((List<Map<String, Object>>) entry.getValue(), nestedInfo, tableInfo);
             } else {
                 entry.setValue(normalizePrimitiveValue(entry.getValue(), nestedInfo));
             }
@@ -159,13 +153,11 @@ public class ValueNormalizer {
         return type.id() == ArrayType.ID && ((ArrayType) type).innerType().id() == ObjectType.ID;
     }
 
-    private void normalizeObjectArrayValue(Object[] value, Reference arrayInfo) {
-        for (Object arrayItem : value) {
-            Preconditions.checkArgument(arrayItem instanceof Map, "invalid value for object array type");
+    private static void normalizeObjectArrayValue(List<Map<String, Object>> values, Reference arrayInfo, TableInfo tableInfo) {
+        for (Object value : values) {
             // return value not used and replaced in value as arrayItem is a map that is mutated
-
             //noinspection unchecked
-            normalizeObjectValue((Map<String, Object>) arrayItem, arrayInfo);
+            normalizeObjectValue((Map<String, Object>) value, arrayInfo, tableInfo);
         }
     }
 
@@ -176,7 +168,9 @@ public class ValueNormalizer {
         try {
             return info.valueType().value(primitiveValue);
         } catch (Exception e) {
-            throw new ColumnValidationException(info.ident().columnIdent().sqlFqn(),
+            throw new ColumnValidationException(
+                info.column().sqlFqn(),
+                info.ident().tableIdent(),
                 String.format(Locale.ENGLISH, "Invalid %s", info.valueType().getName())
             );
         }

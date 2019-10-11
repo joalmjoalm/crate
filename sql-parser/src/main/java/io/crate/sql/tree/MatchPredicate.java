@@ -21,7 +21,6 @@
 
 package io.crate.sql.tree;
 
-import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 
@@ -32,20 +31,19 @@ public class MatchPredicate extends Expression {
 
     private final List<MatchPredicateColumnIdent> idents;
     private final Expression value;
-    private final GenericProperties properties;
+    private final GenericProperties<Expression> properties;
     private final String matchType;
 
-    public MatchPredicate(List<MatchPredicateColumnIdent> idents, Expression value,
-                          @Nullable String matchType, @Nullable GenericProperties properties) {
+    public MatchPredicate(List<MatchPredicateColumnIdent> idents,
+                          Expression value,
+                          @Nullable String matchType,
+                          GenericProperties<Expression> properties) {
         Preconditions.checkArgument(idents.size() > 0, "at least one ident must be given");
         Preconditions.checkNotNull(value, "query_term is null");
-        Preconditions.checkArgument(value instanceof ObjectLiteral || value instanceof StringLiteral ||
-                                    value instanceof ParameterExpression, "query_term is not a valid literal nor a parameter");
-
         this.idents = idents;
         this.value = value;
         this.matchType = matchType;
-        this.properties = MoreObjects.firstNonNull(properties, GenericProperties.EMPTY);
+        this.properties = properties;
     }
 
     public List<MatchPredicateColumnIdent> idents() {
@@ -61,7 +59,7 @@ public class MatchPredicate extends Expression {
         return matchType;
     }
 
-    public GenericProperties properties() {
+    public GenericProperties<Expression> properties() {
         return properties;
     }
 

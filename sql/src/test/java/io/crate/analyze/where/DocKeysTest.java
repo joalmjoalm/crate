@@ -22,16 +22,22 @@
 package io.crate.analyze.where;
 
 import com.google.common.collect.ImmutableList;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
+import io.crate.data.Row;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.planner.operators.SubQueryResults;
 import io.crate.test.integration.CrateUnitTest;
 import org.junit.Test;
 
 import java.util.List;
+import java.util.Optional;
 
+import static io.crate.testing.TestingHelpers.getFunctions;
 import static org.hamcrest.core.Is.is;
 
 public class DocKeysTest extends CrateUnitTest {
+
 
     @Test
     public void testClusteredIsFirstInId() throws Exception {
@@ -39,10 +45,27 @@ public class DocKeysTest extends CrateUnitTest {
         List<List<Symbol>> pks = ImmutableList.<List<Symbol>>of(
             ImmutableList.<Symbol>of(Literal.of(1), Literal.of("Ford"))
         );
-        DocKeys docKeys = new DocKeys(pks, false, 1, null);
+        DocKeys docKeys = new DocKeys(pks, false, false, 1, null);
         DocKeys.DocKey key = docKeys.getOnlyKey();
-        assertThat(key.routing(), is("Ford"));
-        assertThat(key.id(), is("AgRGb3JkATE="));
+        CoordinatorTxnCtx txnCtx = CoordinatorTxnCtx.systemTransactionContext();
+        assertThat(key.getRouting(txnCtx, getFunctions(), Row.EMPTY, SubQueryResults.EMPTY), is("Ford"));
+        assertThat(key.getId(txnCtx, getFunctions(), Row.EMPTY, SubQueryResults.EMPTY), is("AgRGb3JkATE="));
     }
 
+    @Test
+    public void testDocKeySequeceAndTerm() {
+        DocKeys docKeys = new DocKeys(List.of(List.of(Literal.of(1), Literal.of(22), Literal.of(5))),
+                                      false,
+                                      true,
+                                      1,
+                                      null);
+        DocKeys.DocKey key = docKeys.getOnlyKey();
+        CoordinatorTxnCtx txnCtx = CoordinatorTxnCtx.systemTransactionContext();
+        Optional<Long> sequenceNo = key.sequenceNo(txnCtx, getFunctions(), Row.EMPTY, SubQueryResults.EMPTY);
+        assertThat(sequenceNo.isPresent(), is(true));
+        assertThat(sequenceNo.get(), is(22L));
+        Optional<Long> primaryTerm = key.primaryTerm(txnCtx, getFunctions(), Row.EMPTY, SubQueryResults.EMPTY);
+        assertThat(primaryTerm.isPresent(), is(true));
+        assertThat(primaryTerm.get(), is(5L));
+    }
 }

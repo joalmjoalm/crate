@@ -22,14 +22,13 @@
 package io.crate.planner.node.dql;
 
 import io.crate.analyze.WhereClause;
-import io.crate.analyze.relations.DocTableRelation;
-import io.crate.analyze.symbol.Field;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolVisitor;
-import io.crate.analyze.symbol.format.SymbolFormatter;
+import io.crate.expression.symbol.DefaultTraversalSymbolVisitor;
+import io.crate.expression.symbol.Field;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.format.SymbolFormatter;
 import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.Reference;
+import io.crate.metadata.doc.DocTableInfo;
 
 import java.util.List;
 
@@ -37,9 +36,11 @@ public class GroupByConsumer {
 
     private static final GroupByValidator GROUP_BY_VALIDATOR = new GroupByValidator();
 
-    public static boolean groupedByClusteredColumnOrPrimaryKeys(DocTableRelation tableRelation, WhereClause whereClause, List<Symbol> groupBySymbols) {
+    public static boolean groupedByClusteredColumnOrPrimaryKeys(DocTableInfo tableInfo,
+                                                                WhereClause whereClause,
+                                                                List<Symbol> groupBySymbols) {
         if (groupBySymbols.size() > 1) {
-            return groupedByPrimaryKeys(tableRelation, groupBySymbols);
+            return groupedByPrimaryKeys(tableInfo.primaryKey(), groupBySymbols);
         }
 
         /**
@@ -47,7 +48,7 @@ public class GroupByConsumer {
          * so one shard doesn't contain all "clustered by" values
          * -> need to use a distributed group by.
          */
-        if (tableRelation.tableInfo().isPartitioned() && whereClause.partitions().size() != 1) {
+        if (tableInfo.isPartitioned() && whereClause.partitions().size() != 1) {
             return false;
         }
 
@@ -55,19 +56,17 @@ public class GroupByConsumer {
         // as clustered by column == pk column  in that case
         Symbol groupByKey = groupBySymbols.get(0);
         return (groupByKey instanceof Reference
-                && ((Reference) groupByKey).ident().columnIdent()
-                    .equals(tableRelation.tableInfo().clusteredBy()));
+                && ((Reference) groupByKey).column().equals(tableInfo.clusteredBy()));
     }
 
-    private static boolean groupedByPrimaryKeys(DocTableRelation tableRelation, List<Symbol> groupBy) {
-        List<ColumnIdent> primaryKeys = tableRelation.tableInfo().primaryKey();
+    private static boolean groupedByPrimaryKeys(List<ColumnIdent> primaryKeys, List<Symbol> groupBy) {
         if (groupBy.size() != primaryKeys.size()) {
             return false;
         }
         for (int i = 0, groupBySize = groupBy.size(); i < groupBySize; i++) {
             Symbol groupBySymbol = groupBy.get(i);
             if (groupBySymbol instanceof Reference) {
-                ColumnIdent columnIdent = ((Reference) groupBySymbol).ident().columnIdent();
+                ColumnIdent columnIdent = ((Reference) groupBySymbol).column();
                 ColumnIdent pkIdent = primaryKeys.get(i);
                 if (!pkIdent.equals(columnIdent)) {
                     return false;
@@ -79,37 +78,26 @@ public class GroupByConsumer {
         return true;
     }
 
-    public static void validateGroupBySymbols(DocTableRelation tableRelation, List<Symbol> groupBySymbols) {
+    public static void validateGroupBySymbols(List<Symbol> groupBySymbols) {
         for (Symbol symbol : groupBySymbols) {
-            GROUP_BY_VALIDATOR.process(symbol, tableRelation);
+            symbol.accept(GROUP_BY_VALIDATOR, null);
         }
     }
 
-    private static class GroupByValidator extends SymbolVisitor<DocTableRelation, Void> {
+    private static class GroupByValidator extends DefaultTraversalSymbolVisitor<Void, Void> {
 
         @Override
-        public Void visitFunction(Function symbol, DocTableRelation context) {
-            for (Symbol arg : symbol.arguments()) {
-                process(arg, context);
-            }
-            return null;
-        }
-
-        @Override
-        public Void visitReference(Reference symbol, DocTableRelation context) {
+        public Void visitReference(Reference symbol, Void context) {
             if (symbol.indexType() == Reference.IndexType.ANALYZED) {
                 throw new IllegalArgumentException(
                     SymbolFormatter.format("Cannot GROUP BY '%s': grouping on analyzed/fulltext columns is not possible", symbol));
-            } else if (symbol.indexType() == Reference.IndexType.NO) {
-                throw new IllegalArgumentException(
-                    SymbolFormatter.format("Cannot GROUP BY '%s': grouping on non-indexed columns is not possible", symbol));
             }
             return null;
         }
 
         @Override
-        public Void visitField(Field field, DocTableRelation context) {
-            return process(context.resolveField(field), context);
+        public Void visitField(Field field, Void context) {
+            return field.pointer().accept(this, context);
         }
     }
 }

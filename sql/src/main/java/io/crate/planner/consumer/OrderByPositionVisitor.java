@@ -22,13 +22,13 @@
 package io.crate.planner.consumer;
 
 import com.carrotsearch.hppc.IntArrayList;
-import io.crate.analyze.symbol.Field;
-import io.crate.analyze.symbol.InputColumn;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolVisitor;
-import io.crate.analyze.symbol.format.SymbolFormatter;
+import io.crate.expression.symbol.InputColumn;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolVisitor;
 import org.elasticsearch.common.inject.Singleton;
 
+import javax.annotation.Nullable;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -37,14 +37,14 @@ import java.util.List;
  * This can only be used under the following restriction:
  * <ul>
  * <li>if an <code>orderBySymbol</code> is no input column with explicit index,
- * it must be part of <code>sourceSymbols</code>.
+ * it must be part of <code>outputSymbols</code> otherwise it's skipped.
  * </li>
  * </ul>
  */
 @Singleton
 public class OrderByPositionVisitor extends SymbolVisitor<OrderByPositionVisitor.Context, Void> {
 
-    private final static OrderByPositionVisitor INSTANCE = new OrderByPositionVisitor();
+    private static final OrderByPositionVisitor INSTANCE = new OrderByPositionVisitor();
 
     public static class Context {
         final List<? extends Symbol> sourceSymbols;
@@ -63,12 +63,28 @@ public class OrderByPositionVisitor extends SymbolVisitor<OrderByPositionVisitor
     private OrderByPositionVisitor() {
     }
 
-    public static int[] orderByPositions(Iterable<? extends Symbol> orderBySymbols, List<? extends Symbol> sourceSymbols) {
-        Context context = new Context(sourceSymbols);
+    @Nullable
+    public static int[] orderByPositionsOrNull(Collection<? extends Symbol> orderBySymbols,
+                                               List<? extends Symbol> outputSymbols) {
+        Context context = new Context(outputSymbols);
         for (Symbol orderBySymbol : orderBySymbols) {
-            INSTANCE.process(orderBySymbol, context);
+            orderBySymbol.accept(INSTANCE, context);
         }
-        return context.orderByPositions();
+        if (context.orderByPositions.size() == orderBySymbols.size()) {
+            return context.orderByPositions();
+        }
+        return null;
+    }
+
+    public static int[] orderByPositions(Collection<? extends Symbol> orderBySymbols,
+                                         List<? extends Symbol> outputSymbols) {
+        int[] positions = orderByPositionsOrNull(orderBySymbols, outputSymbols);
+        if (positions == null) {
+            throw new IllegalArgumentException(
+                "Must have an orderByPosition for each symbol. Got ORDER BY " + orderBySymbols + " and outputs: " +
+                outputSymbols);
+        }
+        return positions;
     }
 
     @Override
@@ -78,18 +94,10 @@ public class OrderByPositionVisitor extends SymbolVisitor<OrderByPositionVisitor
     }
 
     @Override
-    public Void visitField(Field field, Context context) {
-        context.orderByPositions.add(field.index());
-        return null;
-    }
-
-    @Override
     protected Void visitSymbol(Symbol symbol, Context context) {
         int idx = context.sourceSymbols.indexOf(symbol);
         if (idx >= 0) {
             context.orderByPositions.add(idx);
-        } else {
-            throw new IllegalArgumentException(SymbolFormatter.format("Cannot sort by: %s - not part of source symbols", symbol));
         }
         return null;
     }

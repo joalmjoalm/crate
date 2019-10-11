@@ -21,7 +21,6 @@
 
 package io.crate.integrationtests;
 
-import io.crate.testing.UseJdbc;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -32,7 +31,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-@UseJdbc
 public class ConcurrencyIntegrationTest extends SQLTransportIntegrationTest {
 
     private ExecutorService executor;
@@ -53,24 +51,25 @@ public class ConcurrencyIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testConcurrentInserts() throws Throwable {
-        execute("create table t1 (id int primary key, x int) with (number_of_replicas = 0)");
+    public void testInsertStatementsDoNotShareState() throws Throwable {
+        execute("create table t1 (id int primary key, x long) with (number_of_replicas = 0)");
         execute("create table t2 (id int primary key, x string) with (number_of_replicas = 0)");
-        execute("create table t3 (x timestamp) with (number_of_replicas = 0)");
+        execute("create table t3 (x timestamp with time zone) with (number_of_replicas = 0)");
         execute("create table t4 (y string) with (number_of_replicas = 0)");
 
         final CountDownLatch latch = new CountDownLatch(1000);
         final AtomicReference<Throwable> lastThrowable = new AtomicReference<>();
 
         String[] statements = new String[]{
-            "insert into t1 (id, x) values (1, 10) on duplicate key update x = x + 10 ",
-            "insert into t2 (id, x) values (1, 'bar') on duplicate key update x = 'foo' ",
+            "insert into t1 (id, x) values (1, 10) on conflict (id) do update set x = x + 10 ",
+            "insert into t2 (id, x) values (1, 'bar') on conflict (id) do update set x = 'foo' ",
             "insert into t3 (x) values (current_timestamp) ",
             "insert into t4 (y) values ('foo') ",
         };
 
+        // run every statement 5 times, so all will fit into the executors pool
         for (final String statement : statements) {
-            for (int i = 0; i < 50; i++) {
+            for (int i = 0; i < 5; i++) {
                 executor.submit(
                     new Runnable() {
                         @Override

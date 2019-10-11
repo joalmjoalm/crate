@@ -23,18 +23,19 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
-import io.crate.testing.UseJdbc;
+import io.crate.testing.TestingHelpers;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.hamcrest.core.Is.is;
 
 @ESIntegTestCase.ClusterScope(minNumDataNodes = 2)
-@UseJdbc(false) // optimize has no rowcount
-public class OptimizeTableIntegrationTest extends SQLTransportIntegrationTest {
+public class OptimizeTableIntegrationTest extends SQLHttpIntegrationTest {
 
     @Rule
     public TemporaryFolder folder = new TemporaryFolder();
@@ -54,7 +55,31 @@ public class OptimizeTableIntegrationTest extends SQLTransportIntegrationTest {
         assertThat(response.rows().length, is(0));
 
         execute("select count(*) from test");
-        assertThat((Long) response.rows()[0][0], is(2L));
+        assertThat(response.rows()[0][0], is(2L));
+    }
+
+    @Test
+    public void testOptimizeBlobTables() throws Exception {
+        execute("create blob table blobs with (number_of_replicas = 0)");
+        ensureYellow();
+
+        for (String content : new String[]{"bar", "foo", "buzz", "crateDB"}) {
+            upload("blobs", content);
+        }
+        refresh();
+
+        execute("optimize table blob.blobs");
+        assertThat(response.rowCount(), is(1L));
+        assertThat(response.rows().length, is(0));
+
+        execute("select digest from blob.blobs");
+        assertThat(TestingHelpers.printedTable(response.rows()),
+            allOf(
+                containsString("626f48d2188e903dc1f373f34eebd063b7ca9ff8\n"),
+                containsString("62cdb7020ff920e5aa642c3d4066950dd1f01f4d\n"),
+                containsString("0beec7b5ea3f0fdbc95d0dd47f3c5bc275da8a33\n"),
+                containsString("6bb2f7cc9eae6a77bcb13cac64098b5fd2b6964b\n")));
+
     }
 
     @Test
@@ -72,23 +97,32 @@ public class OptimizeTableIntegrationTest extends SQLTransportIntegrationTest {
         assertThat(response.rows().length, is(0));
 
         execute("select count(*) from test");
-        assertThat((Long) response.rows()[0][0], is(2L));
+        assertThat(response.rows()[0][0], is(2L));
     }
 
     @Test
-    public void testOptimizeEmptyPartitionedTable() throws Exception {
-        execute("create table parted (id integer, name string, date timestamp) " +
-                "partitioned by (date) with (refresh_interval=0)");
+    public void testOptimizeEmptyPartitionedTable() {
+        execute(
+            "create table parted (" +
+            "   id integer," +
+            "   name string," +
+            "   date timestamp with time zone" +
+            ") partitioned by (date) with (refresh_interval=0)");
         ensureYellow();
 
         expectedException.expect(SQLActionException.class);
-        expectedException.expectMessage("No partition for table 'doc.parted' with ident '04130' exists");
+        expectedException.expectMessage(String.format("No partition for table '%s' with ident '04130' exists", getFqn("parted")));
         execute("optimize table parted partition(date=0)");
     }
 
     @Test
-    public void testOptimizePartitionedTableAllPartitions() throws Exception {
-        execute("create table parted (id integer, name string, date timestamp) partitioned by (date)");
+    public void testOptimizePartitionedTableAllPartitions() {
+        execute(
+            "create table parted (" +
+            "   id integer," +
+            "   name string," +
+            "   date timestamp with time zone" +
+            ") partitioned by (date)");
         ensureYellow();
 
         execute("insert into parted (id, name, date) values " +
@@ -100,7 +134,7 @@ public class OptimizeTableIntegrationTest extends SQLTransportIntegrationTest {
         refresh();
 
         execute("select count(*) from parted");
-        assertThat((Long) response.rows()[0][0], is(4L));
+        assertThat(response.rows()[0][0], is(4L));
 
         execute("delete from parted where id in (1, 4)");
         refresh();
@@ -110,13 +144,17 @@ public class OptimizeTableIntegrationTest extends SQLTransportIntegrationTest {
 
         // assert that all data is available after optimize
         execute("select count(*) from parted");
-        assertThat((Long) response.rows()[0][0], is(2L));
+        assertThat(response.rows()[0][0], is(2L));
     }
 
     @Test
-    public void testOptimizePartitionedTableSinglePartitions() throws Exception {
-        execute("create table parted (id integer, name string, date timestamp) partitioned by (date) " +
-                "with (number_of_replicas=0, refresh_interval=-1)");
+    public void testOptimizePartitionedTableSinglePartitions() {
+        execute(
+            "create table parted (" +
+            "   id integer," +
+            "   name string," +
+            "   date timestamp with time zone" +
+            ") partitioned by (date) with (number_of_replicas=0, refresh_interval=-1)");
         ensureYellow();
         execute("insert into parted (id, name, date) values " +
                 "(1, 'Trillian', '1970-01-01')," +
@@ -153,13 +191,15 @@ public class OptimizeTableIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testOptimizeMultipleTablesWithPartition() throws Exception {
-        execute("create table t1 (" +
-                "  id integer, " +
-                "  name string, " +
-                "  age integer, " +
-                "  date timestamp) partitioned by (date, age) " +
-                "  with (number_of_replicas=0, refresh_interval=-1)");
+    public void testOptimizeMultipleTablesWithPartition() {
+        execute(
+            "create table t1 (" +
+            "   id integer, " +
+            "   name string, " +
+            "   age integer, " +
+            "   date timestamp with time zone" +
+            ") partitioned by (date, age) " +
+            "with (number_of_replicas=0, refresh_interval=-1)");
         ensureYellow();
 
         execute("insert into t1 (id, name, age, date) values " +

@@ -22,47 +22,38 @@
 
 package io.crate.analyze.relations;
 
-import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
-import io.crate.action.sql.SessionContext;
-import io.crate.analyze.AnalysisMetaData;
 import io.crate.analyze.expressions.ExpressionAnalysisContext;
-import io.crate.analyze.expressions.ExpressionAnalyzer;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.metadata.StmtCtx;
+import io.crate.expression.symbol.Symbol;
 import io.crate.planner.node.dql.join.JoinType;
-import io.crate.sql.tree.ParameterExpression;
 import io.crate.sql.tree.QualifiedName;
 
 import javax.annotation.Nullable;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 public class RelationAnalysisContext {
 
     private final ExpressionAnalysisContext expressionAnalysisContext;
-    private final SessionContext sessionContext;
-    private final Function<ParameterExpression, Symbol> convertParamFunction;
-    private final AnalysisMetaData analysisMetaData;
     private final boolean aliasedRelation;
+    private final ParentRelations parents;
     // keep order of sources.
     //  e.g. something like:  select * from t1, t2 must not become select t2.*, t1.*
     private final Map<QualifiedName, AnalyzedRelation> sources = new LinkedHashMap<>();
 
-    private ExpressionAnalyzer expressionAnalyzer;
-
     @Nullable
     private List<JoinPair> joinPairs;
 
-    RelationAnalysisContext(SessionContext sessionContext,
-                            Function<ParameterExpression, Symbol> convertParamFunction,
-                            StmtCtx stmtCtx,
-                            AnalysisMetaData analysisMetaData,
-                            boolean aliasedRelation) {
-        this.sessionContext = sessionContext;
-        this.convertParamFunction = convertParamFunction;
-        this.analysisMetaData = analysisMetaData;
+    RelationAnalysisContext(boolean aliasedRelation,
+                            ParentRelations parents) {
         this.aliasedRelation = aliasedRelation;
-        expressionAnalysisContext = new ExpressionAnalysisContext(stmtCtx);
+        this.parents = parents;
+        this.expressionAnalysisContext = new ExpressionAnalysisContext();
     }
 
     boolean isAliasedRelation() {
@@ -73,7 +64,7 @@ public class RelationAnalysisContext {
         return sources;
     }
 
-    private void addJoinPair(JoinPair joinType) {
+    void addJoinPair(JoinPair joinType) {
         if (joinPairs == null) {
             joinPairs = new ArrayList<>();
         }
@@ -96,7 +87,7 @@ public class RelationAnalysisContext {
             }
             idx++;
         }
-        addJoinPair(new JoinPair(left, right, joinType, joinCondition));
+        addJoinPair(JoinPair.of(left, right, joinType, joinCondition));
     }
 
     List<JoinPair> joinPairs() {
@@ -106,7 +97,7 @@ public class RelationAnalysisContext {
         return joinPairs;
     }
 
-    private void addSourceRelation(QualifiedName qualifiedName, AnalyzedRelation relation) {
+    void addSourceRelation(QualifiedName qualifiedName, AnalyzedRelation relation) {
         if (sources.put(qualifiedName, relation) != null) {
             String tableName = qualifiedName.toString();
             if (tableName.startsWith(".")) {
@@ -125,15 +116,11 @@ public class RelationAnalysisContext {
         addSourceRelation(new QualifiedName(Arrays.asList(schemaName, nameOrAlias)), relation);
     }
 
-    public ExpressionAnalyzer expressionAnalyzer() {
-        if (expressionAnalyzer == null) {
-            expressionAnalyzer = new ExpressionAnalyzer(
-                analysisMetaData, sessionContext, convertParamFunction, new FullQualifedNameFieldProvider(sources), null);
-        }
-        return expressionAnalyzer;
-    }
-
     public ExpressionAnalysisContext expressionAnalysisContext() {
         return expressionAnalysisContext;
+    }
+
+    public ParentRelations parentSources() {
+        return parents;
     }
 }

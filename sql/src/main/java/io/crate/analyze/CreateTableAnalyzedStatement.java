@@ -21,8 +21,11 @@
 
 package io.crate.analyze;
 
-import io.crate.exceptions.TableAlreadyExistsException;
-import io.crate.metadata.*;
+import io.crate.exceptions.RelationAlreadyExists;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.PartitionName;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.Schemas;
 
 import javax.annotation.Nullable;
 import java.util.Collection;
@@ -31,27 +34,27 @@ import java.util.Map;
 
 public class CreateTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
 
-    protected final FulltextAnalyzerResolver fulltextAnalyzerResolver;
-    private AnalyzedTableElements analyzedTableElements;
+    private AnalyzedTableElements<Object> analyzedTableElements;
     private Map<String, Object> mapping;
     private ColumnIdent routingColumn;
-    private TableIdent tableIdent;
+    private RelationName relationName;
     private boolean noOp = false;
     private boolean ifNotExists = false;
 
-    public CreateTableAnalyzedStatement(FulltextAnalyzerResolver fulltextAnalyzerResolver) {
-        this.fulltextAnalyzerResolver = fulltextAnalyzerResolver;
+    public CreateTableAnalyzedStatement() {
     }
 
-    public void table(TableIdent tableIdent, boolean ifNotExists, Schemas schemas) {
-        tableIdent.validate();
-        if (ifNotExists) {
-            noOp = schemas.tableExists(tableIdent);
-        } else if (schemas.tableExists(tableIdent)) {
-            throw new TableAlreadyExistsException(tableIdent);
+    public void table(RelationName relationName, boolean ifNotExists, Schemas schemas) {
+        relationName.ensureValidForRelationCreation();
+        boolean tableExists = schemas.tableExists(relationName);
+        boolean viewExists = schemas.viewExists(relationName);
+        if (ifNotExists && !viewExists) {
+            noOp = tableExists;
+        } else if (tableExists || viewExists) {
+            throw new RelationAlreadyExists(relationName);
         }
         this.ifNotExists = ifNotExists;
-        this.tableIdent = tableIdent;
+        this.relationName = relationName;
     }
 
     public boolean noOp() {
@@ -81,49 +84,41 @@ public class CreateTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
      * @return the name of the template to create or <code>null</code>
      * if no template is created
      */
-    public
     @Nullable
-    String templateName() {
+    public String templateName() {
         if (isPartitioned()) {
             return PartitionName.templateName(tableIdent().schema(), tableIdent().name());
         }
         return null;
     }
 
-    /**
-     * template prefix to match against index names to which
-     * this template should be applied
-     *
-     * @return a template prefix for matching index names or null
-     * if no template is created
-     */
-    public
     @Nullable
-    String templatePrefix() {
+    public String templatePrefix() {
         if (isPartitioned()) {
-            return templateName() + "*";
+            return PartitionName.templatePrefix(tableIdent().schema(), tableIdent().name());
         }
         return null;
     }
 
     @SuppressWarnings("unchecked")
-    public Map<String, Object> mappingProperties() {
+    Map<String, Object> mappingProperties() {
         return (Map) mapping().get("properties");
     }
 
     public Collection<String> primaryKeys() {
-        return analyzedTableElements.primaryKeys();
+        return AnalyzedTableElements.primaryKeys(analyzedTableElements);
     }
 
     public Collection<String> notNullColumns() {
-        return analyzedTableElements.notNullColumns();
+        return AnalyzedTableElements.notNullColumns(analyzedTableElements);
     }
 
     public Map<String, Object> mapping() {
         if (mapping == null) {
-            mapping = analyzedTableElements.toMapping();
+            mapping = AnalyzedTableElements.toMapping(analyzedTableElements);
+            Map<String, Object> metaMap = (Map<String, Object>) mapping.get("_meta");
             if (routingColumn != null) {
-                ((Map) mapping.get("_meta")).put("routing", routingColumn.fqn());
+                metaMap.put("routing", routingColumn.fqn());
             }
             // merge in user defined mapping parameter
             mapping.putAll(tableParameter.mappings());
@@ -131,12 +126,8 @@ public class CreateTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
         return mapping;
     }
 
-    public FulltextAnalyzerResolver fulltextAnalyzerResolver() {
-        return fulltextAnalyzerResolver;
-    }
-
-    public TableIdent tableIdent() {
-        return tableIdent;
+    public RelationName tableIdent() {
+        return relationName;
     }
 
     public void routing(ColumnIdent routingColumn) {
@@ -146,25 +137,24 @@ public class CreateTableAnalyzedStatement extends AbstractDDLAnalyzedStatement {
         this.routingColumn = routingColumn;
     }
 
-    public
     @Nullable
-    ColumnIdent routing() {
+    public ColumnIdent routing() {
         return routingColumn;
     }
 
     /**
-     * return true if a columnDefinition with name <code>columnName</code> exists
+     * return true if a columnDefinition with name <code>columnIdent</code> exists
      */
-    public boolean hasColumnDefinition(ColumnIdent columnIdent) {
+    boolean hasColumnDefinition(ColumnIdent columnIdent) {
         return (analyzedTableElements().columnIdents().contains(columnIdent) ||
                 columnIdent.name().equalsIgnoreCase("_id"));
     }
 
-    public void analyzedTableElements(AnalyzedTableElements analyze) {
+    public void analyzedTableElements(AnalyzedTableElements<Object> analyze) {
         this.analyzedTableElements = analyze;
     }
 
-    public AnalyzedTableElements analyzedTableElements() {
+    AnalyzedTableElements<Object> analyzedTableElements() {
         return analyzedTableElements;
     }
 

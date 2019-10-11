@@ -22,42 +22,48 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLBulkResponse;
-import io.crate.testing.UseJdbc;
+import io.crate.execution.dsl.projection.AbstractIndexWriterProjection;
+import org.elasticsearch.common.unit.TimeValue;
 import org.junit.Test;
 
 import static org.hamcrest.core.Is.is;
 
-@UseJdbc
 public class DeleteIntegrationTest extends SQLTransportIntegrationTest {
 
     private Setup setup = new Setup(sqlExecutor);
 
     @Test
-    public void testDelete() throws Exception {
-        createIndex("test");
-        ensureYellow();
-        client().prepareIndex("test", "default", "id1").setSource("{}").execute().actionGet();
-        refresh();
+    public void testDeleteTableWithoutWhere() throws Exception {
+        execute("create table test (x int)");
+        execute("insert into test (x) values (1)");
+        execute("refresh table test");
+
         execute("delete from test");
         assertEquals(1, response.rowCount());
-        refresh();
+
+        execute("refresh table test");
         execute("select \"_id\" from test");
         assertEquals(0, response.rowCount());
     }
 
     @Test
-    public void testDeleteWithWhere() throws Exception {
-        createIndex("test");
-        ensureYellow();
-        client().prepareIndex("test", "default", "id1").setSource("{}").execute().actionGet();
-        client().prepareIndex("test", "default", "id2").setSource("{}").execute().actionGet();
-        client().prepareIndex("test", "default", "id3").setSource("{}").execute().actionGet();
-        refresh();
-        execute("delete from test where \"_id\" = 'id1'");
+    public void testDeleteOnPKNoMatch() throws Exception {
+        execute("create table t (id string primary key)");
+        execute("delete from t where id = 'nope'");
+        assertThat(response.rowCount(), is(0L));
+    }
+
+    @Test
+    public void testDeleteWithWhereDeletesCorrectRecord() throws Exception {
+        execute("create table test (id int primary key)");
+        execute("insert into test (id) values (1), (2), (3)");
+        execute("refresh table test");
+
+        execute("delete from test where id = 1");
         assertEquals(1, response.rowCount());
-        refresh();
-        execute("select \"_id\" from test");
+
+        execute("refresh table test");
+        execute("select id from test");
         assertEquals(2, response.rowCount());
     }
 
@@ -172,6 +178,7 @@ public class DeleteIntegrationTest extends SQLTransportIntegrationTest {
         refresh();
 
         execute("DELETE FROM test WHERE pk_col IN (?, ?, ?)", new Object[]{"1", "2", "4"});
+        assertThat(response.rowCount(), is(2L));
         refresh();
 
         execute("SELECT pk_col FROM test");
@@ -186,6 +193,7 @@ public class DeleteIntegrationTest extends SQLTransportIntegrationTest {
         execute("insert into test (pk_col, message) values ('1', 'foo'), ('2', 'bar'), ('3', 'baz')");
         refresh();
         execute("DELETE FROM test WHERE pk_col=? or pk_col=? or pk_col=?", new Object[]{"1", "2", "4"});
+        assertThat(response.rowCount(), is(2L));
         refresh();
         execute("SELECT pk_col FROM test");
         assertThat(response.rowCount(), is(1L));
@@ -198,20 +206,67 @@ public class DeleteIntegrationTest extends SQLTransportIntegrationTest {
         execute("insert into test(pk_col) values (1), (2), (3)");
         execute("refresh table test");
 
-        SQLBulkResponse.Result[] r = execute("delete from test where pk_col=?",
-            new Object[][]{{2}, {null}, {3}}).results();
-        assertThat(r.length, is(3));
-        assertThat(r[0].rowCount(), is(1L));
-        assertThat(r[1].rowCount(), is(0L));
-        assertThat(r[2].rowCount(), is(1L));
+        long[] rowCounts = execute("delete from test where pk_col=?",
+            new Object[][]{{2}, {null}, {3}});
+        assertThat(rowCounts, is(new long[] { 1L, 0L, 1L }));
 
-        r = execute("delete from test where pk_col=?", new Object[][]{{null}}).results();
-        assertThat(r.length, is(1));
-        assertThat(r[0].rowCount(), is(0L));
+        rowCounts = execute("delete from test where pk_col=?", new Object[][]{{null}});
+        assertThat(rowCounts, is(new long[] { 0L }));
 
         execute("refresh table test");
         execute("select pk_col FROM test");
         assertThat(response.rowCount(), is(1L));
         assertEquals(response.rows()[0][0], "1");
+    }
+
+    @Test
+    public void testDeleteExceedingInternalDefaultBulkSize() throws Exception {
+        execute("create table t1 (x int) clustered into 1 shards with (number_of_replicas = 0)");
+        Object[][] bulkArgs = new Object[AbstractIndexWriterProjection.BULK_SIZE_DEFAULT + 10][];
+        for (int i = 0; i < bulkArgs.length; i++) {
+            bulkArgs[i] = new Object[] { i };
+        }
+        execute("insert into t1 (x) values (?)", bulkArgs, TimeValue.timeValueMinutes(10));
+        execute("refresh table t1");
+
+        // there was an regression which caused this query to timeout
+        execute("delete from t1");
+        assertThat(response.rowCount(), is((long) bulkArgs.length));
+    }
+
+    @Test
+    public void testDeleteWithSubQuery() throws Exception {
+        execute("create table t1 (id int primary key, x int)");
+        execute("insert into t1 (id, x) values (1, 1), (2, 2), (3, 3)");
+        execute("refresh table t1");
+
+        execute("delete from t1 where x = (select 1)");
+        assertThat(response.rowCount(), is(1L));
+
+        execute("delete from t1 where id = (select 2)");
+        assertThat(response.rowCount(), is(1L));
+
+        execute("delete from t1 where id in (select col1 from unnest([1, 2, 3]))");
+        assertThat(response.rowCount(), is(1L));
+    }
+
+    @Test
+    public void testDeleteWithSubQueryOnPartition() throws Exception {
+        execute("create table t (p string, x int) partitioned by (p)");
+        execute("insert into t (p, x) values ('a', 1)");
+        execute("refresh table t");
+
+        execute("delete from t where p = (select 'a')");
+        assertThat(response.rowCount(), is(-1L));
+
+        execute("select count(*) from t");
+        assertThat(response.rows()[0][0], is(0L));
+    }
+
+    @Test
+    public void testDeleteFromAlias() {
+        execute("create table t1 (id int primary key, x int)");
+        execute("insert into t1 (id, x) values (1, 1), (2, 2), (3, 3)");
+        execute("delete from t1 as foo where foo.id = 1");
     }
 }

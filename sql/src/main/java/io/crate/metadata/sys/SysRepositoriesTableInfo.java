@@ -21,39 +21,48 @@
 
 package io.crate.metadata.sys;
 
-import com.google.common.collect.ImmutableList;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
 import io.crate.metadata.table.ColumnRegistrar;
 import io.crate.metadata.table.StaticTableInfo;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.types.ObjectType;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.common.settings.Setting;
+import org.elasticsearch.repositories.Repository;
 
-import javax.annotation.Nullable;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
-public class SysRepositoriesTableInfo extends StaticTableInfo {
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.STRING;
 
-    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "repositories");
-    private final ClusterService clusterService;
+public class SysRepositoriesTableInfo extends StaticTableInfo<Repository> {
 
-    public static class Columns {
-        public static final ColumnIdent NAME = new ColumnIdent("name");
-        public static final ColumnIdent TYPE = new ColumnIdent("type");
-        public static final ColumnIdent SETTINGS = new ColumnIdent("settings");
-    }
-
-    private static final ImmutableList<ColumnIdent> PRIMARY_KEY = ImmutableList.of(Columns.NAME);
+    public static final RelationName IDENT = new RelationName(SysSchemaInfo.NAME, "repositories");
     private static final RowGranularity GRANULARITY = RowGranularity.DOC;
 
-    public SysRepositoriesTableInfo(ClusterService clusterService) {
-        super(IDENT, new ColumnRegistrar(IDENT, GRANULARITY)
-            .register(Columns.NAME, DataTypes.STRING)
-            .register(Columns.TYPE, DataTypes.STRING)
-            .register(Columns.SETTINGS, DataTypes.OBJECT), PRIMARY_KEY);
-        this.clusterService = clusterService;
+    static Map<ColumnIdent, RowCollectExpressionFactory<Repository>> expressions(List<Setting<?>> maskedSettings) {
+        return columnRegistrar(maskedSettings).expressions();
+    }
+
+    static ColumnRegistrar<Repository> columnRegistrar(List<Setting<?>> maskedSettings) {
+        return new ColumnRegistrar<Repository>(IDENT, GRANULARITY)
+            .register("name", STRING, () -> forFunction((Repository r) -> r.getMetadata().name()))
+            .register("type", STRING, () -> forFunction((Repository r) -> r.getMetadata().type()))
+            .register("settings", ObjectType.untyped(), () ->
+                forFunction((Repository r) -> r.getMetadata().settings().getAsStructuredMap(
+                    maskedSettings.stream().map(Setting::getKey).collect(Collectors.toSet()))));
+    }
+
+    SysRepositoriesTableInfo(List<Setting<?>> maskedSettings) {
+        super(IDENT, columnRegistrar(maskedSettings), "name");
     }
 
     @Override
@@ -62,7 +71,11 @@ public class SysRepositoriesTableInfo extends StaticTableInfo {
     }
 
     @Override
-    public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return Routing.forTableOnSingleNode(IDENT, clusterService.localNode().id());
+    public Routing getRouting(ClusterState clusterState,
+                              RoutingProvider routingProvider,
+                              WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
+        return routingProvider.forRandomMasterOrDataNode(IDENT, clusterState.getNodes());
     }
 }

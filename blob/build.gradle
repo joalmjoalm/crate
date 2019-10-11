@@ -3,14 +3,18 @@ apply from: "$rootDir/gradle/javaModule.gradle"
 archivesBaseName = 'crate-blob'
 
 dependencies {
-    compile project(':es')
-    compile project(':core')
-    testCompile project(':testing')
+    implementation project(':es:es-server')
+    implementation project(':common')
+    implementation project(':http')
+    implementation project(':es:es-transport')
+    implementation "io.netty:netty-codec-http:${versions.netty4}"
+    implementation "com.google.code.findbugs:jsr305:${versions.jsr305}"
+    implementation "com.google.guava:guava:${versions.guava}"
+    testImplementation project(':integration-testing')
+    testImplementation "org.apache.httpcomponents:httpclient:${versions.httpclient}"
 }
 
 test {
-    testLogging.exceptionFormat = 'full'
     jacoco.excludes = ["*Test*"]
 }
 
-sourceSets.main.output.resourcesDir = null

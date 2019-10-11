@@ -1,0 +1,8 @@
+dependencies {
+    implementation project(':es:es-core')
+
+    implementation "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
+    implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-smile:${versions.jackson}"
+    implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:${versions.jackson}"
+    implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:${versions.jackson}"
+}

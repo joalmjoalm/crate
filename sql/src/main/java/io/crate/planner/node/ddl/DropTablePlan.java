@@ -21,40 +21,81 @@
 
 package io.crate.planner.node.ddl;
 
+import com.google.common.annotations.VisibleForTesting;
+import io.crate.data.InMemoryBatchIterator;
+import io.crate.data.Row;
+import io.crate.data.Row1;
+import io.crate.data.RowConsumer;
+import io.crate.execution.ddl.tables.DropTableRequest;
 import io.crate.metadata.doc.DocTableInfo;
+import io.crate.metadata.table.TableInfo;
+import io.crate.planner.DependencyCarrier;
 import io.crate.planner.Plan;
-import io.crate.planner.PlanVisitor;
+import io.crate.planner.PlannerContext;
+import io.crate.planner.operators.SubQueryResults;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.support.master.AcknowledgedResponse;
+import org.elasticsearch.index.IndexNotFoundException;
 
-import java.util.UUID;
+import static io.crate.data.SentinelRow.SENTINEL;
 
 public class DropTablePlan implements Plan {
 
-    private final UUID jobId;
-    private final DocTableInfo table;
+    private static final Logger LOGGER = LogManager.getLogger(DropTablePlan.class);
+    private static final Row ROW_ZERO = new Row1(0L);
+    private static final Row ROW_ONE = new Row1(1L);
+
+    private final TableInfo table;
     private final boolean ifExists;
 
-
-    public DropTablePlan(UUID jobId, DocTableInfo table, boolean ifExists) {
-        this.jobId = jobId;
+    public DropTablePlan(TableInfo table, boolean ifExists) {
         this.table = table;
         this.ifExists = ifExists;
     }
 
-    public boolean ifExists() {
-        return ifExists;
-    }
-
-    public DocTableInfo tableInfo() {
+    @VisibleForTesting
+    public TableInfo tableInfo() {
         return table;
     }
 
     @Override
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context) {
-        return visitor.visitDropTablePlan(this, context);
+    public StatementType type() {
+        return StatementType.DDL;
     }
 
     @Override
-    public UUID jobId() {
-        return jobId;
+    public void executeOrFail(DependencyCarrier dependencies,
+                              PlannerContext plannerContext,
+                              RowConsumer consumer,
+                              Row params,
+                              SubQueryResults subQueryResults) {
+        boolean isPartitioned = table instanceof DocTableInfo && ((DocTableInfo) table).isPartitioned();
+        DropTableRequest request = new DropTableRequest(table.ident(), isPartitioned);
+        dependencies.transportDropTableAction().execute(request, new ActionListener<>() {
+            @Override
+            public void onResponse(AcknowledgedResponse response) {
+                if (!response.isAcknowledged()) {
+                    warnNotAcknowledged();
+                }
+                consumer.accept(InMemoryBatchIterator.of(ROW_ONE, SENTINEL), null);
+            }
+
+            @Override
+            public void onFailure(Exception e) {
+                if (ifExists && e instanceof IndexNotFoundException) {
+                    consumer.accept(InMemoryBatchIterator.of(ROW_ZERO, SENTINEL), null);
+                } else {
+                    consumer.accept(null, e);
+                }
+            }
+        });
+    }
+
+    private void warnNotAcknowledged() {
+        if (LOGGER.isWarnEnabled()) {
+            LOGGER.warn("Dropping table {} was not acknowledged. This could lead to inconsistent state.", table.ident());
+        }
     }
 }

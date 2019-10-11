@@ -22,14 +22,12 @@
 
 package io.crate.integrationtests;
 
-import io.crate.testing.UseJdbc;
 import org.junit.Before;
 import org.junit.Test;
 
 import static io.crate.testing.TestingHelpers.printedTable;
 import static org.hamcrest.core.Is.is;
 
-@UseJdbc
 public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
 
     @Before
@@ -46,7 +44,7 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testLeftOuterJoin() throws Exception {
+    public void testLeftOuterJoin() {
         // which employee works in which office?
         execute("select persons.name, offices.name from" +
                 " employees as persons left join offices on office_id = offices.id" +
@@ -56,7 +54,8 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
                                                      "Douglas Adams| Chief Office\n"));
     }
 
-    public void testLeftOuterJoinOrderOnOuterTable() throws Exception {
+    @Test
+    public void testLeftOuterJoinOrderOnOuterTable() {
         // which employee works in which office?
         execute("select persons.name, offices.name from" +
                 " employees as persons left join offices on office_id = offices.id" +
@@ -67,7 +66,7 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void test3TableLeftOuterJoin() throws Exception {
+    public void test3TableLeftOuterJoin() {
         execute(
             "select professions.name, employees.name, offices.name from" +
             " professions left join employees on profession_id = professions.id" +
@@ -80,7 +79,7 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void test3TableLeftOuterJoinOrderByOuterTable() throws Exception {
+    public void test3TableLeftOuterJoinOrderByOuterTable() {
         execute(
             "select professions.name, employees.name, offices.name from" +
             " professions left join employees on profession_id = professions.id" +
@@ -93,7 +92,7 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testRightOuterJoin() throws Exception {
+    public void testRightOuterJoin() {
         execute("select offices.name, persons.name from" +
                 " employees as persons right join offices on office_id = offices.id" +
                 " order by offices.id");
@@ -103,7 +102,7 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void test3TableLeftAndRightOuterJoin() throws Exception {
+    public void test3TableLeftAndRightOuterJoin() {
         execute(
             "select professions.name, employees.name, offices.name from" +
             " offices left join employees on office_id = offices.id" +
@@ -116,7 +115,7 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testFullOuterJoin() throws Exception {
+    public void testFullOuterJoin() {
         execute("select persons.name, offices.name from" +
                 " offices full join employees as persons on office_id = offices.id" +
                 " order by offices.id");
@@ -127,7 +126,39 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testOuterJoinWithFunctionsInOrderBy() throws Exception {
+    public void testFullOuterJoinWithFilters() {
+        // It's rewritten to an Inner Join because of the filtering condition in where clause
+        execute("select persons.name, offices.name from" +
+                " offices full join employees as persons on office_id = offices.id" +
+                " where offices.name='Entresol' and persons.name='Trillian' " +
+                " order by offices.id");
+        assertThat(printedTable(response.rows()), is("Trillian| Entresol\n"));
+    }
+
+    @Test
+    public void test_filter_will_be_applied_after_outer_join() {
+        execute("create table t1 (id int, is_match int)");
+        execute("create table t2 (id int, t1_id int)");
+        execute("insert into t1 (id, is_match) values " +
+                "(1, 0),\n" +
+                "(2, 1),\n" +
+                "(36, 1)");
+        execute("insert into t2 (id, t1_id) values " +
+                "(1, 1),\n" +
+                "(2, 2),\n" +
+                "(3, null)");   // this row must be filtered out after the full join
+        refresh();
+
+        execute("SELECT t2.id, t2.t1_id, t1.id, t1.is_match " +
+                "FROM t2 " +
+                "FULL OUTER JOIN t1 ON (t1.id = t2.t1_id) " +
+                "WHERE (t1.is_match = 1) ");
+        assertThat(printedTable(response.rows()), is("2| 2| 2| 1\n" +
+                                                     "NULL| NULL| 36| 1\n"));
+    }
+
+    @Test
+    public void testOuterJoinWithFunctionsInOrderBy() {
         execute("select coalesce(persons.name, ''), coalesce(offices.name, '') from" +
                 " offices full join employees as persons on office_id = offices.id" +
                 " order by 1, 2");
@@ -138,7 +169,7 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testLeftJoinWithFilterOnInner() throws Exception {
+    public void testLeftJoinWithFilterOnInner() {
         execute("select employees.name, offices.name from" +
                 " employees left join offices on office_id = offices.id" +
                 " where employees.id < 3" +
@@ -148,7 +179,8 @@ public class OuterJoinIntegrationTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testLeftJoinWithFilterOnOuter() throws Exception {
+    public void testLeftJoinWithFilterOnOuter() {
+        // It's rewritten to an Inner Join because of the filtering condition in where clause
         execute("select employees.name, offices.name from" +
                 " employees left join offices on office_id = offices.id" +
                 " where offices.size > 100" +

@@ -23,22 +23,20 @@ package io.crate.analyze;
 
 import io.crate.action.sql.SessionContext;
 import io.crate.analyze.relations.AnalyzedRelation;
-import io.crate.metadata.StmtCtx;
+import io.crate.metadata.CoordinatorTxnCtx;
 
 public class Analysis {
 
     private final ParameterContext parameterContext;
-    private final StmtCtx stmtCtx;
+    private final CoordinatorTxnCtx coordinatorTxnCtx;
 
-    private final SessionContext sessionContext;
     private final ParamTypeHints paramTypeHints;
     private AnalyzedStatement analyzedStatement;
     private AnalyzedRelation rootRelation;
 
-    public Analysis(SessionContext sessionContext, ParameterContext parameterContext, ParamTypeHints paramTypeHints) {
-        this.sessionContext = sessionContext;
+    public Analysis(CoordinatorTxnCtx coordinatorTxnCtx, ParameterContext parameterContext, ParamTypeHints paramTypeHints) {
         this.paramTypeHints = paramTypeHints;
-        this.stmtCtx = new StmtCtx();
+        this.coordinatorTxnCtx = coordinatorTxnCtx;
         this.parameterContext = parameterContext;
     }
 
@@ -62,12 +60,12 @@ public class Analysis {
         return rootRelation;
     }
 
-    public StmtCtx statementContext() {
-        return stmtCtx;
+    public CoordinatorTxnCtx transactionContext() {
+        return coordinatorTxnCtx;
     }
 
     public SessionContext sessionContext() {
-        return sessionContext;
+        return coordinatorTxnCtx.sessionContext();
     }
 
     public ParamTypeHints paramTypeHints() {

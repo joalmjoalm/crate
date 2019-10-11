@@ -1,0 +1,155 @@
+/*
+ * Licensed to Crate under one or more contributor license agreements.
+ * See the NOTICE file distributed with this work for additional
+ * information regarding copyright ownership.  Crate licenses this file
+ * to you under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.  You may
+ * obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ *
+ * However, if you have executed another commercial license agreement
+ * with Crate these terms will supersede the license and you may use the
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
+ */
+
+package io.crate.execution.engine.collect.collectors;
+
+import io.crate.breaker.RowAccounting;
+import io.crate.common.collections.Lists2;
+import io.crate.data.BatchIterator;
+import io.crate.data.Row;
+import io.crate.execution.engine.distribution.merge.BatchPagingIterator;
+import io.crate.execution.engine.distribution.merge.KeyIterable;
+import io.crate.execution.engine.distribution.merge.PagingIterator;
+import io.crate.execution.engine.distribution.merge.PassThroughPagingIterator;
+import io.crate.execution.engine.distribution.merge.RamAccountingPageIterator;
+import io.crate.execution.engine.distribution.merge.SortedPagingIterator;
+import io.crate.execution.support.ThreadPools;
+import org.elasticsearch.index.shard.ShardId;
+
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.function.Function;
+import java.util.function.IntSupplier;
+
+import static java.util.Collections.singletonList;
+
+/**
+ * Factory to create a BatchIterator which is backed by 1 or more {@link OrderedDocCollector}.
+ * This BatchIterator exposes data stored in a Lucene index and utilizes Lucene sort for efficient sorting.
+ */
+public class OrderedLuceneBatchIteratorFactory {
+
+    public static BatchIterator<Row> newInstance(List<OrderedDocCollector> orderedDocCollectors,
+                                                 Comparator<Row> rowComparator,
+                                                 RowAccounting rowAccounting,
+                                                 Executor executor,
+                                                 IntSupplier availableThreads,
+                                                 boolean requiresScroll) {
+        return new Factory(
+            orderedDocCollectors, rowComparator, rowAccounting, executor, availableThreads, requiresScroll).create();
+    }
+
+    private static class Factory {
+
+        private final List<OrderedDocCollector> orderedDocCollectors;
+        private final Executor executor;
+        private final IntSupplier availableThreads;
+        private final PagingIterator<ShardId, Row> pagingIterator;
+        private final Map<ShardId, OrderedDocCollector> collectorsByShardId;
+
+        private BatchPagingIterator<ShardId> batchPagingIterator;
+
+        Factory(List<OrderedDocCollector> orderedDocCollectors,
+                Comparator<Row> rowComparator,
+                RowAccounting rowAccounting,
+                Executor executor,
+                IntSupplier availableThreads,
+                boolean requiresScroll) {
+            this.orderedDocCollectors = orderedDocCollectors;
+            this.executor = executor;
+            this.availableThreads = availableThreads;
+            if (orderedDocCollectors.size() == 1) {
+                pagingIterator = requiresScroll ?
+                    new RamAccountingPageIterator<>(PassThroughPagingIterator.repeatable(), rowAccounting)
+                    : PassThroughPagingIterator.oneShot();
+                collectorsByShardId = null;
+            } else {
+                collectorsByShardId = toMapByShardId(orderedDocCollectors);
+                pagingIterator = new RamAccountingPageIterator<>(
+                    new SortedPagingIterator<>(rowComparator, requiresScroll),
+                    rowAccounting
+                );
+            }
+        }
+
+        BatchIterator<Row> create() {
+            batchPagingIterator = new BatchPagingIterator<>(
+                pagingIterator,
+                this::tryFetchMore,
+                this::allExhausted,
+                throwable -> close()
+            );
+            return batchPagingIterator;
+        }
+
+        private CompletableFuture<List<KeyIterable<ShardId, Row>>> tryFetchMore(ShardId shardId) {
+            if (allExhausted()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Cannot fetch more if source is exhausted"));
+            }
+            if (shardId == null) {
+                return ThreadPools.runWithAvailableThreads(
+                    executor,
+                    availableThreads,
+                    Lists2.map(orderedDocCollectors, Function.identity())
+                );
+            } else {
+                return loadFrom(collectorsByShardId.get(shardId));
+            }
+        }
+
+        private static CompletableFuture<List<KeyIterable<ShardId, Row>>> loadFrom(OrderedDocCollector collector) {
+            try {
+                return CompletableFuture.completedFuture(singletonList(collector.get()));
+            } catch (Exception e) {
+                return CompletableFuture.failedFuture(e);
+            }
+        }
+
+        private void close() {
+            for (OrderedDocCollector collector : orderedDocCollectors) {
+                collector.close();
+            }
+        }
+
+        private boolean allExhausted() {
+            for (OrderedDocCollector collector : orderedDocCollectors) {
+                if (!collector.exhausted) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+
+    private static Map<ShardId, OrderedDocCollector> toMapByShardId(List<OrderedDocCollector> collectors) {
+        Map<ShardId, OrderedDocCollector> collectorsByShardId = new HashMap<>(collectors.size());
+        for (OrderedDocCollector collector : collectors) {
+            collectorsByShardId.put(collector.shardId(), collector);
+        }
+        return collectorsByShardId;
+    }
+}

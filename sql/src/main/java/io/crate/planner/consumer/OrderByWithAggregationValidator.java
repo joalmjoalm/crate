@@ -21,11 +21,11 @@
 
 package io.crate.planner.consumer;
 
-import io.crate.analyze.symbol.Field;
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolVisitor;
-import io.crate.analyze.symbol.format.SymbolFormatter;
+import io.crate.expression.symbol.Field;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolVisitor;
+import io.crate.expression.symbol.format.SymbolFormatter;
 import io.crate.metadata.FunctionInfo;
 
 import java.util.Collection;
@@ -38,17 +38,17 @@ import java.util.Collection;
  */
 public class OrderByWithAggregationValidator {
 
-    private final static String INVALID_FIELD_TEMPLATE = "ORDER BY expression '%s' must appear in the select clause " +
+    private static final String INVALID_FIELD_TEMPLATE = "ORDER BY expression '%s' must appear in the select clause " +
                                                          "when grouping or global aggregation is used";
-    private final static String INVALID_FIELD_IN_DISTINCT_TEMPLATE = "ORDER BY expression '%s' must appear in the " +
+    private static final String INVALID_FIELD_IN_DISTINCT_TEMPLATE = "ORDER BY expression '%s' must appear in the " +
                                                                      "select clause when SELECT DISTINCT is used";
 
-    private final static InnerValidator INNER_VALIDATOR = new InnerValidator();
+    private static final InnerValidator INNER_VALIDATOR = new InnerValidator();
 
     public static void validate(Symbol symbol,
                                 Collection<? extends Symbol> outputSymbols,
                                 boolean isDistinct) throws UnsupportedOperationException {
-        INNER_VALIDATOR.process(symbol, new ValidatorContext(outputSymbols, isDistinct));
+        symbol.accept(INNER_VALIDATOR, new ValidatorContext(outputSymbols, isDistinct));
     }
 
     private static class ValidatorContext {
@@ -67,18 +67,19 @@ public class OrderByWithAggregationValidator {
         public Void visitFunction(Function symbol, ValidatorContext context) {
             if (context.outputSymbols.contains(symbol)) {
                 return null;
-            } else {
-                if (symbol.info().type() == FunctionInfo.Type.SCALAR) {
-                    for (Symbol arg : symbol.arguments()) {
-                        process(arg, context);
-                    }
-                } else {
-                    throw new UnsupportedOperationException(
-                        SymbolFormatter.format("ORDER BY function '%s' is not allowed. " +
-                                               "Only scalar functions can be used", symbol));
-                }
-                return null;
+            } else if (context.isDistinct) {
+                throw new UnsupportedOperationException(SymbolFormatter.format(INVALID_FIELD_IN_DISTINCT_TEMPLATE, symbol));
             }
+            if (symbol.info().type() == FunctionInfo.Type.SCALAR) {
+                for (Symbol arg : symbol.arguments()) {
+                    arg.accept(this, context);
+                }
+            } else {
+                throw new UnsupportedOperationException(
+                    SymbolFormatter.format("ORDER BY function '%s' is not allowed. " +
+                                           "Only scalar functions can be used", symbol));
+            }
+            return null;
         }
 
         @Override

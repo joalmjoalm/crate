@@ -21,47 +21,45 @@
 
 package io.crate.metadata.sys;
 
-import com.google.common.collect.ImmutableList;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
+import io.crate.expression.reference.sys.check.SysCheck;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
 import io.crate.metadata.table.ColumnRegistrar;
 import io.crate.metadata.table.StaticTableInfo;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
+import org.elasticsearch.cluster.ClusterState;
 
-import javax.annotation.Nullable;
+import java.util.Map;
 
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.BOOLEAN;
+import static io.crate.types.DataTypes.INTEGER;
+import static io.crate.types.DataTypes.STRING;
 
-@Singleton
-public class SysChecksTableInfo extends StaticTableInfo {
+public class SysChecksTableInfo extends StaticTableInfo<SysCheck> {
 
-    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "checks");
-    private static final ImmutableList<ColumnIdent> PRIMARY_KEYS = ImmutableList.of(Columns.ID);
+    public static final RelationName IDENT = new RelationName(SysSchemaInfo.NAME, "checks");
     private static final RowGranularity GRANULARITY = RowGranularity.DOC;
 
-    private final ClusterService clusterService;
-
-    public static class Columns {
-        public static final ColumnIdent ID = new ColumnIdent("id");
-        public static final ColumnIdent SEVERITY = new ColumnIdent("severity");
-        public static final ColumnIdent DESCRIPTION = new ColumnIdent("description");
-        public static final ColumnIdent PASSED = new ColumnIdent("passed");
+    static Map<ColumnIdent, RowCollectExpressionFactory<SysCheck>> expressions() {
+        return columnRegistrar().expressions();
     }
 
-    @Inject
-    protected SysChecksTableInfo(ClusterService clusterService) {
-        super(IDENT, new ColumnRegistrar(IDENT, GRANULARITY)
-                .register(Columns.ID, DataTypes.INTEGER)
-                .register(Columns.SEVERITY, DataTypes.INTEGER)
-                .register(Columns.DESCRIPTION, DataTypes.STRING)
-                .register(Columns.PASSED, DataTypes.BOOLEAN),
-            PRIMARY_KEYS);
-        this.clusterService = clusterService;
+    private static ColumnRegistrar<SysCheck> columnRegistrar() {
+        return new ColumnRegistrar<SysCheck>(IDENT, GRANULARITY)
+            .register("id", INTEGER, () -> forFunction(SysCheck::id))
+            .register("severity", INTEGER, () -> forFunction((SysCheck r) -> r.severity().value()))
+            .register("description", STRING, () -> forFunction(SysCheck::description))
+            .register("passed", BOOLEAN, () -> forFunction(SysCheck::isValid));
+    }
+
+    SysChecksTableInfo() {
+        super(IDENT, columnRegistrar(),"id");
     }
 
     @Override
@@ -70,7 +68,11 @@ public class SysChecksTableInfo extends StaticTableInfo {
     }
 
     @Override
-    public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return Routing.forTableOnSingleNode(IDENT, clusterService.localNode().id());
+    public Routing getRouting(ClusterState clusterState,
+                              RoutingProvider routingProvider,
+                              WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
+        return Routing.forTableOnSingleNode(IDENT, clusterState.getNodes().getLocalNodeId());
     }
 }

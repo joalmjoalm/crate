@@ -23,28 +23,48 @@ package io.crate.analyze.where;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
-import io.crate.analyze.EvaluatingNormalizer;
-import io.crate.analyze.symbol.*;
-import io.crate.metadata.*;
-import io.crate.operation.operator.EqOperator;
-import io.crate.operation.operator.any.AnyEqOperator;
-import io.crate.types.CollectionType;
+import io.crate.expression.eval.EvaluatingNormalizer;
+import io.crate.expression.operator.EqOperator;
+import io.crate.expression.operator.Operators;
+import io.crate.expression.operator.any.AnyOperators;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.MatchPredicate;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolType;
+import io.crate.expression.symbol.SymbolVisitor;
+import io.crate.expression.symbol.SymbolVisitors;
+import io.crate.expression.symbol.Symbols;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.FunctionIdent;
+import io.crate.metadata.FunctionInfo;
+import io.crate.metadata.Reference;
+import io.crate.metadata.TransactionContext;
+import io.crate.types.ArrayType;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
-import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class EqualityExtractor {
 
-    public static final Function NULL_MARKER = new Function(
+    private static final Function NULL_MARKER = new Function(
         new FunctionInfo(
             new FunctionIdent("null_marker", ImmutableList.<DataType>of()),
             DataTypes.UNDEFINED), ImmutableList.<Symbol>of());
-    public static final EqProxy NULL_MARKER_PROXY = new EqProxy(NULL_MARKER);
+    private static final EqProxy NULL_MARKER_PROXY = new EqProxy(NULL_MARKER);
 
     private EvaluatingNormalizer normalizer;
 
@@ -52,21 +72,46 @@ public class EqualityExtractor {
         this.normalizer = normalizer;
     }
 
-    public List<List<Symbol>> extractParentMatches(List<ColumnIdent> columns, Symbol symbol, @Nullable StmtCtx stmtCtx) {
-        return extractMatches(columns, symbol, false, stmtCtx);
+    public List<List<Symbol>> extractParentMatches(List<ColumnIdent> columns, Symbol symbol, @Nullable TransactionContext coordinatorTxnCtx) {
+        return extractMatches(columns, symbol, false, coordinatorTxnCtx);
     }
 
-    public List<List<Symbol>> extractExactMatches(List<ColumnIdent> columns, Symbol symbol, @Nullable StmtCtx stmtCtx) {
-        return extractMatches(columns, symbol, true, stmtCtx);
+    /**
+     * @return Exact matches of the {@code columns} within {@code symbol}.
+     *         Null if there are no exact matches
+     *
+     * <pre>
+     * Example for exact matches:
+     *
+     * columns: [x]
+     *      x = ?                                           ->  [[?]]
+     *      x = 1 or x = 2                                  ->  [[1], [2]]
+     *
+     * columns: [x, y]
+     *      x = $1 and y = $2                               -> [[$1, $2]]
+     *
+     *      (x = 1 and y = 2) or (x = 2 and y = 3)          -> [[1, 2], [2, 3]]
+     *
+     *
+     * columns: [x]
+     *      x = 10 or y = 20                                -> null (y not inside columns)
+     * </pre>
+     */
+    @Nullable
+    public List<List<Symbol>> extractExactMatches(List<ColumnIdent> columns,
+                                                  Symbol symbol,
+                                                  @Nullable TransactionContext transactionContext) {
+        return extractMatches(columns, symbol, true, transactionContext);
     }
 
+    @Nullable
     private List<List<Symbol>> extractMatches(Collection<ColumnIdent> columns,
                                               Symbol symbol,
                                               boolean exact,
-                                              @Nullable StmtCtx stmtCtx) {
+                                              @Nullable TransactionContext transactionContext) {
         EqualityExtractor.ProxyInjectingVisitor.Context context =
             new EqualityExtractor.ProxyInjectingVisitor.Context(columns, exact);
-        Symbol proxiedTree = ProxyInjectingVisitor.INSTANCE.process(symbol, context);
+        Symbol proxiedTree = symbol.accept(ProxyInjectingVisitor.INSTANCE, context);
 
         // bail out if we have any unknown part in the tree
         if (context.exact && context.seenUnknown) {
@@ -86,7 +131,7 @@ public class EqualityExtractor {
                     anyNull = true;
                 }
             }
-            Symbol normalized = normalizer.normalize(proxiedTree, stmtCtx);
+            Symbol normalized = normalizer.normalize(proxiedTree, transactionContext);
             if (normalized == Literal.BOOLEAN_TRUE) {
                 if (anyNull) {
                     return null;
@@ -117,13 +162,13 @@ public class EqualityExtractor {
      * and shares pre existing proxies - so true value can be set on
      * this "parent" if a shared comparison is "true"
      */
-    static class AnyEqProxy extends EqProxy implements Iterable<EqProxy> {
+    private static class AnyEqProxy extends EqProxy implements Iterable<EqProxy> {
 
         private Map<Function, EqProxy> proxies;
         @Nullable
         private ChildEqProxy delegate = null;
 
-        public AnyEqProxy(Function compared, Map<Function, EqProxy> existingProxies) {
+        private AnyEqProxy(Function compared, Map<Function, EqProxy> existingProxies) {
             super(compared);
             initProxies(existingProxies);
         }
@@ -131,7 +176,7 @@ public class EqualityExtractor {
         private void initProxies(Map<Function, EqProxy> existingProxies) {
             Symbol left = origin.arguments().get(0);
             DataType leftType = origin.info().ident().argumentTypes().get(0);
-            DataType rightType = ((CollectionType) origin.info().ident().argumentTypes().get(1)).innerType();
+            DataType rightType = ((ArrayType) origin.info().ident().argumentTypes().get(1)).innerType();
             FunctionInfo eqInfo = new FunctionInfo(
                 new FunctionIdent(
                     EqOperator.NAME,
@@ -166,24 +211,24 @@ public class EqualityExtractor {
             return super.accept(visitor, context);
         }
 
-        public void setDelegate(@Nullable ChildEqProxy childEqProxy) {
+        private void setDelegate(@Nullable ChildEqProxy childEqProxy) {
             delegate = childEqProxy;
         }
 
-        public void cleanDelegate() {
+        private void cleanDelegate() {
             delegate = null;
         }
 
-        static class ChildEqProxy extends EqProxy {
+        private static class ChildEqProxy extends EqProxy {
 
             private List<AnyEqProxy> parentProxies = new ArrayList<>();
 
-            ChildEqProxy(Function origin, AnyEqProxy parent) {
+            private ChildEqProxy(Function origin, AnyEqProxy parent) {
                 super(origin);
                 this.addParent(parent);
             }
 
-            public void addParent(AnyEqProxy parentProxy) {
+            private void addParent(AnyEqProxy parentProxy) {
                 parentProxies.add(parentProxy);
             }
 
@@ -212,7 +257,7 @@ public class EqualityExtractor {
         protected Symbol current;
         protected final Function origin;
 
-        public Function origin() {
+        private Function origin() {
             return origin;
         }
 
@@ -245,20 +290,16 @@ public class EqualityExtractor {
         }
 
         @Override
-        public void readFrom(StreamInput in) throws IOException {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
         public void writeTo(StreamOutput out) throws IOException {
-            throw new UnsupportedOperationException();
+            throw new UnsupportedOperationException("writeTo not supported for " +
+                                                    EqProxy.class.getSimpleName());
         }
 
         public String forDisplay() {
             if (this == NULL_MARKER_PROXY) {
                 return "NULL";
             }
-            String s = "(" + ((Reference) origin.arguments().get(0)).ident().columnIdent().fqn() + "=" +
+            String s = "(" + ((Reference) origin.arguments().get(0)).column().fqn() + "=" +
                        ((Literal) origin.arguments().get(1)).value() + ")";
             if (current != origin) {
                 s += " TRUE";
@@ -268,6 +309,11 @@ public class EqualityExtractor {
 
         @Override
         public String toString() {
+            return representation();
+        }
+
+        @Override
+        public String representation() {
             return "EqProxy{" + forDisplay() + "}";
         }
     }
@@ -287,7 +333,7 @@ public class EqualityExtractor {
             }
 
             public EqProxy add(Function compared) {
-                if (compared.info().ident().name().equals(AnyEqOperator.NAME)) {
+                if (compared.info().ident().name().equals(AnyOperators.Names.EQ)) {
                     AnyEqProxy anyEqProxy = new AnyEqProxy(compared, proxies);
                     for (EqProxy proxiedProxy : anyEqProxy) {
                         if (!proxies.containsKey(proxiedProxy.origin())) {
@@ -307,12 +353,13 @@ public class EqualityExtractor {
         }
 
         static class Context {
-            LinkedHashMap<ColumnIdent, Comparison> comparisons;
-            public boolean proxyBelow;
-            public boolean seenUnknown = false;
+
+            private LinkedHashMap<ColumnIdent, Comparison> comparisons;
+            private boolean proxyBelow;
+            private boolean seenUnknown = false;
             private final boolean exact;
 
-            public Context(Collection<ColumnIdent> references, boolean exact) {
+            private Context(Collection<ColumnIdent> references, boolean exact) {
                 this.exact = exact;
                 comparisons = new LinkedHashMap<>(references.size());
                 for (ColumnIdent reference : references) {
@@ -320,10 +367,10 @@ public class EqualityExtractor {
                 }
             }
 
-            public List<Set<EqProxy>> comparisonSet() {
+            private List<Set<EqProxy>> comparisonSet() {
                 List<Set<EqProxy>> comps = new ArrayList<>(comparisons.size());
                 for (Comparison comparison : comparisons.values()) {
-                    // TODO: probably create a view instead of a seperate set
+                    // TODO: probably create a view instead of a separate set
                     comps.add(new HashSet<>(comparison.proxies.values()));
                 }
                 return comps;
@@ -343,7 +390,7 @@ public class EqualityExtractor {
 
         @Override
         public Symbol visitReference(Reference symbol, Context context) {
-            if (!context.comparisons.containsKey(symbol.ident().columnIdent())) {
+            if (!context.comparisons.containsKey(symbol.column())) {
                 context.seenUnknown = true;
             }
             return super.visitReference(symbol, context);
@@ -352,44 +399,45 @@ public class EqualityExtractor {
         public Symbol visitFunction(Function function, Context context) {
 
             String functionName = function.info().ident().name();
+            List<Symbol> arguments = function.arguments();
+            Symbol firstArg = arguments.get(0);
+
             if (functionName.equals(EqOperator.NAME)) {
-                if (function.arguments().get(0) instanceof Reference) {
+                if (firstArg instanceof Reference && SymbolVisitors.any(Symbols.IS_COLUMN, arguments.get(1)) == false) {
                     Comparison comparison = context.comparisons.get(
-                        ((Reference) function.arguments().get(0)).ident().columnIdent());
+                        ((Reference) firstArg).column());
                     if (comparison != null) {
                         context.proxyBelow = true;
-                        EqProxy x = comparison.add(function);
-                        return x;
+                        return comparison.add(function);
                     }
                 }
-            } else if (functionName.equals(AnyEqOperator.NAME) &&
-                       function.arguments().get(1).symbolType().isValueSymbol()) {
+            } else if (functionName.equals(AnyOperators.Names.EQ) && arguments.get(1).symbolType().isValueSymbol()) {
                 // ref = any ([1,2,3])
-                if (function.arguments().get(0) instanceof Reference) {
-                    Reference reference = (Reference) function.arguments().get(0);
-                    Comparison comparison = context.comparisons.get(
-                        reference.ident().columnIdent());
+                if (firstArg instanceof Reference) {
+                    Reference reference = (Reference) firstArg;
+                    Comparison comparison = context.comparisons.get(reference.column());
                     if (comparison != null) {
                         context.proxyBelow = true;
-                        EqProxy x = comparison.add(function);
-                        return x;
+                        return comparison.add(function);
                     }
                 }
+            } else if (Operators.LOGICAL_OPERATORS.contains(functionName)) {
+                boolean proxyBelowPre = context.proxyBelow;
+                boolean proxyBelowPost = proxyBelowPre;
+                ArrayList<Symbol> newArgs = new ArrayList<>(arguments.size());
+                for (Symbol arg : arguments) {
+                    context.proxyBelow = proxyBelowPre;
+                    newArgs.add(arg.accept(this, context));
+                    proxyBelowPost = context.proxyBelow || proxyBelowPost;
+                }
+                context.proxyBelow = proxyBelowPost;
+                if (!context.proxyBelow && function.valueType().equals(DataTypes.BOOLEAN)) {
+                    return Literal.BOOLEAN_TRUE;
+                }
+                return new Function(function.info(), newArgs);
             }
-            boolean proxyBelowPre = context.proxyBelow;
-            boolean proxyBelowPost = proxyBelowPre;
-            ArrayList<Symbol> args = new ArrayList<>(function.arguments().size());
-            for (Symbol arg : function.arguments()) {
-                context.proxyBelow = proxyBelowPre;
-                args.add(process(arg, context));
-                proxyBelowPost = context.proxyBelow || proxyBelowPost;
-            }
-            context.proxyBelow = proxyBelowPost;
-            if (!context.proxyBelow && function.valueType().equals(DataTypes.BOOLEAN)) {
-                return Literal.BOOLEAN_TRUE;
-            }
-            return new Function(function.info(), args);
+            context.seenUnknown = true;
+            return Literal.BOOLEAN_TRUE;
         }
     }
-
 }

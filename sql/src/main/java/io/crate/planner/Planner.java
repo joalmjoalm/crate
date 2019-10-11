@@ -1,543 +1,534 @@
 /*
- * Licensed to CRATE Technology GmbH ("Crate") under one or more contributor
- * license agreements.  See the NOTICE file distributed with this work for
- * additional information regarding copyright ownership.  Crate licenses
- * this file to you under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.  You may
+ * Licensed to Crate under one or more contributor license agreements.
+ * See the NOTICE file distributed with this work for additional
+ * information regarding copyright ownership.  Crate licenses this file
+ * to you under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.  You may
  * obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
  *
  * However, if you have executed another commercial license agreement
  * with Crate these terms will supersede the license and you may use the
- * software solely pursuant to the terms of the relevant commercial agreement.
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
  */
 
 package io.crate.planner;
 
-import com.carrotsearch.hppc.IntHashSet;
-import com.carrotsearch.hppc.IntSet;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.HashMultimap;
-import com.google.common.collect.Multimap;
-import io.crate.analyze.*;
+import io.crate.analyze.AnalyzedAlterBlobTable;
+import io.crate.analyze.AnalyzedAlterTableAddColumn;
+import io.crate.analyze.AnalyzedAlterTable;
+import io.crate.analyze.AnalyzedAlterTableOpenClose;
+import io.crate.analyze.AnalyzedAlterTableRename;
+import io.crate.analyze.AnalyzedAlterUser;
+import io.crate.analyze.AnalyzedBegin;
+import io.crate.analyze.AnalyzedCommit;
+import io.crate.analyze.AnalyzedCreateBlobTable;
+import io.crate.analyze.AnalyzedCreateFunction;
+import io.crate.analyze.AnalyzedCreateRepository;
+import io.crate.analyze.AnalyzedCreateSnapshot;
+import io.crate.analyze.AnalyzedCreateTable;
+import io.crate.analyze.AnalyzedCreateUser;
+import io.crate.analyze.AnalyzedDecommissionNodeStatement;
+import io.crate.analyze.AnalyzedDeleteStatement;
+import io.crate.analyze.AnalyzedDropFunction;
+import io.crate.analyze.AnalyzedDropRepository;
+import io.crate.analyze.AnalyzedDropSnapshot;
+import io.crate.analyze.AnalyzedDropUser;
+import io.crate.analyze.AnalyzedGCDanglingArtifacts;
+import io.crate.analyze.AnalyzedRefreshTable;
+import io.crate.analyze.AnalyzedOptimizeTable;
+import io.crate.analyze.AnalyzedStatement;
+import io.crate.analyze.AnalyzedStatementVisitor;
+import io.crate.analyze.AnalyzedSwapTable;
+import io.crate.analyze.AnalyzedUpdateStatement;
+import io.crate.analyze.CopyFromAnalyzedStatement;
+import io.crate.analyze.CopyToAnalyzedStatement;
+import io.crate.analyze.CreateAnalyzerAnalyzedStatement;
+import io.crate.analyze.CreateViewStmt;
+import io.crate.analyze.DCLStatement;
+import io.crate.analyze.DDLStatement;
+import io.crate.analyze.DeallocateAnalyzedStatement;
+import io.crate.analyze.DropAnalyzerStatement;
+import io.crate.analyze.DropTableAnalyzedStatement;
+import io.crate.analyze.DropViewStmt;
+import io.crate.analyze.ExplainAnalyzedStatement;
+import io.crate.analyze.InsertFromSubQueryAnalyzedStatement;
+import io.crate.analyze.InsertFromValuesAnalyzedStatement;
+import io.crate.analyze.KillAnalyzedStatement;
+import io.crate.analyze.NumberOfShards;
+import io.crate.analyze.ResetAnalyzedStatement;
+import io.crate.analyze.SetAnalyzedStatement;
+import io.crate.analyze.SetLicenseAnalyzedStatement;
+import io.crate.analyze.AnalyzedShowCreateTable;
 import io.crate.analyze.relations.AnalyzedRelation;
-import io.crate.analyze.relations.PlannedAnalyzedRelation;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.exceptions.UnhandledServerException;
-import io.crate.metadata.*;
+import io.crate.auth.user.UserManager;
+import io.crate.exceptions.LicenseViolationException;
+import io.crate.execution.ddl.tables.TableCreator;
+import io.crate.expression.symbol.Symbol;
+import io.crate.license.LicenseService;
+import io.crate.metadata.Functions;
+import io.crate.metadata.Reference;
+import io.crate.metadata.Schemas;
 import io.crate.metadata.doc.DocTableInfo;
 import io.crate.metadata.table.TableInfo;
-import io.crate.operation.projectors.TopN;
-import io.crate.planner.consumer.ConsumerContext;
-import io.crate.planner.consumer.ConsumingPlanner;
-import io.crate.planner.consumer.UpdateConsumer;
-import io.crate.planner.fetch.IndexBaseVisitor;
+import io.crate.planner.consumer.UpdatePlanner;
+import io.crate.planner.node.dcl.GenericDCLPlan;
+import io.crate.planner.node.ddl.AlterBlobTablePlan;
+import io.crate.planner.node.ddl.AlterTableAddColumnPlan;
+import io.crate.planner.node.ddl.AlterTableOpenClosePlan;
+import io.crate.planner.node.ddl.AlterTablePlan;
+import io.crate.planner.node.ddl.AlterTableRenameTablePlan;
+import io.crate.planner.node.ddl.AlterUserPlan;
+import io.crate.planner.node.ddl.CreateBlobTablePlan;
+import io.crate.planner.node.ddl.CreateDropAnalyzerPlan;
+import io.crate.planner.node.ddl.CreateFunctionPlan;
+import io.crate.planner.node.ddl.CreateRepositoryPlan;
+import io.crate.planner.node.ddl.CreateSnapshotPlan;
+import io.crate.planner.node.ddl.CreateTablePlan;
+import io.crate.planner.node.ddl.CreateUserPlan;
+import io.crate.planner.node.ddl.DropFunctionPlan;
+import io.crate.planner.node.ddl.DropRepositoryPlan;
+import io.crate.planner.node.ddl.DropSnapshotPlan;
 import io.crate.planner.node.ddl.DropTablePlan;
-import io.crate.planner.node.ddl.ESClusterUpdateSettingsPlan;
+import io.crate.planner.node.ddl.DropUserPlan;
 import io.crate.planner.node.ddl.GenericDDLPlan;
-import io.crate.planner.node.dml.UpsertById;
+import io.crate.planner.node.ddl.OptimizeTablePlan;
+import io.crate.planner.node.ddl.RefreshTablePlan;
+import io.crate.planner.node.ddl.UpdateSettingsPlan;
+import io.crate.planner.node.dml.LegacyUpsertById;
 import io.crate.planner.node.management.ExplainPlan;
-import io.crate.planner.node.management.GenericShowPlan;
 import io.crate.planner.node.management.KillPlan;
+import io.crate.planner.node.management.ShowCreateTablePlan;
+import io.crate.planner.operators.LogicalPlanner;
 import io.crate.planner.statement.CopyStatementPlanner;
-import io.crate.planner.statement.DeleteStatementPlanner;
+import io.crate.planner.statement.DeletePlanner;
+import io.crate.planner.statement.SetLicensePlan;
 import io.crate.planner.statement.SetSessionPlan;
-import io.crate.sql.tree.SetStatement;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.profile.ProfilingContext;
+import io.crate.profile.Timer;
+import io.crate.sql.tree.Expression;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.routing.allocation.decider.AwarenessAllocationDecider;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.inject.Singleton;
 import org.elasticsearch.common.settings.Settings;
 
-import javax.annotation.Nullable;
-import java.io.IOException;
-import java.util.*;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 @Singleton
-public class Planner extends AnalyzedStatementVisitor<Planner.Context, Plan> {
+public class Planner extends AnalyzedStatementVisitor<PlannerContext, Plan> {
 
-    private final ConsumingPlanner consumingPlanner;
+    private static final Logger LOGGER = LogManager.getLogger(Planner.class);
+
     private final ClusterService clusterService;
-    private final UpdateConsumer updateConsumer;
-    private final CopyStatementPlanner copyStatementPlanner;
-    private final SelectStatementPlanner selectStatementPlanner;
-    private final DeleteStatementPlanner deleteStatementPlanner;
-    private final EvaluatingNormalizer normalizer;
+    private final Functions functions;
+    private final LogicalPlanner logicalPlanner;
+    private final IsStatementExecutionAllowed isStatementExecutionAllowed;
+    private final NumberOfShards numberOfShards;
+    private final TableCreator tableCreator;
+    private final Schemas schemas;
+    private final UserManager userManager;
 
+    private List<String> awarenessAttributes;
 
-    public static class Context {
-
-        //index, shardId, node
-        private Map<String, Map<Integer, String>> shardNodes;
-
-        private final ClusterService clusterService;
-        private final UUID jobId;
-        private final ConsumingPlanner consumingPlanner;
-        private final EvaluatingNormalizer normalizer;
-        private final StmtCtx stmtCtx;
-        private final int softLimit;
-        private final int fetchSize;
-        private int executionPhaseId = 0;
-        private final Multimap<TableIdent, TableRouting> tableRoutings = HashMultimap.create();
-        private ReaderAllocations readerAllocations;
-        private HashMultimap<TableIdent, String> tableIndices;
-
-        public Context(ClusterService clusterService,
-                       UUID jobId,
-                       ConsumingPlanner consumingPlanner,
-                       EvaluatingNormalizer normalizer,
-                       StmtCtx stmtCtx,
-                       int softLimit,
-                       int fetchSize) {
-            this.clusterService = clusterService;
-            this.jobId = jobId;
-            this.consumingPlanner = consumingPlanner;
-            this.normalizer = normalizer;
-            this.stmtCtx = stmtCtx;
-            this.softLimit = softLimit;
-            this.fetchSize = fetchSize;
-        }
-
-        public EvaluatingNormalizer normalizer() {
-            return normalizer;
-        }
-
-        private static int finalLimit(@Nullable Integer queryLimit, int softLimit) {
-            if (queryLimit == null) {
-                return softLimit > 0 ? softLimit : TopN.NO_LIMIT;
-            }
-            return queryLimit;
-        }
-
-        @Nullable
-        private Integer toInteger(@Nullable Symbol symbol) {
-            if (symbol == null) {
-                return null;
-            }
-            io.crate.operation.Input input = (io.crate.operation.Input) (normalizer.normalize(symbol, stmtCtx));
-            return DataTypes.INTEGER.value(input.value());
-        }
-
-        public Limits getLimits(boolean isRootRelation, QuerySpec querySpec) {
-            Optional<Symbol> optLimit = querySpec.limit();
-            if (!isRootRelation) {
-                /**
-                 * Don't apply softLimit or maxRows on child-relations,
-                 * The parent-relations might need more data to produce the correct result.
-                 * If the limit is present on the query it means the parent relation wanted it there, so keep it.
-                 */
-
-                if (optLimit.isPresent()) {
-                    //noinspection OptionalGetWithoutIsPresent it's present!
-                    Integer limit = toInteger(optLimit.get());
-                    Integer offset = toInteger(querySpec.offset().or(Literal.ZERO));
-                    return new Limits(limit, offset);
-                } else {
-                    return new Limits(TopN.NO_LIMIT, TopN.NO_OFFSET);
-                }
-            }
-            Integer limit = toInteger(optLimit.orNull());
-            int finalLimit = finalLimit(limit, softLimit);
-            Integer offset = toInteger(querySpec.offset().or(Literal.ZERO));
-            return new Limits(finalLimit, offset);
-        }
-
-        public int fetchSize() {
-            return fetchSize;
-        }
-
-        public StmtCtx statementContext() {
-            return stmtCtx;
-        }
-
-        static class ReaderAllocations {
-
-            private final TreeMap<Integer, String> readerIndices = new TreeMap<>();
-            private final Map<String, IntSet> nodeReaders = new HashMap<>();
-            private final TreeMap<String, Integer> bases;
-            private final Multimap<TableIdent, String> tableIndices;
-            private final Map<String, TableIdent> indicesToIdents;
-
-
-            ReaderAllocations(TreeMap<String, Integer> bases,
-                              Map<String, Map<Integer, String>> shardNodes,
-                              Multimap<TableIdent, String> tableIndices) {
-                this.bases = bases;
-                this.tableIndices = tableIndices;
-                this.indicesToIdents = new HashMap<>(tableIndices.values().size());
-                for (Map.Entry<TableIdent, String> entry : tableIndices.entries()) {
-                    indicesToIdents.put(entry.getValue(), entry.getKey());
-                }
-                for (Map.Entry<String, Integer> entry : bases.entrySet()) {
-                    readerIndices.put(entry.getValue(), entry.getKey());
-                }
-                for (Map.Entry<String, Map<Integer, String>> entry : shardNodes.entrySet()) {
-                    Integer base = bases.get(entry.getKey());
-                    if (base == null) {
-                        continue;
-                    }
-                    for (Map.Entry<Integer, String> nodeEntries : entry.getValue().entrySet()) {
-                        int readerId = base + nodeEntries.getKey();
-                        IntSet readerIds = nodeReaders.get(nodeEntries.getValue());
-                        if (readerIds == null) {
-                            readerIds = new IntHashSet();
-                            nodeReaders.put(nodeEntries.getValue(), readerIds);
-                        }
-                        readerIds.add(readerId);
-                    }
-                }
-            }
-
-            public Multimap<TableIdent, String> tableIndices() {
-                return tableIndices;
-            }
-
-            public TreeMap<Integer, String> indices() {
-                return readerIndices;
-            }
-
-            public Map<String, IntSet> nodeReaders() {
-                return nodeReaders;
-            }
-
-            public TreeMap<String, Integer> bases() {
-                return bases;
-            }
-
-            public Map<String, TableIdent> indicesToIdents() {
-                return indicesToIdents;
-            }
-        }
-
-        ReaderAllocations buildReaderAllocations() {
-            if (readerAllocations != null) {
-                return readerAllocations;
-            }
-
-            IndexBaseVisitor visitor = new IndexBaseVisitor();
-
-            // tableIdent -> indexName
-            final Multimap<TableIdent, String> usedTableIndices = HashMultimap.create();
-            for (final Map.Entry<TableIdent, Collection<TableRouting>> tableRoutingEntry : tableRoutings.asMap().entrySet()) {
-                for (TableRouting tr : tableRoutingEntry.getValue()) {
-                    if (!tr.nodesAllocated) {
-                        allocateRoutingNodes(tableRoutingEntry.getKey(), tr.routing.locations());
-                        tr.nodesAllocated = true;
-                    }
-                    tr.routing.walkLocations(visitor);
-                    tr.routing.walkLocations(new Routing.RoutingLocationVisitor() {
-                        @Override
-                        public boolean visitNode(String nodeId, Map<String, List<Integer>> nodeRouting) {
-                            usedTableIndices.putAll(tableRoutingEntry.getKey(), nodeRouting.keySet());
-                            return super.visitNode(nodeId, nodeRouting);
-                        }
-                    });
-
-                }
-            }
-            readerAllocations = new ReaderAllocations(visitor.build(), shardNodes, usedTableIndices);
-            return readerAllocations;
-        }
-
-        public ClusterService clusterService() {
-            return clusterService;
-        }
-
-        public PlannedAnalyzedRelation planSubRelation(AnalyzedRelation relation, ConsumerContext consumerContext) {
-            assert consumingPlanner != null;
-            boolean isRoot = consumerContext.isRoot();
-            consumerContext.isRoot(false);
-            PlannedAnalyzedRelation subPlan = consumingPlanner.plan(relation, consumerContext);
-            consumerContext.isRoot(isRoot);
-            return subPlan;
-        }
-
-        public UUID jobId() {
-            return jobId;
-        }
-
-        public int nextExecutionPhaseId() {
-            return executionPhaseId++;
-        }
-
-        private boolean allocateRoutingNodes(TableIdent tableIdent, Map<String, Map<String, List<Integer>>> locations) {
-            boolean success = true;
-            if (tableIndices == null) {
-                tableIndices = HashMultimap.create();
-            }
-            if (shardNodes == null) {
-                shardNodes = new HashMap<>();
-            }
-            for (Map.Entry<String, Map<String, List<Integer>>> location : locations.entrySet()) {
-                for (Map.Entry<String, List<Integer>> indexEntry : location.getValue().entrySet()) {
-                    Map<Integer, String> shardsOnIndex = shardNodes.get(indexEntry.getKey());
-                    tableIndices.put(tableIdent, indexEntry.getKey());
-                    List<Integer> shards = indexEntry.getValue();
-                    if (shardsOnIndex == null) {
-                        shardsOnIndex = new HashMap<>(shards.size());
-                        shardNodes.put(indexEntry.getKey(), shardsOnIndex);
-                        for (Integer id : shards) {
-                            shardsOnIndex.put(id, location.getKey());
-                        }
-                    } else {
-                        for (Integer id : shards) {
-                            String allocatedNodeId = shardsOnIndex.get(id);
-                            if (allocatedNodeId != null) {
-                                if (!allocatedNodeId.equals(location.getKey())) {
-                                    success = false;
-                                }
-                            } else {
-                                shardsOnIndex.put(id, location.getKey());
-                            }
-                        }
-                    }
-                }
-            }
-            return success;
-        }
-
-        public Routing allocateRouting(TableInfo tableInfo, WhereClause where, @Nullable String preference) {
-            Collection<TableRouting> existingRoutings = tableRoutings.get(tableInfo.ident());
-            // allocate routing nodes only if we have more than one table routings
-            Routing routing;
-            if (existingRoutings.isEmpty()) {
-                routing = tableInfo.getRouting(where, preference);
-            } else {
-                for (TableRouting existing : existingRoutings) {
-                    assert preference == null || preference.equals(existing.preference);
-                    if (Objects.equals(existing.where, where)) {
-                        return existing.routing;
-                    }
-                }
-
-                routing = tableInfo.getRouting(where, preference);
-                // ensure all routings of this table are allocated
-                // and update new routing by merging with existing ones
-                for (TableRouting existingRouting : existingRoutings) {
-                    if (!existingRouting.nodesAllocated) {
-                        allocateRoutingNodes(tableInfo.ident(), existingRouting.routing.locations());
-                        existingRouting.nodesAllocated = true;
-                    }
-                    // Merge locations with existing routing
-                    routing.mergeLocations(existingRouting.routing.locations());
-                }
-                if (!allocateRoutingNodes(tableInfo.ident(), routing.locations())) {
-                    throw new UnsupportedOperationException(
-                        "Nodes of existing routing are not allocated, routing rebuild needed");
-                }
-            }
-            tableRoutings.put(tableInfo.ident(), new TableRouting(where, preference, routing));
-            return routing;
-        }
+    @Inject
+    public Planner(Settings settings,
+                   ClusterService clusterService,
+                   Functions functions,
+                   TableStats tableStats,
+                   LicenseService licenseService,
+                   NumberOfShards numberOfShards,
+                   TableCreator tableCreator,
+                   Schemas schemas,
+                   UserManager userManager) {
+        this(
+            settings,
+            clusterService,
+            functions,
+            tableStats,
+            numberOfShards,
+            tableCreator,
+            schemas,
+            userManager,
+            () -> licenseService.getLicenseState() == LicenseService.LicenseState.VALID
+        );
     }
 
     @VisibleForTesting
-    static class TableRouting {
-        final WhereClause where;
-        final String preference;
-        final Routing routing;
-        boolean nodesAllocated = false;
-
-        TableRouting(WhereClause where, String preference, Routing routing) {
-            this.where = where;
-            this.preference = preference;
-            this.routing = routing;
-        }
+    public Planner(Settings settings,
+                   ClusterService clusterService,
+                   Functions functions,
+                   TableStats tableStats,
+                   NumberOfShards numberOfShards,
+                   TableCreator tableCreator,
+                   Schemas schemas,
+                   UserManager userManager,
+                   BooleanSupplier hasValidLicense) {
+        this.clusterService = clusterService;
+        this.functions = functions;
+        this.logicalPlanner = new LogicalPlanner(functions, tableStats);
+        this.isStatementExecutionAllowed = new IsStatementExecutionAllowed(hasValidLicense);
+        this.numberOfShards = numberOfShards;
+        this.tableCreator = tableCreator;
+        this.schemas = schemas;
+        this.userManager = userManager;
+        initAwarenessAttributes(settings);
     }
 
-    @Inject
-    public Planner(ClusterService clusterService,
-                   Functions functions,
-                   NestedReferenceResolver globalResolver,
-                   ConsumingPlanner consumingPlanner,
-                   UpdateConsumer updateConsumer,
-                   CopyStatementPlanner copyStatementPlanner,
-                   SelectStatementPlanner selectStatementPlanner,
-                   DeleteStatementPlanner deleteStatementPlanner) {
-        this.clusterService = clusterService;
-        this.updateConsumer = updateConsumer;
-        this.consumingPlanner = consumingPlanner;
-        this.copyStatementPlanner = copyStatementPlanner;
-        this.selectStatementPlanner = selectStatementPlanner;
-        this.deleteStatementPlanner = deleteStatementPlanner;
-        normalizer = new EvaluatingNormalizer(functions, RowGranularity.CLUSTER, globalResolver);
+    private void initAwarenessAttributes(Settings settings) {
+        awarenessAttributes =
+            AwarenessAllocationDecider.CLUSTER_ROUTING_ALLOCATION_AWARENESS_ATTRIBUTE_SETTING.get(settings);
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(
+            AwarenessAllocationDecider.CLUSTER_ROUTING_ALLOCATION_AWARENESS_ATTRIBUTE_SETTING,
+            this::setAwarenessAttributes);
+    }
+
+    private void setAwarenessAttributes(List<String> awarenessAttributes) {
+        this.awarenessAttributes = awarenessAttributes;
+    }
+
+    public List<String> getAwarenessAttributes() {
+        return awarenessAttributes;
+    }
+
+    public ClusterState currentClusterState() {
+        return clusterService.state();
     }
 
     /**
-     * dispatch plan creation based on analysis type
+     * dispatch plan creation based on analyzed statement
      *
-     * @param analysis  analysis to create plan from
-     * @param softLimit A soft limit will be applied if there is no explicit limit within the query.
-     *                  0 for unlimited (query limit or maxRows will still apply)
-     *                  If the type of query doesn't have a resultSet this has no effect.
-     * @param fetchSize Limit the number of rows that should be returned to a client.
-     *                  If > 0 this overrides the limit that might be part of a query.
-     *                  0 for unlimited (soft limit or query limit may still apply)
+     * @param analyzedStatement analyzed statement to create plan from
      * @return plan
      */
-    public Plan plan(Analysis analysis, UUID jobId, int softLimit, int fetchSize) {
-        AnalyzedStatement analyzedStatement = analysis.analyzedStatement();
-        return process(analyzedStatement, new Context(
-            clusterService, jobId, consumingPlanner, normalizer, analysis.statementContext(), softLimit, fetchSize));
+    public Plan plan(AnalyzedStatement analyzedStatement, PlannerContext plannerContext) {
+        if (isStatementExecutionAllowed.test(analyzedStatement) == false) {
+            throw new LicenseViolationException("Statement not allowed");
+        }
+        return process(analyzedStatement, plannerContext);
     }
 
     @Override
-    protected Plan visitAnalyzedStatement(AnalyzedStatement analyzedStatement, Context context) {
+    protected Plan visitAnalyzedStatement(AnalyzedStatement analyzedStatement, PlannerContext context) {
         throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
-            "Cannot create Plan from AnalyzedStatement \"%s\"  - not supported.", analyzedStatement));
+                                                              "Cannot create Plan from AnalyzedStatement \"%s\"  - not supported.", analyzedStatement));
     }
 
     @Override
-    public Plan visitBegin(AnalyzedBegin analyzedBegin, Context context) {
-        return new NoopPlan(context.jobId);
+    public Plan visitBegin(AnalyzedBegin analyzedBegin, PlannerContext context) {
+        return NoopPlan.INSTANCE;
     }
 
     @Override
-    protected Plan visitSelectStatement(SelectAnalyzedStatement statement, Context context) {
-        return selectStatementPlanner.plan(statement, context);
+    public Plan visitCommit(AnalyzedCommit analyzedCommit, PlannerContext context) {
+        return NoopPlan.INSTANCE;
     }
 
     @Override
-    protected Plan visitInsertFromValuesStatement(InsertFromValuesAnalyzedStatement statement, Context context) {
+    public Plan visitSelectStatement(AnalyzedRelation relation, PlannerContext context) {
+        return logicalPlanner.plan(relation, context);
+    }
+
+    @Override
+    public Plan visitSwapTable(AnalyzedSwapTable swapTable, PlannerContext context) {
+        return new SwapTablePlan(swapTable);
+    }
+
+    @Override
+    public Plan visitGCDanglingArtifacts(AnalyzedGCDanglingArtifacts gcDanglingArtifacts, PlannerContext context) {
+        return new GCDangingArtifactsPlan();
+    }
+
+    @Override
+    public Plan visitDecommissionNode(AnalyzedDecommissionNodeStatement decommissionNode, PlannerContext context) {
+        return new DecommissionNodePlan(decommissionNode);
+    }
+
+    @Override
+    protected Plan visitInsertFromValuesStatement(InsertFromValuesAnalyzedStatement statement, PlannerContext context) {
         Preconditions.checkState(!statement.sourceMaps().isEmpty(), "no values given");
-        return processInsertStatement(statement, context);
+        return processInsertStatement(statement);
     }
 
     @Override
-    protected Plan visitInsertFromSubQueryStatement(InsertFromSubQueryAnalyzedStatement statement, Context context) {
-        return consumingPlanner.plan(statement, context);
+    protected Plan visitInsertFromSubQueryStatement(InsertFromSubQueryAnalyzedStatement statement, PlannerContext context) {
+        return logicalPlanner.plan(statement, context);
     }
 
     @Override
-    protected Plan visitUpdateStatement(UpdateAnalyzedStatement statement, Context context) {
-        ConsumerContext consumerContext = new ConsumerContext(statement, context);
-        PlannedAnalyzedRelation plannedAnalyzedRelation = updateConsumer.consume(statement, consumerContext);
-        if (plannedAnalyzedRelation == null) {
-            throw new IllegalArgumentException("Couldn't plan Update statement");
+    public Plan visitAnalyzedUpdateStatement(AnalyzedUpdateStatement update, PlannerContext context) {
+        return UpdatePlanner.plan(
+            update, functions, context, new SubqueryPlanner(s -> logicalPlanner.planSubSelect(s, context)));
+    }
+
+    @Override
+    protected Plan visitAnalyzedDeleteStatement(AnalyzedDeleteStatement statement, PlannerContext context) {
+        return DeletePlanner.planDelete(
+            functions,
+            statement,
+            new SubqueryPlanner(s -> logicalPlanner.planSubSelect(s, context)),
+            context
+        );
+    }
+
+    @Override
+    protected Plan visitCopyFromStatement(CopyFromAnalyzedStatement analysis, PlannerContext context) {
+        return CopyStatementPlanner.planCopyFrom(analysis);
+    }
+
+    @Override
+    protected Plan visitCopyToStatement(CopyToAnalyzedStatement analysis, PlannerContext context) {
+        SubqueryPlanner subqueryPlanner = new SubqueryPlanner((s) -> logicalPlanner.planSubSelect(s, context));
+        return CopyStatementPlanner.planCopyTo(analysis, logicalPlanner, subqueryPlanner);
+    }
+
+    @Override
+    public Plan visitShowCreateTableAnalyzedStatement(AnalyzedShowCreateTable statement, PlannerContext context) {
+        return new ShowCreateTablePlan(statement);
+    }
+
+    @Override
+    protected Plan visitCreateRepositoryAnalyzedStatement(AnalyzedCreateRepository analysis,
+                                                          PlannerContext context) {
+        return new CreateRepositoryPlan(analysis);
+    }
+
+    @Override
+    public Plan visitDropRepositoryAnalyzedStatement(AnalyzedDropRepository analysis,
+                                                     PlannerContext context) {
+        return new DropRepositoryPlan(analysis);
+    }
+
+    @Override
+    public Plan visitCreateSnapshotAnalyzedStatement(AnalyzedCreateSnapshot analysis,
+                                                     PlannerContext context) {
+        return new CreateSnapshotPlan(analysis);
+    }
+
+    @Override
+    public Plan visitDropSnapshotAnalyzedStatement(AnalyzedDropSnapshot analysis,
+                                                   PlannerContext context) {
+        return new DropSnapshotPlan(analysis);
+    }
+
+    @Override
+    protected Plan visitDDLStatement(DDLStatement statement, PlannerContext context) {
+        return new GenericDDLPlan(statement);
+    }
+
+    @Override
+    public Plan visitDCLStatement(DCLStatement statement, PlannerContext context) {
+        return new GenericDCLPlan(statement);
+    }
+
+    @Override
+    public Plan visitDropTable(DropTableAnalyzedStatement<?> dropTable, PlannerContext context) {
+        TableInfo table = dropTable.table();
+        if (table == null) {
+            return NoopPlan.INSTANCE;
         }
-        return plannedAnalyzedRelation.plan();
+        return new DropTablePlan(table, dropTable.dropIfExists());
     }
 
     @Override
-    protected Plan visitDeleteStatement(DeleteAnalyzedStatement analyzedStatement, Context context) {
-        return deleteStatementPlanner.planDelete(analyzedStatement, context);
+    public Plan visitCreateTable(AnalyzedCreateTable createTable, PlannerContext context) {
+        return new CreateTablePlan(createTable, numberOfShards, tableCreator, schemas);
     }
 
     @Override
-    protected Plan visitCopyFromStatement(CopyFromAnalyzedStatement analysis, Context context) {
-        return copyStatementPlanner.planCopyFrom(analysis, context);
+    public Plan visitAlterTable(AnalyzedAlterTable alterTable, PlannerContext context) {
+        return new AlterTablePlan(alterTable);
     }
 
     @Override
-    protected Plan visitCopyToStatement(CopyToAnalyzedStatement analysis, Context context) {
-        return copyStatementPlanner.planCopyTo(analysis, context);
+    public Plan visitAnalyzedAlterBlobTable(AnalyzedAlterBlobTable analysis,
+                                            PlannerContext context) {
+        return new AlterBlobTablePlan(analysis);
     }
 
     @Override
-    protected Plan visitShowAnalyzedStatement(AbstractShowAnalyzedStatement statement, Context context) {
-        return new GenericShowPlan(context.jobId(), statement);
+    public Plan visitAnalyzedCreateBlobTable(AnalyzedCreateBlobTable analysis,
+                                             PlannerContext context) {
+        return new CreateBlobTablePlan(analysis, numberOfShards);
+    }
+
+    public Plan visitRefreshTableStatement(AnalyzedRefreshTable analysis, PlannerContext context) {
+        return new RefreshTablePlan(analysis);
     }
 
     @Override
-    protected Plan visitDDLAnalyzedStatement(AbstractDDLAnalyzedStatement statement, Context context) {
-        return new GenericDDLPlan(context.jobId(), statement);
+    public Plan visitAnalyzedAlterTableRename(AnalyzedAlterTableRename analysis,
+                                              PlannerContext context) {
+        return new AlterTableRenameTablePlan(analysis);
     }
 
     @Override
-    public Plan visitDropBlobTableStatement(DropBlobTableAnalyzedStatement analysis, Context context) {
-        if (analysis.noop()) {
-            return new NoopPlan(context.jobId());
+    public Plan visitAnalyzedAlterTableOpenClose(AnalyzedAlterTableOpenClose analysis,
+                                                 PlannerContext context) {
+        return new AlterTableOpenClosePlan(analysis);
+    }
+
+    @Override
+    protected Plan visitAnalyzedCreateUser(AnalyzedCreateUser analysis,
+                                           PlannerContext context) {
+        return new CreateUserPlan(analysis, userManager);
+    }
+
+    @Override
+    public Plan visitAnalyzedAlterUser(AnalyzedAlterUser analysis, PlannerContext context) {
+        return new AlterUserPlan(analysis, userManager);
+    }
+
+    @Override
+    protected Plan visitDropUser(AnalyzedDropUser analysis, PlannerContext context) {
+        return new DropUserPlan(analysis, userManager);
+    }
+
+    @Override
+    protected Plan visitCreateAnalyzerStatement(CreateAnalyzerAnalyzedStatement analysis, PlannerContext context) {
+        return new CreateDropAnalyzerPlan(analysis.buildSettings());
+    }
+
+    @Override
+    public Plan visitAlterTableAddColumn(AnalyzedAlterTableAddColumn alterTableAddColumn,
+                                         PlannerContext context) {
+        return new AlterTableAddColumnPlan(alterTableAddColumn);
+    }
+
+    @Override
+    protected Plan visitCreateFunction(AnalyzedCreateFunction analysis,
+                                       PlannerContext context) {
+        return new CreateFunctionPlan(analysis);
+    }
+
+    @Override
+    public Plan visitDropFunction(AnalyzedDropFunction analysis, PlannerContext context) {
+        return new DropFunctionPlan(analysis);
+    }
+
+    @Override
+    protected Plan visitDropAnalyzerStatement(DropAnalyzerStatement analysis, PlannerContext context) {
+        return new CreateDropAnalyzerPlan(analysis.settingsForRemoval());
+    }
+
+    @Override
+    public Plan visitResetAnalyzedStatement(ResetAnalyzedStatement resetStatement, PlannerContext context) {
+        Set<String> settingsToRemove = resetStatement.settingsToRemove();
+        if (settingsToRemove.isEmpty()) {
+            return NoopPlan.INSTANCE;
         }
-        return visitDDLAnalyzedStatement(analysis, context);
-    }
 
-    @Override
-    protected Plan visitDropTableStatement(DropTableAnalyzedStatement analysis, Context context) {
-        if (analysis.noop()) {
-            return new NoopPlan(context.jobId());
+        Map<String, List<Expression>> nullSettings = new HashMap<>(settingsToRemove.size(), 1);
+        for (String setting : settingsToRemove) {
+            nullSettings.put(setting, null);
         }
-        return new DropTablePlan(context.jobId(), analysis.table(), analysis.dropIfExists());
+        return new UpdateSettingsPlan(nullSettings, nullSettings);
     }
 
     @Override
-    protected Plan visitCreateTableStatement(CreateTableAnalyzedStatement analysis, Context context) {
-        if (analysis.noOp()) {
-            return new NoopPlan(context.jobId());
+    public Plan visitSetStatement(SetAnalyzedStatement setStatement, PlannerContext context) {
+        switch (setStatement.scope()) {
+            case LICENSE:
+                LOGGER.warn("SET LICENSE STATEMENT WILL BE IGNORED: {}", setStatement.settings());
+                return NoopPlan.INSTANCE;
+            case LOCAL:
+                LOGGER.warn("SET LOCAL STATEMENT WILL BE IGNORED: {}", setStatement.settings());
+                return NoopPlan.INSTANCE;
+            case SESSION_TRANSACTION_MODE:
+                LOGGER.warn("'SET SESSION CHARACTERISTICS AS TRANSACTION' STATEMENT WILL BE IGNORED");
+                return NoopPlan.INSTANCE;
+            case SESSION:
+                return new SetSessionPlan(setStatement.settings());
+            case GLOBAL:
+            default:
+                if (setStatement.isPersistent()) {
+                    return new UpdateSettingsPlan(setStatement.settings());
+                } else {
+                    return new UpdateSettingsPlan(
+                        Collections.emptyMap(),
+                        setStatement.settings()
+                    );
+                }
         }
-        return new GenericDDLPlan(context.jobId(), analysis);
     }
 
     @Override
-    protected Plan visitCreateAnalyzerStatement(CreateAnalyzerAnalyzedStatement analysis, Context context) {
-        Settings analyzerSettings;
-        try {
-            analyzerSettings = analysis.buildSettings();
-        } catch (IOException ioe) {
-            throw new UnhandledServerException("Could not build analyzer Settings", ioe);
-        }
-
-        return new ESClusterUpdateSettingsPlan(context.jobId(), analyzerSettings);
+    public Plan visitSetLicenseStatement(SetLicenseAnalyzedStatement setLicenseAnalyzedStatement, PlannerContext context) {
+        return new SetLicensePlan(setLicenseAnalyzedStatement);
     }
 
     @Override
-    public Plan visitResetAnalyzedStatement(ResetAnalyzedStatement resetStatement, Context context) {
-        if (resetStatement.settingsToRemove().isEmpty()) {
-            return new NoopPlan(context.jobId());
-        }
-        return new ESClusterUpdateSettingsPlan(context.jobId(),
-            resetStatement.settingsToRemove(), resetStatement.settingsToRemove());
+    public Plan visitKillAnalyzedStatement(KillAnalyzedStatement analysis, PlannerContext context) {
+        return new KillPlan(analysis.jobId());
     }
 
     @Override
-    public Plan visitSetStatement(SetAnalyzedStatement setStatement, Context context) {
-        if (setStatement.settings() == null) {
-            return new NoopPlan(context.jobId());
-        } else if (SetStatement.Scope.SESSION.equals(setStatement.scope())) {
-            return new SetSessionPlan(context.jobId(), setStatement.settings());
-        } else if (setStatement.isPersistent()) {
-            return new ESClusterUpdateSettingsPlan(context.jobId(), setStatement.settings());
+    public Plan visitDeallocateAnalyzedStatement(DeallocateAnalyzedStatement analysis, PlannerContext context) {
+        return NoopPlan.INSTANCE;
+    }
+
+    @Override
+    public Plan visitExplainStatement(ExplainAnalyzedStatement explainAnalyzedStatement, PlannerContext context) {
+        ProfilingContext ctx = explainAnalyzedStatement.context();
+        if (ctx == null) {
+            return new ExplainPlan(process(explainAnalyzedStatement.statement(), context), null);
         } else {
-            return new ESClusterUpdateSettingsPlan(context.jobId(), Settings.EMPTY, setStatement.settings());
+            Timer timer = ctx.createAndStartTimer(ExplainPlan.Phase.Plan.name());
+            Plan subPlan = process(explainAnalyzedStatement.statement(), context);
+            ctx.stopTimerAndStoreDuration(timer);
+            return new ExplainPlan(subPlan, ctx);
         }
     }
 
     @Override
-    public Plan visitKillAnalyzedStatement(KillAnalyzedStatement analysis, Context context) {
-        return analysis.jobId().isPresent() ?
-            new KillPlan(context.jobId(), analysis.jobId().get()) :
-            new KillPlan(context.jobId());
+    public Plan visitCreateViewStmt(CreateViewStmt createViewStmt, PlannerContext context) {
+        return new CreateViewPlan(createViewStmt);
     }
 
     @Override
-    public Plan visitExplainStatement(ExplainAnalyzedStatement explainAnalyzedStatement, Context context) {
-        return new ExplainPlan(process(explainAnalyzedStatement.statement(), context));
+    public Plan visitDropView(DropViewStmt dropViewStmt, PlannerContext context) {
+        return new DropViewPlan(dropViewStmt);
     }
 
-    private UpsertById processInsertStatement(InsertFromValuesAnalyzedStatement analysis, Context context) {
+    @Override
+    public Plan visitOptimizeTableStatement(AnalyzedOptimizeTable analysis, PlannerContext context) {
+        return new OptimizeTablePlan(analysis);
+    }
+
+    private static LegacyUpsertById processInsertStatement(InsertFromValuesAnalyzedStatement analysis) {
         String[] onDuplicateKeyAssignmentsColumns = null;
         if (analysis.onDuplicateKeyAssignmentsColumns().size() > 0) {
             onDuplicateKeyAssignmentsColumns = analysis.onDuplicateKeyAssignmentsColumns().get(0);
         }
-        UpsertById upsertById = new UpsertById(
-            context.jobId(),
-            context.nextExecutionPhaseId(),
-            analysis.tableInfo().isPartitioned(),
+        DocTableInfo tableInfo = analysis.tableInfo();
+        LegacyUpsertById legacyUpsertById = new LegacyUpsertById(
             analysis.numBulkResponses(),
+            tableInfo.isPartitioned(),
             analysis.bulkIndices(),
+            analysis.isIgnoreDuplicateKeys(),
             onDuplicateKeyAssignmentsColumns,
             analysis.columns().toArray(new Reference[analysis.columns().size()])
         );
-        if (analysis.tableInfo().isPartitioned()) {
+        if (tableInfo.isPartitioned()) {
             List<String> partitions = analysis.generatePartitions();
             String[] indices = partitions.toArray(new String[partitions.size()]);
             for (int i = 0; i < indices.length; i++) {
@@ -545,11 +536,13 @@ public class Planner extends AnalyzedStatementVisitor<Planner.Context, Plan> {
                 if (analysis.onDuplicateKeyAssignmentsColumns().size() > i) {
                     onDuplicateKeyAssignments = analysis.onDuplicateKeyAssignments().get(i);
                 }
-                upsertById.add(
+                legacyUpsertById.add(
                     indices[i],
                     analysis.ids().get(i),
                     analysis.routingValues().get(i),
                     onDuplicateKeyAssignments,
+                    null,
+                    null,
                     null,
                     analysis.sourceMaps().get(i));
             }
@@ -559,46 +552,23 @@ public class Planner extends AnalyzedStatementVisitor<Planner.Context, Plan> {
                 if (analysis.onDuplicateKeyAssignments().size() > i) {
                     onDuplicateKeyAssignments = analysis.onDuplicateKeyAssignments().get(i);
                 }
-                upsertById.add(
-                    analysis.tableInfo().ident().indexName(),
+                legacyUpsertById.add(
+                    tableInfo.ident().indexNameOrAlias(),
                     analysis.ids().get(i),
                     analysis.routingValues().get(i),
                     onDuplicateKeyAssignments,
+                    null,
+                    null,
                     null,
                     analysis.sourceMaps().get(i));
             }
         }
 
-        return upsertById;
+        return legacyUpsertById;
     }
 
-    /**
-     * return the ES index names the query should go to
-     */
-    public static String[] indices(DocTableInfo tableInfo, WhereClause whereClause) {
-        String[] indices;
-
-        if (whereClause.noMatch()) {
-            indices = org.elasticsearch.common.Strings.EMPTY_ARRAY;
-        } else if (!tableInfo.isPartitioned()) {
-            // table name for non-partitioned tables
-            indices = new String[]{tableInfo.ident().indexName()};
-        } else if (whereClause.partitions().isEmpty()) {
-            if (whereClause.noMatch()) {
-                return new String[0];
-            }
-
-            // all partitions
-            indices = new String[tableInfo.partitions().size()];
-            int i = 0;
-            for (PartitionName partitionName : tableInfo.partitions()) {
-                indices[i] = partitionName.asIndexName();
-                i++;
-            }
-        } else {
-            indices = whereClause.partitions().toArray(new String[whereClause.partitions().size()]);
-        }
-        return indices;
+    public Functions functions() {
+        return functions;
     }
 }
 

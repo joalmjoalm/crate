@@ -35,18 +35,20 @@ public class IndexReferenceTest extends CrateUnitTest {
 
     @Test
     public void testStreaming() throws Exception {
-        TableIdent tableIdent = new TableIdent("doc", "test");
-        ReferenceIdent referenceIdent = new ReferenceIdent(tableIdent, "string_col");
-        Reference reference = new Reference(referenceIdent, RowGranularity.DOC, StringType.INSTANCE);
+        RelationName relationName = new RelationName("doc", "test");
+        ReferenceIdent referenceIdent = new ReferenceIdent(relationName, "string_col");
+        Reference reference = new Reference(referenceIdent, RowGranularity.DOC, StringType.INSTANCE, null, null);
 
-        ReferenceIdent indexReferenceIdent = new ReferenceIdent(tableIdent, "index_column");
-        IndexReference indexReferenceInfo = new IndexReference(indexReferenceIdent,
+        ReferenceIdent indexReferenceIdent = new ReferenceIdent(relationName, "index_column");
+        IndexReference indexReferenceInfo = new IndexReference(
+            null,
+            indexReferenceIdent,
             Reference.IndexType.ANALYZED, ImmutableList.of(reference), "my_analyzer");
 
         BytesStreamOutput out = new BytesStreamOutput();
         Reference.toStream(indexReferenceInfo, out);
 
-        StreamInput in = StreamInput.wrap(out.bytes());
+        StreamInput in = out.bytes().streamInput();
         IndexReference indexReferenceInfo2 = Reference.fromStream(in);
 
         assertThat(indexReferenceInfo2, is(indexReferenceInfo));

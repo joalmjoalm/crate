@@ -23,14 +23,14 @@ package io.crate.exceptions;
 
 import java.util.Locale;
 
-public class InvalidColumnNameException extends ValidationException {
+public class InvalidColumnNameException extends ValidationException implements ClusterScopeException {
 
-    public InvalidColumnNameException(String columnName) {
-        super(String.format(Locale.ENGLISH, "column name \"%s\" is invalid.", columnName));
+    public InvalidColumnNameException(String columnName, String message) {
+        super(String.format(Locale.ENGLISH, "\"%s\" %s", columnName, message));
     }
 
     @Override
     public int errorCode() {
-        return 2;
+        return 8;
     }
 }

@@ -1,118 +1,182 @@
 /*
- * Licensed to CRATE Technology GmbH ("Crate") under one or more contributor
- * license agreements.  See the NOTICE file distributed with this work for
- * additional information regarding copyright ownership.  Crate licenses
- * this file to you under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.  You may
- * obtain a copy of the License at
+ * Licensed to Crate.io Inc. or its affiliates ("Crate.io") under one or
+ * more contributor license agreements.  See the NOTICE file distributed
+ * with this work for additional information regarding copyright ownership.
+ * Crate.io licenses this file to you under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with the
+ * License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  *
- * However, if you have executed another commercial license agreement
- * with Crate these terms will supersede the license and you may use the
- * software solely pursuant to the terms of the relevant commercial agreement.
+ * However, if you have executed another commercial license agreement with
+ * Crate.io these terms will supersede the license and you may use the
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
  */
 
 package io.crate.sql.parser;
 
-import com.google.common.annotations.VisibleForTesting;
+import io.crate.sql.parser.antlr.v4.SqlBaseBaseListener;
+import io.crate.sql.parser.antlr.v4.SqlBaseLexer;
+import io.crate.sql.parser.antlr.v4.SqlBaseParser;
 import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.Node;
 import io.crate.sql.tree.Statement;
-import org.antlr.runtime.*;
-import org.antlr.runtime.tree.BufferedTreeNodeStream;
-import org.antlr.runtime.tree.CommonTree;
-import org.antlr.runtime.tree.TreeNodeStream;
+import org.antlr.v4.runtime.BaseErrorListener;
+import org.antlr.v4.runtime.CharStreams;
+import org.antlr.v4.runtime.CommonToken;
+import org.antlr.v4.runtime.CommonTokenStream;
+import org.antlr.v4.runtime.ParserRuleContext;
+import org.antlr.v4.runtime.RecognitionException;
+import org.antlr.v4.runtime.Recognizer;
+import org.antlr.v4.runtime.Token;
+import org.antlr.v4.runtime.atn.PredictionMode;
+import org.antlr.v4.runtime.misc.Pair;
+import org.antlr.v4.runtime.misc.ParseCancellationException;
+import org.antlr.v4.runtime.tree.TerminalNodeImpl;
 
-public final class SqlParser {
-    private SqlParser() {
+import java.util.EnumSet;
+import java.util.function.Function;
+
+import static java.util.Objects.requireNonNull;
+
+public class SqlParser {
+    private static final BaseErrorListener ERROR_LISTENER = new BaseErrorListener() {
+        @Override
+        public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol, int line,
+                                int charPositionInLine, String message, RecognitionException e) {
+            throw new ParsingException(message, e, line, charPositionInLine);
+        }
+    };
+
+    public static final SqlParser INSTANCE = new SqlParser();
+
+    private final EnumSet<IdentifierSymbol> allowedIdentifierSymbols;
+
+    public SqlParser() {
+        this(new SqlParserOptions().allowIdentifierSymbol(IdentifierSymbol.AT_SIGN));
+    }
+
+    public SqlParser(SqlParserOptions options) {
+        requireNonNull(options, "options is null");
+        allowedIdentifierSymbols = EnumSet.copyOf(options.getAllowedIdentifierSymbols());
     }
 
     public static Statement createStatement(String sql) {
-        try {
-            return createStatement(parseStatement(sql));
-        } catch (StackOverflowError e) {
-            throw new ParsingException("statement is too large (stack overflow while parsing)");
-        }
+        return INSTANCE.generateStatement(sql);
+    }
+
+    private Statement generateStatement(String sql) {
+        return (Statement) invokeParser("statement", sql, SqlBaseParser::singleStatement);
     }
 
     public static Expression createExpression(String expression) {
+        return INSTANCE.generateExpression(expression);
+    }
+
+    private Expression generateExpression(String expression) {
+        return (Expression) invokeParser("expression", expression, SqlBaseParser::singleExpression);
+    }
+
+    private Node invokeParser(String name, String sql, Function<SqlBaseParser, ParserRuleContext> parseFunction) {
         try {
-            return createExpression(parseExpression(expression));
+            SqlBaseLexer lexer = new SqlBaseLexer(new CaseInsensitiveStream(CharStreams.fromString(sql, name)));
+            CommonTokenStream tokenStream = new CommonTokenStream(lexer);
+            SqlBaseParser parser = new SqlBaseParser(tokenStream);
+
+            parser.addParseListener(new PostProcessor());
+
+            lexer.removeErrorListeners();
+            lexer.addErrorListener(ERROR_LISTENER);
+
+            parser.removeErrorListeners();
+            parser.addErrorListener(ERROR_LISTENER);
+
+            ParserRuleContext tree;
+            try {
+                // first, try parsing with potentially faster SLL mode
+                parser.getInterpreter().setPredictionMode(PredictionMode.SLL);
+                tree = parseFunction.apply(parser);
+            } catch (ParseCancellationException ex) {
+                // if we fail, parse with LL mode
+                tokenStream.seek(0); // rewind input stream
+                parser.reset();
+
+                parser.getInterpreter().setPredictionMode(PredictionMode.LL);
+                tree = parseFunction.apply(parser);
+            }
+
+            return new AstBuilder().visit(tree);
         } catch (StackOverflowError e) {
-            throw new ParsingException("expression is too large (stack overflow while parsing)");
+            throw new ParsingException(name + " is too large (stack overflow while parsing)");
         }
     }
 
-    @VisibleForTesting
-    static Statement createStatement(CommonTree tree) {
-        TreeNodeStream stream = new BufferedTreeNodeStream(tree);
-        StatementBuilder builder = new StatementBuilder(stream);
-        try {
-            return builder.statement().value;
-        } catch (RecognitionException e) {
-            throw new AssertionError(e); // RecognitionException is not thrown
+    private class PostProcessor extends SqlBaseBaseListener {
+        @Override
+        public void exitUnquotedIdentifier(SqlBaseParser.UnquotedIdentifierContext context) {
+            String identifier = context.IDENTIFIER().getText();
+            for (IdentifierSymbol identifierSymbol : EnumSet.complementOf(allowedIdentifierSymbols)) {
+                char symbol = identifierSymbol.getSymbol();
+                if (identifier.indexOf(symbol) >= 0) {
+                    throw new ParsingException("identifiers must not contain '"
+                        + identifierSymbol.getSymbol() + "'", null, context.IDENTIFIER().getSymbol().getLine(),
+                        context.IDENTIFIER().getSymbol().getCharPositionInLine());
+                }
+            }
         }
-    }
 
-    private static Expression createExpression(CommonTree tree) {
-        TreeNodeStream stream = new BufferedTreeNodeStream(tree);
-        StatementBuilder builder = new StatementBuilder(stream);
-        try {
-            return builder.singleExpression().value;
-        } catch (RecognitionException e) {
-            throw new AssertionError(e); // RecognitionException is not thrown
+        @Override
+        public void exitBackQuotedIdentifier(SqlBaseParser.BackQuotedIdentifierContext context) {
+            Token token = context.BACKQUOTED_IDENTIFIER().getSymbol();
+            throw new ParsingException(
+                "backquoted identifiers are not supported; use double quotes to quote identifiers",
+                null,
+                token.getLine(),
+                token.getCharPositionInLine());
         }
-    }
 
-    @VisibleForTesting
-    static CommonTree parseStatement(String sql) {
-        try {
-            return (CommonTree) getParser(sql).singleStatement().getTree();
-        } catch (RecognitionException e) {
-            throw new AssertionError(e); // RecognitionException is not thrown
+        @Override
+        public void exitDigitIdentifier(SqlBaseParser.DigitIdentifierContext context) {
+            Token token = context.DIGIT_IDENTIFIER().getSymbol();
+            throw new ParsingException(
+                "identifiers must not start with a digit; surround the identifier with double quotes",
+                null,
+                token.getLine(),
+                token.getCharPositionInLine());
         }
-    }
 
-    private static CommonTree parseExpression(String expression) {
-        try {
-            return (CommonTree) getParser(expression).singleExpression().getTree();
-        } catch (RecognitionException e) {
-            throw new AssertionError(e); // RecognitionException is not thrown
+        @Override
+        public void exitColonIdentifier(SqlBaseParser.ColonIdentifierContext context) {
+            Token token = context.COLON_IDENT().getSymbol();
+            throw new ParsingException(
+                "identifiers must not contain ':'",
+                null,
+                token.getLine(),
+                token.getCharPositionInLine());
         }
-    }
 
-    public static String createIdentifier(String expression) {
-        return createIdentifier(parseIdentifier(expression));
-    }
+        @Override
+        public void exitNonReserved(SqlBaseParser.NonReservedContext context) {
+            // replace nonReserved words with IDENT tokens
+            context.getParent().removeLastChild();
 
-    private static String createIdentifier(CommonTree identTree) {
-        TreeNodeStream stream = new BufferedTreeNodeStream(identTree);
-        StatementBuilder builder = new StatementBuilder(stream);
-        try {
-            return builder.ident().value;
-        } catch (RecognitionException e) {
-            throw new AssertionError(e); // RecognitionException is not thrown
+            Token token = (Token) context.getChild(0).getPayload();
+            context.getParent().addChild(new TerminalNodeImpl(
+                new CommonToken(
+                    new Pair<>(token.getTokenSource(), token.getInputStream()),
+                    SqlBaseLexer.IDENTIFIER,
+                    token.getChannel(),
+                    token.getStartIndex(),
+                    token.getStopIndex())
+                )
+            );
         }
-    }
-
-    private static CommonTree parseIdentifier(String expression) {
-        try {
-            return (CommonTree) getParser(expression).ident().getTree();
-        } catch (RecognitionException e) {
-            throw new AssertionError(e);
-        }
-    }
-
-    private static StatementParser getParser(String sql) {
-        CharStream stream = new CaseInsensitiveStream(new ANTLRStringStream(sql));
-        StatementLexer lexer = new StatementLexer(stream);
-        TokenStream tokenStream = new CommonTokenStream(lexer);
-        return new StatementParser(tokenStream);
     }
 }

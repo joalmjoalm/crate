@@ -22,61 +22,31 @@
 package io.crate.metadata;
 
 import com.carrotsearch.hppc.cursors.ObjectObjectCursor;
-import com.google.common.base.Function;
-import com.google.common.base.Predicate;
-import com.google.common.base.Predicates;
-import com.google.common.collect.FluentIterable;
 import io.crate.Constants;
 import io.crate.analyze.NumberOfReplicas;
-import io.crate.analyze.TableParameterInfo;
+import io.crate.analyze.TableParameters;
+import io.crate.metadata.doc.DocIndexMetaData;
 import io.crate.metadata.doc.PartitionedByMappingExtractor;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.cluster.ClusterService;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.collect.Tuple;
-import org.elasticsearch.common.logging.Loggers;
-import org.elasticsearch.common.lucene.BytesRefs;
+import org.elasticsearch.common.settings.Settings;
 
-import javax.annotation.Nullable;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.StreamSupport;
 
 public class PartitionInfos implements Iterable<PartitionInfo> {
 
-
-    private static final Predicate<ObjectObjectCursor<String, IndexMetaData>> PARTITION_INDICES_PREDICATE = new Predicate<ObjectObjectCursor<String, IndexMetaData>>() {
-        @Override
-        public boolean apply(@Nullable ObjectObjectCursor<String, IndexMetaData> input) {
-            return input != null
-                   && input.value.getState() == IndexMetaData.State.OPEN
-                   && PartitionName.isPartition(input.key);
-        }
-    };
-
-    private static final Function<ObjectObjectCursor<String, IndexMetaData>, PartitionInfo> CREATE_PARTITION_INFO_FUNCTION = new Function<ObjectObjectCursor<String, IndexMetaData>, PartitionInfo>() {
-        @Nullable
-        @Override
-        public PartitionInfo apply(@Nullable ObjectObjectCursor<String, IndexMetaData> input) {
-            assert input != null;
-            PartitionName partitionName = PartitionName.fromIndexOrTemplate(input.key);
-            try {
-                Map<String, Object> valuesMap = buildValuesMap(partitionName, input.value.mapping(Constants.DEFAULT_MAPPING_TYPE));
-                BytesRef numberOfReplicas = NumberOfReplicas.fromSettings(input.value.getSettings());
-                return new PartitionInfo(partitionName, input.value.getNumberOfShards(), numberOfReplicas, valuesMap,
-                    TableParameterInfo.tableParametersFromIndexMetaData(input.value));
-            } catch (Exception e) {
-                Loggers.getLogger(PartitionInfos.class).trace("error extracting partition infos from index {}", e, input.key);
-                return null; // must filter on null
-            }
-
-        }
-    };
-
     private final ClusterService clusterService;
+    private static final Logger LOGGER = LogManager.getLogger(PartitionInfos.class);
 
     public PartitionInfos(ClusterService clusterService) {
         this.clusterService = clusterService;
@@ -85,22 +55,44 @@ public class PartitionInfos implements Iterable<PartitionInfo> {
     @Override
     public Iterator<PartitionInfo> iterator() {
         // get a fresh one for each iteration
-        return FluentIterable.from(clusterService.state().metaData().indices())
-            .filter(PARTITION_INDICES_PREDICATE)
-            .transform(CREATE_PARTITION_INFO_FUNCTION)
-            .filter(Predicates.notNull())
+        return StreamSupport.stream(clusterService.state().metaData().indices().spliterator(), false)
+            .filter(entry -> IndexParts.isPartitioned(entry.key))
+            .map(PartitionInfos::createPartitionInfo)
+            .filter(Objects::nonNull)
             .iterator();
     }
 
-    @Nullable
+    private static PartitionInfo createPartitionInfo(ObjectObjectCursor<String, IndexMetaData> indexMetaDataEntry) {
+        PartitionName partitionName = PartitionName.fromIndexOrTemplate(indexMetaDataEntry.key);
+        try {
+            IndexMetaData indexMetaData = indexMetaDataEntry.value;
+            MappingMetaData mappingMetaData = indexMetaData.mapping(Constants.DEFAULT_MAPPING_TYPE);
+            Map<String, Object> mappingMap = mappingMetaData.sourceAsMap();
+            Map<String, Object> valuesMap = buildValuesMap(partitionName, mappingMetaData);
+            Settings settings = indexMetaData.getSettings();
+            String numberOfReplicas = NumberOfReplicas.fromSettings(settings);
+            return new PartitionInfo(
+                partitionName,
+                indexMetaData.getNumberOfShards(),
+                numberOfReplicas,
+                IndexMetaData.SETTING_INDEX_VERSION_CREATED.get(settings),
+                settings.getAsVersion(IndexMetaData.SETTING_VERSION_UPGRADED, null),
+                DocIndexMetaData.isClosed(indexMetaData, mappingMap, false),
+                valuesMap,
+                TableParameters.tableParametersFromIndexMetaData(indexMetaData));
+        } catch (Exception e) {
+            LOGGER.trace("error extracting partition infos from index {}", e, indexMetaDataEntry.key);
+            return null; // must filter on null
+        }
+    }
+
     private static Map<String, Object> buildValuesMap(PartitionName partitionName, MappingMetaData mappingMetaData) throws Exception {
         int i = 0;
         Map<String, Object> valuesMap = new HashMap<>();
         Iterable<Tuple<ColumnIdent, DataType>> partitionColumnInfoIterable = PartitionedByMappingExtractor.extractPartitionedByColumns(mappingMetaData.sourceAsMap());
         for (Tuple<ColumnIdent, DataType> columnInfo : partitionColumnInfoIterable) {
             String columnName = columnInfo.v1().sqlFqn();
-            // produce string type values as string, not bytesref
-            Object value = BytesRefs.toString(partitionName.values().get(i));
+            Object value = partitionName.values().get(i);
             if (!columnInfo.v2().equals(DataTypes.STRING)) {
                 value = columnInfo.v2().value(value);
             }

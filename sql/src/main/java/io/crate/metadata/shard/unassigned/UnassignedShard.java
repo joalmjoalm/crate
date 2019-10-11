@@ -1,15 +1,30 @@
+/*
+ * Licensed to Crate under one or more contributor license agreements.
+ * See the NOTICE file distributed with this work for additional
+ * information regarding copyright ownership.  Crate licenses this file
+ * to you under the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.  You may
+ * obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ *
+ * However, if you have executed another commercial license agreement
+ * with Crate these terms will supersede the license and you may use the
+ * software solely pursuant to the terms of the relevant commercial
+ * agreement.
+ */
+
 package io.crate.metadata.shard.unassigned;
 
-import io.crate.blob.v2.BlobIndices;
-import io.crate.metadata.PartitionName;
-import io.crate.metadata.Schemas;
-import io.crate.metadata.blob.BlobSchemaInfo;
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.metadata.IndexParts;
 import org.elasticsearch.cluster.routing.ShardRoutingState;
-import org.elasticsearch.index.shard.ShardId;
-
-import java.util.regex.Matcher;
+import org.elasticsearch.cluster.service.ClusterService;
 
 /**
  * This class represents an unassigned shard
@@ -19,12 +34,12 @@ import java.util.regex.Matcher;
  * The {@link io.crate.metadata.sys.SysShardsTableInfo} will encode any shards that aren't assigned to a node
  * by negating them using {@link #markUnassigned(int)}
  * <p>
- * The {@link io.crate.operation.collect.sources.ShardCollectSource} will then collect UnassignedShard
+ * The {@link io.crate.execution.engine.collect.sources.ShardCollectSource} will then collect UnassignedShard
  * instances for all shardIds that are negative.
  * <p>
  * This is only for "select ... from sys.shards" queries.
  */
-public class UnassignedShard {
+public final class UnassignedShard {
 
     public static boolean isUnassigned(int shardId) {
         return shardId < 0;
@@ -59,47 +74,26 @@ public class UnassignedShard {
     private final Boolean primary;
     private final int id;
     private final String partitionIdent;
-    private final BytesRef state;
+    private final String state;
+    private final boolean orphanedPartition;
 
-    private static final BytesRef UNASSIGNED = new BytesRef("UNASSIGNED");
-    private static final BytesRef INITIALIZING = new BytesRef("INITIALIZING");
+    private static final String UNASSIGNED = "UNASSIGNED";
+    private static final String INITIALIZING = "INITIALIZING";
 
-    private Boolean orphanedPartition = false;
 
-    public UnassignedShard(ShardId shardId,
+    public UnassignedShard(int shardId,
+                           String indexName,
                            ClusterService clusterService,
                            Boolean primary,
                            ShardRoutingState state) {
-        String index = shardId.index().name();
-        boolean isBlobIndex = BlobIndices.isBlobIndex(index);
-        String tableName;
-        String ident = "";
-        if (isBlobIndex) {
-            this.schemaName = BlobSchemaInfo.NAME;
-            tableName = BlobIndices.STRIP_PREFIX.apply(index);
-        } else if (PartitionName.isPartition(index)) {
-            PartitionName partitionName = PartitionName.fromIndexOrTemplate(index);
-            schemaName = partitionName.tableIdent().schema();
-            tableName = partitionName.tableIdent().name();
-            ident = partitionName.ident();
-            if (!clusterService.state().metaData().hasConcreteIndex(tableName)) {
-                orphanedPartition = true;
-            }
-        } else {
-            Matcher matcher = Schemas.SCHEMA_PATTERN.matcher(index);
-            if (matcher.matches()) {
-                this.schemaName = matcher.group(1);
-                tableName = matcher.group(2);
-            } else {
-                this.schemaName = Schemas.DEFAULT_SCHEMA_NAME;
-                tableName = index;
-            }
-        }
-
-        this.tableName = tableName;
-        partitionIdent = ident;
+        IndexParts indexParts = new IndexParts(indexName);
+        this.schemaName = indexParts.getSchema();
+        this.tableName = indexParts.getTable();
+        this.partitionIdent = indexParts.getPartitionIdent();
+        this.orphanedPartition = indexParts.isPartitioned()
+                                 && !clusterService.state().metaData().hasConcreteIndex(tableName);
         this.primary = primary;
-        this.id = shardId.id();
+        this.id = shardId;
         this.state = state == ShardRoutingState.UNASSIGNED ? UNASSIGNED : INITIALIZING;
     }
 
@@ -123,7 +117,7 @@ public class UnassignedShard {
         return primary;
     }
 
-    public BytesRef state() {
+    public String state() {
         return state;
     }
 

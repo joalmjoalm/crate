@@ -21,125 +21,95 @@
 
 package io.crate.analyze;
 
-import io.crate.exceptions.TableUnknownException;
-import io.crate.metadata.MetaDataModule;
-import io.crate.metadata.PartitionName;
-import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.blob.BlobSchemaInfo;
-import io.crate.metadata.blob.BlobTableInfo;
-import io.crate.metadata.sys.MetaDataSysModule;
-import io.crate.metadata.table.SchemaInfo;
-import io.crate.testing.MockedClusterServiceModule;
-import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.common.inject.Module;
-import org.hamcrest.Matchers;
-import org.junit.Rule;
+import io.crate.exceptions.OperationOnInaccessibleRelationException;
+import io.crate.exceptions.RelationUnknown;
+import io.crate.expression.symbol.Symbol;
+import io.crate.sql.tree.Assignment;
+import io.crate.sql.tree.Table;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import io.crate.testing.SQLExecutor;
+import org.junit.Before;
 import org.junit.Test;
-import org.junit.rules.ExpectedException;
 
-import java.util.Arrays;
+import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 
-import static org.hamcrest.Matchers.contains;
+import static io.crate.testing.SymbolMatchers.isLiteral;
 import static org.hamcrest.Matchers.is;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.contains;
 
-public class RefreshAnalyzerTest extends BaseAnalyzerTest {
+public class RefreshAnalyzerTest extends CrateDummyClusterServiceUnitTest {
 
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
+    private SQLExecutor e;
 
-
-    private final static TableIdent TEST_BLOB_TABLE_IDENT = new TableIdent("blob", "blobs");
-
-    static class TestMetaDataModule extends MetaDataModule {
-
-        @Override
-        protected void bindSchemas() {
-            super.bindSchemas();
-            SchemaInfo schemaInfo = mock(SchemaInfo.class);
-            BlobTableInfo blobTableInfo = mock(BlobTableInfo.class);
-            when(blobTableInfo.ident()).thenReturn(TEST_BLOB_TABLE_IDENT);
-            when(schemaInfo.getTableInfo(TEST_BLOB_TABLE_IDENT.name())).thenReturn(blobTableInfo);
-            schemaBinder.addBinding(BlobSchemaInfo.NAME).toInstance(schemaInfo);
-
-            SchemaInfo docSchemaInfo = mock(SchemaInfo.class);
-            when(docSchemaInfo.getTableInfo(TEST_PARTITIONED_TABLE_IDENT.name()))
-                .thenReturn(TEST_PARTITIONED_TABLE_INFO);
-            when(docSchemaInfo.getTableInfo(USER_TABLE_IDENT.name())).thenReturn(USER_TABLE_INFO);
-
-            schemaBinder.addBinding(Schemas.DEFAULT_SCHEMA_NAME).toInstance(docSchemaInfo);
-        }
-    }
-
-    @Override
-    protected List<Module> getModules() {
-        List<Module> modules = super.getModules();
-        modules.addAll(Arrays.<Module>asList(
-            new MockedClusterServiceModule(),
-            new TestMetaDataModule(),
-            new MetaDataSysModule()
-        ));
-        return modules;
+    @Before
+    public void prepare() throws IOException {
+        e = SQLExecutor.builder(clusterService)
+            .enableDefaultTables()
+            .addBlobTable("create blob table blobs")
+            .build();
     }
 
     @Test
     public void testRefreshSystemTable() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        analyze("refresh table sys.shards");
+        expectedException.expect(OperationOnInaccessibleRelationException.class);
+        expectedException.expectMessage("The relation \"sys.shards\" doesn't support or allow REFRESH " +
+                                        "operations, as it is read-only.");
+        e.analyze("refresh table sys.shards");
     }
 
     @Test
     public void testRefreshBlobTable() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        analyze("refresh table blob.blobs");
+        expectedException.expect(OperationOnInaccessibleRelationException.class);
+        expectedException.expectMessage("The relation \"blob.blobs\" doesn't support or allow REFRESH " +
+                                        "operations.");
+        e.analyze("refresh table blob.blobs");
     }
 
     @Test
     public void testRefreshPartition() throws Exception {
-        PartitionName partition = new PartitionName("parted", Arrays.asList(new BytesRef("1395874800000")));
-        RefreshTableAnalyzedStatement analysis = (RefreshTableAnalyzedStatement) analyze("refresh table parted PARTITION (date=1395874800000)");
-        assertThat(analysis.indexNames(), contains(".partitioned.parted.04732cpp6ks3ed1o60o30c1g"));
+        AnalyzedRefreshTable analysis = e.analyze("REFRESH TABLE parted PARTITION (date=1395874800000)");
+        Set<Table<Symbol>> analyzedTables = analysis.tables().keySet();
+        assertThat(analyzedTables.size(), is(1));
+
+        List<Assignment<Symbol>> partitionProperties = analyzedTables.iterator().next().partitionProperties();
+        assertThat(partitionProperties.size(), is(1));
+        assertThat(partitionProperties.get(0).columnName(), isLiteral("date"));
+        assertThat(partitionProperties.get(0).expressions(), contains(isLiteral(1395874800000L)));
     }
 
-    @Test(expected = TableUnknownException.class)
+    @Test
     public void testRefreshMultipleTablesUnknown() throws Exception {
-        RefreshTableAnalyzedStatement analysis = (RefreshTableAnalyzedStatement) analyze("refresh table parted, foo, bar");
-
-        assertThat(analysis.indexNames().size(), is(1));
-        assertThat(analysis.indexNames(), contains(Matchers.hasToString("doc.parted")));
-    }
-
-    @Test
-    public void testRefreshInvalidPartitioned() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        analyze("refresh table parted partition (invalid_column='hddsGNJHSGFEFZÜ')");
-    }
-
-    @Test
-    public void testRefreshNonPartitioned() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        analyze("refresh table users partition (foo='n')");
+        expectedException.expect(RelationUnknown.class);
+        expectedException.expectMessage("Relation 'foo' unknown");
+        e.analyze("REFRESH TABLE parted, foo, bar");
     }
 
     @Test
     public void testRefreshSysPartitioned() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        analyze("refresh table sys.shards partition (id='n')");
+        expectedException.expect(OperationOnInaccessibleRelationException.class);
+        expectedException.expectMessage("The relation \"sys.shards\" doesn't support or allow REFRESH" +
+                                        " operations, as it is read-only.");
+        e.analyze("refresh table sys.shards partition (id='n')");
     }
 
     @Test
     public void testRefreshBlobPartitioned() throws Exception {
-        expectedException.expect(IllegalArgumentException.class);
-        analyze("refresh table blob.blobs partition (n='n')");
+        expectedException.expect(OperationOnInaccessibleRelationException.class);
+        expectedException.expectMessage("The relation \"blob.blobs\" doesn't support or allow REFRESH " +
+                                        "operations.");
+        e.analyze("refresh table blob.blobs partition (n='n')");
     }
 
     @Test
     public void testRefreshPartitionedTableNullPartition() throws Exception {
-        RefreshTableAnalyzedStatement analysis = (RefreshTableAnalyzedStatement) analyze("refresh table parted PARTITION (date=null)");
-        assertThat(analysis.indexNames(), contains(Matchers.hasToString(".partitioned.parted.0400"))
-        );
+        AnalyzedRefreshTable analysis = e.analyze("REFRESH TABLE parted PARTITION (date=null)");
+        Set<Table<Symbol>> analyzedTables = analysis.tables().keySet();
+        assertThat(analyzedTables.size(), is(1));
+
+        List<Assignment<Symbol>> partitionProperties = analyzedTables.iterator().next().partitionProperties();
+        assertThat(partitionProperties.size(), is(1));
+        assertThat(partitionProperties.get(0).expressions(), contains(isLiteral(null)));
     }
 }

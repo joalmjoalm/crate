@@ -21,57 +21,81 @@
 
 package io.crate.integrationtests;
 
-
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
-import io.crate.blob.v2.BlobIndices;
+import io.crate.blob.BlobTransferStatus;
+import io.crate.blob.BlobTransferTarget;
+import io.crate.blob.v2.BlobAdminClient;
 import io.crate.test.utils.Blobs;
 import org.apache.http.Header;
-import org.apache.http.client.methods.*;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpDelete;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpHead;
+import org.apache.http.client.methods.HttpPut;
+import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.client.protocol.HttpClientContext;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.message.BasicHeader;
 import org.apache.http.util.EntityUtils;
 import org.apache.lucene.util.IOUtils;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.transport.InetSocketTransportAddress;
 import org.elasticsearch.http.HttpServerTransport;
+import org.junit.After;
 import org.junit.Before;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.core.Is.is;
 
 public abstract class BlobHttpIntegrationTest extends BlobIntegrationTestBase {
 
-    protected InetSocketAddress address;
-    protected InetSocketAddress address2;
+    protected InetSocketAddress dataNode1;
+    protected InetSocketAddress dataNode2;
+    protected InetSocketAddress randomNode;
 
     protected CloseableHttpClient httpClient = HttpClients.createDefault();
 
+    static {
+        System.setProperty("tests.short_timeouts", "true");
+    }
+
+
     @Before
     public void setup() throws ExecutionException, InterruptedException {
-        Iterable<HttpServerTransport> transports = internalCluster().getInstances(HttpServerTransport.class);
+        randomNode = internalCluster().getInstances(HttpServerTransport.class)
+            .iterator().next().boundAddress().publishAddress().address();
+        Iterable<HttpServerTransport> transports = internalCluster().getDataNodeInstances(HttpServerTransport.class);
         Iterator<HttpServerTransport> httpTransports = transports.iterator();
-        address = ((InetSocketTransportAddress) httpTransports.next().boundAddress().publishAddress()).address();
-        address2 = ((InetSocketTransportAddress) httpTransports.next().boundAddress().publishAddress()).address();
-        BlobIndices blobIndices = internalCluster().getInstance(BlobIndices.class);
+        dataNode1 = httpTransports.next().boundAddress().publishAddress().address();
+        dataNode2 = httpTransports.next().boundAddress().publishAddress().address();
+        BlobAdminClient blobAdminClient = internalCluster().getInstance(BlobAdminClient.class);
 
         Settings indexSettings = Settings.builder()
             .put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, 0)
             .put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, 2)
+            // SETTING_AUTO_EXPAND_REPLICAS is enabled by default
+            // but for this test it needs to be disabled so we can have 0 replicas
+            .put(IndexMetaData.SETTING_AUTO_EXPAND_REPLICAS, "false")
             .build();
-        blobIndices.createBlobTable("test", indexSettings).get();
-        blobIndices.createBlobTable("test_blobs2", indexSettings).get();
+        blobAdminClient.createBlobTable("test", indexSettings).get();
+        blobAdminClient.createBlobTable("test_blobs2", indexSettings).get();
 
         client().admin().indices().prepareCreate("test_no_blobs")
             .setSettings(
@@ -79,6 +103,24 @@ public abstract class BlobHttpIntegrationTest extends BlobIntegrationTestBase {
                     .put("number_of_shards", 2)
                     .put("number_of_replicas", 0).build()).execute().actionGet();
         ensureGreen();
+    }
+
+    @After
+    public void assertNoActiveTransfersRemaining() throws Exception {
+        Iterable<BlobTransferTarget> transferTargets = internalCluster().getInstances(BlobTransferTarget.class);
+        final Field activeTransfersField = BlobTransferTarget.class.getDeclaredField("activeTransfers");
+        activeTransfersField.setAccessible(true);
+        assertBusy(() -> {
+            for (BlobTransferTarget transferTarget : transferTargets) {
+                Map<UUID, BlobTransferStatus> activeTransfers = null;
+                try {
+                    activeTransfers = (Map<UUID, BlobTransferStatus>) activeTransfersField.get(transferTarget);
+                    assertThat(activeTransfers.keySet(), empty());
+                } catch (IllegalAccessException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        });
     }
 
     protected String blobUri(String digest) {
@@ -90,7 +132,7 @@ public abstract class BlobHttpIntegrationTest extends BlobIntegrationTestBase {
     }
 
     protected CloseableHttpResponse put(String uri, String body) throws IOException {
-        HttpPut httpPut = new HttpPut(Blobs.url(address, uri));
+        HttpPut httpPut = new HttpPut(Blobs.url(false, randomNode, uri));
         if (body != null) {
             StringEntity bodyEntity = new StringEntity(body);
             httpPut.setEntity(bodyEntity);
@@ -105,7 +147,7 @@ public abstract class BlobHttpIntegrationTest extends BlobIntegrationTestBase {
     }
 
     protected CloseableHttpResponse get(String uri) throws IOException {
-        return get(uri, null);
+        return get(uri, new Header[] { new BasicHeader("Origin", "http://example.com") });
     }
 
     protected boolean mget(String[] uris, Header[][] headers, final String[] expectedContent) throws Throwable {
@@ -124,7 +166,7 @@ public abstract class BlobHttpIntegrationTest extends BlobIntegrationTestBase {
                         Integer statusCode = res.getStatusLine().getStatusCode();
                         String resultContent = EntityUtils.toString(res.getEntity());
                         if (!resultContent.equals(expected)) {
-                            logger.warn(String.format(Locale.ENGLISH, "incorrect response %d -- length: %d expected: %d\n",
+                            logger.warn(String.format(Locale.ENGLISH, "incorrect response %d -- length: %d expected: %d%n",
                                 indexerId, resultContent.length(), expected.length()));
                         }
                         results.put(indexerId, (statusCode >= 200 && statusCode < 300 &&
@@ -138,17 +180,12 @@ public abstract class BlobHttpIntegrationTest extends BlobIntegrationTestBase {
             };
             thread.start();
         }
-        latch.await(30L, TimeUnit.SECONDS);
-        return Iterables.all(results.values(), new Predicate<Boolean>() {
-            @Override
-            public boolean apply(Boolean input) {
-                return input;
-            }
-        });
+        assertThat(latch.await(30L, TimeUnit.SECONDS), is(true));
+        return results.values().stream().allMatch(input -> input);
     }
 
     protected CloseableHttpResponse get(String uri, Header[] headers) throws IOException {
-        HttpGet httpGet = new HttpGet(String.format(Locale.ENGLISH, "http://%s:%s/_blobs/%s", address.getHostName(), address.getPort(), uri));
+        HttpGet httpGet = new HttpGet(String.format(Locale.ENGLISH, "http://%s:%s/_blobs/%s", dataNode1.getHostName(), dataNode1.getPort(), uri));
         if (headers != null) {
             httpGet.setHeaders(headers);
         }
@@ -156,16 +193,16 @@ public abstract class BlobHttpIntegrationTest extends BlobIntegrationTestBase {
     }
 
     protected CloseableHttpResponse head(String uri) throws IOException {
-        HttpHead httpHead = new HttpHead(String.format(Locale.ENGLISH, "http://%s:%s/_blobs/%s", address.getHostName(), address.getPort(), uri));
+        HttpHead httpHead = new HttpHead(String.format(Locale.ENGLISH, "http://%s:%s/_blobs/%s", dataNode1.getHostName(), dataNode1.getPort(), uri));
         return executeAndDefaultAssertions(httpHead);
     }
 
     protected CloseableHttpResponse delete(String uri) throws IOException {
-        HttpDelete httpDelete = new HttpDelete(String.format(Locale.ENGLISH, "http://%s:%s/_blobs/%s", address.getHostName(), address.getPort(), uri));
+        HttpDelete httpDelete = new HttpDelete(String.format(Locale.ENGLISH, "http://%s:%s/_blobs/%s", dataNode1.getHostName(), dataNode1.getPort(), uri));
         return executeAndDefaultAssertions(httpDelete);
     }
 
-    public List<String> getRedirectLocations(CloseableHttpClient client, String uri, InetSocketAddress address) throws IOException {
+    public static List<String> getRedirectLocations(CloseableHttpClient client, String uri, InetSocketAddress address) throws IOException {
         CloseableHttpResponse response = null;
         try {
             HttpClientContext context = HttpClientContext.create();

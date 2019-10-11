@@ -21,81 +21,82 @@
 
 package io.crate.blob;
 
-import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.replication.TransportReplicationAction;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.cluster.action.index.MappingUpdatedAction;
 import org.elasticsearch.cluster.action.shard.ShardStateAction;
+import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
-import org.elasticsearch.cluster.metadata.MetaData;
 import org.elasticsearch.cluster.routing.ShardIterator;
-import org.elasticsearch.common.collect.Tuple;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
+
+import java.io.IOException;
 
 public class TransportPutChunkAction extends TransportReplicationAction<PutChunkRequest, PutChunkReplicaRequest, PutChunkResponse> {
 
     private final BlobTransferTarget transferTarget;
 
     @Inject
-    public TransportPutChunkAction(Settings settings,
-                                   TransportService transportService,
+    public TransportPutChunkAction(TransportService transportService,
                                    ClusterService clusterService,
                                    IndicesService indicesService,
                                    ThreadPool threadPool,
                                    ShardStateAction shardStateAction,
                                    BlobTransferTarget transferTarget,
-                                   MappingUpdatedAction mappingUpdatedAction,
-                                   ActionFilters actionFilters,
                                    IndexNameExpressionResolver indexNameExpressionResolver) {
-        super(settings, PutChunkAction.NAME, transportService, clusterService,
-            indicesService, threadPool, shardStateAction, mappingUpdatedAction, actionFilters,
-            indexNameExpressionResolver, PutChunkRequest.class, PutChunkReplicaRequest.class, ThreadPool.Names.INDEX);
-
+        super(
+            PutChunkAction.NAME,
+            transportService,
+            clusterService,
+            indicesService,
+            threadPool,
+            shardStateAction,
+            indexNameExpressionResolver,
+            PutChunkRequest::new,
+            PutChunkReplicaRequest::new,
+            ThreadPool.Names.WRITE
+        );
         this.transferTarget = transferTarget;
     }
 
     @Override
-    protected PutChunkResponse newResponseInstance() {
-        return new PutChunkResponse();
+    protected PutChunkResponse read(StreamInput in) throws IOException {
+        return new PutChunkResponse(in);
     }
 
     @Override
-    protected void resolveRequest(MetaData metaData, String concreteIndex, PutChunkRequest request) {
+    protected void resolveRequest(IndexMetaData indexMetaData, PutChunkRequest request) {
         ShardIterator shardIterator = clusterService.operationRouting().indexShards(
-            clusterService.state(), concreteIndex, null, null, request.digest());
+            clusterService.state(), request.index(), null, request.digest());
         request.setShardId(shardIterator.shardId());
+        super.resolveRequest(indexMetaData, request);
     }
 
     @Override
-    protected Tuple<PutChunkResponse, PutChunkReplicaRequest> shardOperationOnPrimary(MetaData metaData,
-                                                                                      PutChunkRequest request) throws Throwable {
-        PutChunkResponse response = newResponseInstance();
+    protected PrimaryResult<PutChunkReplicaRequest, PutChunkResponse> shardOperationOnPrimary(PutChunkRequest request, IndexShard primary) {
+        PutChunkResponse response = new PutChunkResponse();
         transferTarget.continueTransfer(request, response);
-
-        final PutChunkReplicaRequest replicaRequest = new PutChunkReplicaRequest();
-        replicaRequest.setShardId(request.shardId());
-        replicaRequest.transferId = request.transferId();
-        replicaRequest.sourceNodeId = clusterService.localNode().id();
-        replicaRequest.currentPos = request.currentPos();
-        replicaRequest.content = request.content();
-        replicaRequest.isLast = request.isLast();
+        final PutChunkReplicaRequest replicaRequest = new PutChunkReplicaRequest(
+            request.shardId(),
+            clusterService.localNode().getId(),
+            request.transferId(),
+            request.currentPos(),
+            request.content(),
+            request.isLast()
+        );
         replicaRequest.index(request.index());
-        return new Tuple<>(response, replicaRequest);
+        return new PrimaryResult<>(replicaRequest, response);
     }
 
     @Override
-    protected void shardOperationOnReplica(PutChunkReplicaRequest shardRequest) {
-        PutChunkResponse response = newResponseInstance();
-        transferTarget.continueTransfer(shardRequest, response, shardRequest.shardId().id());
-    }
-
-    @Override
-    protected boolean checkWriteConsistency() {
-        return true;
+    protected ReplicaResult shardOperationOnReplica(PutChunkReplicaRequest shardRequest, IndexShard replica) {
+        PutChunkResponse response = new PutChunkResponse();
+        transferTarget.continueTransfer(shardRequest, response);
+        return new ReplicaResult();
     }
 
     @Override

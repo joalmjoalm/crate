@@ -22,25 +22,33 @@
 
 package io.crate.testing;
 
+import io.crate.action.sql.Option;
 import io.crate.action.sql.SessionContext;
-import io.crate.analyze.AnalysisMetaData;
 import io.crate.analyze.ParamTypeHints;
 import io.crate.analyze.ParameterContext;
 import io.crate.analyze.expressions.ExpressionAnalysisContext;
 import io.crate.analyze.expressions.ExpressionAnalyzer;
 import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.analyze.relations.FieldResolver;
-import io.crate.analyze.relations.FullQualifedNameFieldProvider;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.core.collections.Row;
-import io.crate.core.collections.RowN;
-import io.crate.metadata.*;
-import io.crate.operation.operator.OperatorModule;
-import io.crate.operation.predicate.PredicateModule;
-import io.crate.operation.scalar.ScalarFunctionModule;
-import io.crate.operation.tablefunctions.TableFunctionModule;
+import io.crate.analyze.relations.FullQualifiedNameFieldProvider;
+import io.crate.analyze.relations.ParentRelations;
+import io.crate.auth.user.User;
+import io.crate.data.Row;
+import io.crate.data.RowN;
+import io.crate.execution.engine.aggregation.impl.AggregationImplModule;
+import io.crate.execution.engine.window.WindowFunctionModule;
+import io.crate.expression.eval.EvaluatingNormalizer;
+import io.crate.expression.operator.OperatorModule;
+import io.crate.expression.predicate.PredicateModule;
+import io.crate.expression.scalar.ScalarFunctionModule;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.tablefunctions.TableFunctionModule;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
+import io.crate.metadata.RowGranularity;
 import io.crate.sql.parser.SqlParser;
 import io.crate.sql.tree.QualifiedName;
+import org.elasticsearch.common.inject.AbstractModule;
 import org.elasticsearch.common.inject.Injector;
 import org.elasticsearch.common.inject.ModulesBuilder;
 
@@ -48,55 +56,58 @@ import javax.annotation.Nullable;
 import java.util.Collections;
 import java.util.Map;
 
-import static org.mockito.Mockito.mock;
-
 public class SqlExpressions {
 
     private final ExpressionAnalyzer expressionAnalyzer;
     private final ExpressionAnalysisContext expressionAnalysisCtx;
     private final Injector injector;
-    private final AnalysisMetaData analysisMetaData;
+    private final CoordinatorTxnCtx coordinatorTxnCtx;
+    private final EvaluatingNormalizer normalizer;
+    private final Functions functions;
 
     public SqlExpressions(Map<QualifiedName, AnalyzedRelation> sources) {
-        this(sources, null, null);
-    }
-
-
-    public SqlExpressions(Map<QualifiedName, AnalyzedRelation> sources, Object[] parameters) {
-        this(sources, null, parameters);
+        this(sources, null, null, User.CRATE_USER);
     }
 
     public SqlExpressions(Map<QualifiedName, AnalyzedRelation> sources,
                           @Nullable FieldResolver fieldResolver) {
-        this(sources, fieldResolver, null);
+        this(sources, fieldResolver, null, User.CRATE_USER);
     }
 
     public SqlExpressions(Map<QualifiedName, AnalyzedRelation> sources,
                           @Nullable FieldResolver fieldResolver,
-                          @Nullable Object[] parameters) {
+                          @Nullable Object[] parameters,
+                          User user,
+                          AbstractModule... additionalModules) {
         ModulesBuilder modulesBuilder = new ModulesBuilder()
             .add(new OperatorModule())
+            .add(new AggregationImplModule())
             .add(new ScalarFunctionModule())
+            .add(new WindowFunctionModule())
             .add(new TableFunctionModule())
             .add(new PredicateModule());
-        injector = modulesBuilder.createInjector();
-        NestedReferenceResolver referenceResolver = new NestedReferenceResolver() {
-            @Override
-            public ReferenceImplementation<?> getImplementation(Reference refInfo) {
-                throw new UnsupportedOperationException("getImplementation not implemented");
+        if (additionalModules != null) {
+            for (AbstractModule module : additionalModules) {
+                modulesBuilder.add(module);
             }
-        };
-        Schemas schemas = mock(Schemas.class);
-        analysisMetaData = new AnalysisMetaData(injector.getInstance(Functions.class), schemas, referenceResolver);
+        }
+        injector = modulesBuilder.createInjector();
+        functions = injector.getInstance(Functions.class);
+        coordinatorTxnCtx = new CoordinatorTxnCtx(new SessionContext(Option.NONE, user));
         expressionAnalyzer = new ExpressionAnalyzer(
-            analysisMetaData,
-            SessionContext.SYSTEM_SESSION,
+            functions,
+            coordinatorTxnCtx,
             parameters == null
                 ? ParamTypeHints.EMPTY
                 : new ParameterContext(new RowN(parameters), Collections.<Row>emptyList()),
-            new FullQualifedNameFieldProvider(sources),
-            fieldResolver);
-        expressionAnalysisCtx = new ExpressionAnalysisContext(new StmtCtx());
+            new FullQualifiedNameFieldProvider(
+                sources,
+                ParentRelations.NO_PARENTS,
+                coordinatorTxnCtx.sessionContext().searchPath().currentSchema()),
+            null
+        );
+        normalizer = new EvaluatingNormalizer(functions, RowGranularity.DOC, null, fieldResolver);
+        expressionAnalysisCtx = new ExpressionAnalysisContext();
     }
 
     public Symbol asSymbol(String expression) {
@@ -104,14 +115,22 @@ public class SqlExpressions {
     }
 
     public Symbol normalize(Symbol symbol) {
-        return expressionAnalyzer.normalize(symbol, expressionAnalysisCtx.statementContext());
+        return normalizer.normalize(symbol, coordinatorTxnCtx);
     }
 
     public <T> T getInstance(Class<T> clazz) {
         return injector.getInstance(clazz);
     }
 
-    public AnalysisMetaData analysisMD() {
-        return analysisMetaData;
+    public Functions functions() {
+        return functions;
+    }
+
+    public void setDefaultSchema(String schema) {
+        this.coordinatorTxnCtx.sessionContext().setSearchPath(schema);
+    }
+
+    public void setSearchPath(String... schemas) {
+        this.coordinatorTxnCtx.sessionContext().setSearchPath(schemas);
     }
 }

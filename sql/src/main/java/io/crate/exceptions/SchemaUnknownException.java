@@ -21,14 +21,43 @@
 
 package io.crate.exceptions;
 
-import java.util.Locale;
+import io.crate.sql.Identifiers;
 
-public class SchemaUnknownException extends ResourceUnknownException {
+import java.util.List;
+import java.util.Locale;
+import java.util.stream.Collectors;
+
+public class SchemaUnknownException extends ResourceUnknownException implements SchemaScopeException {
 
     private static final String MESSAGE_TMPL = "Schema '%s' unknown";
 
+    private final String schemaName;
+
+    public static SchemaUnknownException of(String schema, List<String> candidates) {
+        switch (candidates.size()) {
+            case 0:
+                return new SchemaUnknownException(schema);
+
+            case 1:
+                return new SchemaUnknownException(
+                    schema,
+                    "Schema '" + schema + "' unknown. Maybe you meant '" + Identifiers.quoteIfNeeded(candidates.get(0)) + "'");
+
+            default:
+                String errorMsg = "Schema '" + schema + "' unknown. Maybe you meant one of: " + candidates.stream()
+                    .map(Identifiers::quoteIfNeeded)
+                    .collect(Collectors.joining(", "));
+                return new SchemaUnknownException(schema, errorMsg);
+        }
+    }
+
     public SchemaUnknownException(String schema) {
-        super(String.format(Locale.ENGLISH, MESSAGE_TMPL, schema));
+        this(schema, String.format(Locale.ENGLISH, MESSAGE_TMPL, schema));
+    }
+
+    private SchemaUnknownException(String schema, String errorMessage) {
+        super(errorMessage);
+        this.schemaName = schema;
     }
 
     @Override
@@ -36,4 +65,8 @@ public class SchemaUnknownException extends ResourceUnknownException {
         return 5;
     }
 
+    @Override
+    public String getSchemaName() {
+        return schemaName;
+    }
 }

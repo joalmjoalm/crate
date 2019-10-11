@@ -23,25 +23,22 @@ package io.crate.sql.tree;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
-import com.google.common.base.Optional;
-
-import javax.annotation.Nullable;
 
 public class NamedProperties extends Node {
 
     private final String ident;
-    private final Optional<GenericProperties> properties;
+    private final GenericProperties<Expression> properties;
 
-    public NamedProperties(String ident, @Nullable GenericProperties properties) {
+    public NamedProperties(String ident, GenericProperties<Expression> properties) {
         this.ident = ident;
-        this.properties = Optional.fromNullable(properties);
+        this.properties = properties;
     }
 
     public String ident() {
         return ident;
     }
 
-    public Optional<GenericProperties> properties() {
+    public GenericProperties<Expression> properties() {
         return properties;
     }
 

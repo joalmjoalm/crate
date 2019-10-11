@@ -22,31 +22,28 @@
 package io.crate.sql.tree;
 
 import com.google.common.base.Objects;
-import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+
+import javax.annotation.Nullable;
 
 public class SingleColumn
     extends SelectItem {
-    private Optional<String> alias;
+    @Nullable
+    private String alias;
     private Expression expression;
 
-    public SingleColumn(Expression expression, Optional<String> alias) {
+    public SingleColumn(Expression expression, @Nullable String alias) {
         Preconditions.checkNotNull(expression, "expression is null");
-        Preconditions.checkNotNull(alias, "alias is null");
-
         this.expression = expression;
         this.alias = alias;
     }
 
-    public SingleColumn(Expression expression, String alias) {
-        this(expression, Optional.of(alias));
-    }
-
     public SingleColumn(Expression expression) {
-        this(expression, Optional.<String>absent());
+        this(expression, null);
     }
 
-    public Optional<String> getAlias() {
+    @Nullable
+    public String getAlias() {
         return alias;
     }
 
@@ -72,10 +69,9 @@ public class SingleColumn
     }
 
     public String toString() {
-        if (alias.isPresent()) {
-            return expression.toString() + " " + alias.get();
+        if (alias != null) {
+            return expression.toString() + " " + alias;
         }
-
         return expression.toString();
     }
 

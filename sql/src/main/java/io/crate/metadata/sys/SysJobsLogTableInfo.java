@@ -21,47 +21,71 @@
 
 package io.crate.metadata.sys;
 
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
+import io.crate.expression.reference.sys.job.JobContextLog;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
 import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
 import io.crate.metadata.RowGranularity;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
 import io.crate.metadata.table.ColumnRegistrar;
 import io.crate.metadata.table.StaticTableInfo;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
+import io.crate.types.ObjectType;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.node.DiscoveryNode;
 
-import javax.annotation.Nullable;
-import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
 
-@Singleton
-public class SysJobsLogTableInfo extends StaticTableInfo {
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.execution.engine.collect.NestableCollectExpression.withNullableProperty;
+import static io.crate.types.DataTypes.STRING;
+import static io.crate.types.DataTypes.STRING_ARRAY;
+import static io.crate.types.DataTypes.TIMESTAMPZ;
 
-    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "jobs_log");
-    private final ClusterService clusterService;
+public class SysJobsLogTableInfo extends StaticTableInfo<JobContextLog> {
 
-    public static class Columns {
-        public static final ColumnIdent ID = new ColumnIdent("id");
-        public static final ColumnIdent STMT = new ColumnIdent("stmt");
-        public static final ColumnIdent STARTED = new ColumnIdent("started");
-        public static final ColumnIdent ENDED = new ColumnIdent("ended");
-        public static final ColumnIdent ERROR = new ColumnIdent("error");
+    public static final RelationName IDENT = new RelationName(SysSchemaInfo.NAME, "jobs_log");
+
+    public static Map<ColumnIdent, RowCollectExpressionFactory<JobContextLog>> expressions(Supplier<DiscoveryNode> localNode) {
+        return columnRegistrar(localNode).expressions();
     }
 
-    private final static List<ColumnIdent> primaryKeys = ImmutableList.of(Columns.ID);
+    private static ColumnRegistrar<JobContextLog> columnRegistrar(Supplier<DiscoveryNode> localNode) {
+        return new ColumnRegistrar<JobContextLog>(IDENT, RowGranularity.DOC)
+                  .register("id", STRING, () -> forFunction(log -> log.id().toString()))
+                  .register("username", STRING, () -> forFunction(JobContextLog::username))
+                  .register("stmt", STRING, () -> forFunction(JobContextLog::statement))
+                  .register("started", TIMESTAMPZ, () -> forFunction(JobContextLog::started))
+                  .register("ended", TIMESTAMPZ,() -> forFunction(JobContextLog::ended))
+                  .register("error", STRING, () -> forFunction(JobContextLog::errorMessage))
+                  .register("classification", ObjectType.builder()
+                      .setInnerType("type", STRING)
+                      .setInnerType("labels", STRING_ARRAY)
+                      .build(), () -> withNullableProperty(JobContextLog::classification, c -> ImmutableMap.builder()
+                      .put("type", c.type().name())
+                      .put("labels", c.labels().toArray(new String[0]))
+                      .build()))
+            .register("classification","type", STRING,
+                () -> withNullableProperty(JobContextLog::classification, c -> c.type().name()))
+            .register("classification", "labels", STRING_ARRAY,
+                () -> withNullableProperty(JobContextLog::classification, c -> c.labels().toArray(new String[0])))
+            .register("node", ObjectType.builder()
+                .setInnerType("id", STRING)
+                .setInnerType("name", STRING)
+                .build(), () -> forFunction(ignored -> Map.of(
+                    "id", localNode.get().getId(),
+                    "name", localNode.get().getName()
+                )))
+            .register("node", "id", STRING, () -> forFunction(ignored -> localNode.get().getId()))
+            .register("node", "name", STRING, () -> forFunction(ignored -> localNode.get().getName()));
+    }
 
-    @Inject
-    public SysJobsLogTableInfo(ClusterService clusterService) {
-        super(IDENT, new ColumnRegistrar(IDENT, RowGranularity.DOC)
-            .register(Columns.ID, DataTypes.STRING)
-            .register(Columns.STMT, DataTypes.STRING)
-            .register(Columns.STARTED, DataTypes.TIMESTAMP)
-            .register(Columns.ENDED, DataTypes.TIMESTAMP)
-            .register(Columns.ERROR, DataTypes.STRING), primaryKeys);
-        this.clusterService = clusterService;
+    public SysJobsLogTableInfo(Supplier<DiscoveryNode> localNode) {
+        super(IDENT, columnRegistrar(localNode), "id");
     }
 
     @Override
@@ -70,7 +94,11 @@ public class SysJobsLogTableInfo extends StaticTableInfo {
     }
 
     @Override
-    public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return Routing.forTableOnAllNodes(IDENT, clusterService.state().nodes());
+    public Routing getRouting(ClusterState clusterState,
+                              RoutingProvider routingProvider,
+                              WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
+        return Routing.forTableOnAllNodes(IDENT, clusterState.getNodes());
     }
 }

@@ -22,36 +22,46 @@
 
 package org.elasticsearch.bootstrap;
 
-import io.crate.Version;
+import io.crate.bootstrap.BootstrapException;
 import io.crate.node.CrateNode;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.core.Appender;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.ConsoleAppender;
+import org.apache.logging.log4j.core.config.Configurator;
 import org.apache.lucene.util.Constants;
+import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.StringHelper;
+import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.Version;
+import org.elasticsearch.cli.UserException;
 import org.elasticsearch.common.PidFile;
 import org.elasticsearch.common.SuppressForbidden;
-import org.elasticsearch.common.cli.CliTool;
-import org.elasticsearch.common.cli.Terminal;
 import org.elasticsearch.common.inject.CreationException;
-import org.elasticsearch.common.lease.Releasables;
-import org.elasticsearch.common.logging.ESLogger;
+import org.elasticsearch.common.logging.LogConfigurator;
 import org.elasticsearch.common.logging.Loggers;
-import org.elasticsearch.common.logging.log4j.LogConfigurator;
+import org.elasticsearch.common.network.IfConfig;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.transport.BoundTransportAddress;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.monitor.jvm.JvmInfo;
 import org.elasticsearch.monitor.os.OsProbe;
 import org.elasticsearch.monitor.process.ProcessProbe;
-import org.elasticsearch.node.internal.CrateSettingsPreparer;
+import org.elasticsearch.node.Node;
+import org.elasticsearch.node.NodeValidationException;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
-import java.nio.file.Path;
-import java.util.Locale;
+import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 /**
- * ES_COPY_OF: core/src/main/java/org/elasticsearch/bootstrap/Bootstrap.java
  * <p>
- * This is a copy of {@link Bootstrap}
+ * This is a copy of ES src/main/java/org/elasticsearch/bootstrap/Bootstrap.java.
  * <p>
  * With following patches:
  * - CrateNode instead of Node is build/started in order to load the CrateCorePlugin
@@ -70,44 +80,27 @@ public class BootstrapProxy {
      * creates a new instance
      */
     BootstrapProxy() {
-        keepAliveThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    keepAliveLatch.await();
-                } catch (InterruptedException e) {
-                    // bail out
-                }
+        keepAliveThread = new Thread(() -> {
+            try {
+                keepAliveLatch.await();
+            } catch (InterruptedException e) {
+                // bail out
             }
         }, "crate[keepAlive/" + Version.CURRENT + "]");
         keepAliveThread.setDaemon(false);
         // keep this thread alive (non daemon thread) until we shutdown
-        Runtime.getRuntime().addShutdownHook(new Thread() {
-            @Override
-            public void run() {
-                keepAliveLatch.countDown();
-            }
-        });
+        Runtime.getRuntime().addShutdownHook(new Thread(keepAliveLatch::countDown));
     }
 
     /**
      * initialize native resources
      */
-    public static void initializeNatives(Path tmpFile, boolean mlockAll, boolean seccomp, boolean ctrlHandler) {
-        final ESLogger logger = Loggers.getLogger(Bootstrap.class);
+    static void initializeNatives(boolean mlockAll, boolean ctrlHandler) {
+        final Logger logger = LogManager.getLogger(BootstrapProxy.class);
 
         // check if the user is running as root, and bail
         if (Natives.definitelyRunningAsRoot()) {
-            if (Boolean.parseBoolean(System.getProperty("es.insecure.allow.root"))) {
-                logger.warn("running as ROOT user. this is a bad idea!");
-            } else {
-                throw new RuntimeException("don't run elasticsearch as root.");
-            }
-        }
-
-        // enable secure computing mode
-        if (seccomp) {
-            Natives.trySeccomp(tmpFile);
+            throw new RuntimeException("can not run crate as root");
         }
 
         // mlockall if requested
@@ -121,25 +114,30 @@ public class BootstrapProxy {
 
         // listener for windows close event
         if (ctrlHandler) {
-            Natives.addConsoleCtrlHandler(new ConsoleCtrlHandler() {
-                @Override
-                public boolean handle(int code) {
-                    if (CTRL_CLOSE_EVENT == code) {
-                        logger.info("running graceful exit on windows");
-                        Bootstrap.stop();
-                        return true;
+            Natives.addConsoleCtrlHandler(code -> {
+                if (ConsoleCtrlHandler.CTRL_CLOSE_EVENT == code) {
+                    logger.info("running graceful exit on windows");
+                    try {
+                        BootstrapProxy.stop();
+                    } catch (IOException e) {
+                        throw new ElasticsearchException("failed to stop node", e);
                     }
-                    return false;
+                    return true;
                 }
+                return false;
             });
         }
 
         // force remainder of JNA to be loaded (if available).
         try {
             JNAKernel32Library.getInstance();
-        } catch (Throwable ignored) {
+        } catch (Exception ignored) {
             // we've already logged this.
         }
+
+        Natives.trySetMaxNumberOfThreads();
+        Natives.trySetMaxSizeVirtualMemory();
+        Natives.trySetMaxFileSize();
 
         // init lucene random seed. it will use /dev/urandom where available:
         StringHelper.randomId();
@@ -149,185 +147,141 @@ public class BootstrapProxy {
         // Force probes to be loaded
         ProcessProbe.getInstance();
         OsProbe.getInstance();
+        JvmInfo.jvmInfo();
     }
 
-    private void setup(boolean addShutdownHook, Settings settings, Environment environment) throws Exception {
-        initializeNatives(environment.tmpFile(),
-            settings.getAsBoolean("bootstrap.mlockall", false),
-            settings.getAsBoolean("bootstrap.seccomp", true),
-            settings.getAsBoolean("bootstrap.ctrlhandler", true));
+    private void setup(boolean addShutdownHook, Environment environment) throws BootstrapException {
+        Settings settings = environment.settings();
+        initializeNatives(
+            BootstrapSettings.MEMORY_LOCK_SETTING.get(settings),
+            BootstrapSettings.CTRLHANDLER_SETTING.get(settings));
 
         // initialize probes before the security manager is installed
         initializeProbes();
 
         if (addShutdownHook) {
-            Runtime.getRuntime().addShutdownHook(new Thread() {
-                @Override
-                public void run() {
-                    if (node != null) {
-                        node.close();
-                    }
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    IOUtils.close(node);
+                    LoggerContext context = (LoggerContext) LogManager.getContext(false);
+                    Configurator.shutdown(context);
+                } catch (IOException ex) {
+                    throw new ElasticsearchException("failed to stop node", ex);
                 }
-            });
+            }));
         }
 
-        // look for jar hell
-        JarHell.checkJarHell();
-
-        // We do not need to reload system properties here as we have already applied them in building the settings and
-        // reloading could cause multiple prompts to the user for values if a system property was specified with a prompt
-        // placeholder
-        Settings nodeSettings = Settings.settingsBuilder()
-            .put(settings)
-            .put(CrateSettingsPreparer.IGNORE_SYSTEM_PROPERTIES_SETTING, true)
-            .build();
-
-        Environment crateEnvironment = CrateSettingsPreparer.prepareEnvironment(nodeSettings, null);
-
-        /**
-         * DISABLED setup of security manager due to policy problems with plugins (e.g. SigarPlugin will not work)
-         */
-        // install SM after natives, shutdown hooks, etc.
-        //setupSecurity(settings, crateEnvironment);
-
-        node = new CrateNode(crateEnvironment);
-    }
-
-    /**
-     * option for elasticsearch.yml etc to turn off our security manager completely,
-     * for example if you want to have your own configuration or just disable.
-     */
-    // TODO: remove this: http://www.openbsd.org/papers/hackfest2015-pledge/mgp00005.jpg
-    static final String SECURITY_SETTING = "security.manager.enabled";
-    /**
-     * option for elasticsearch.yml to fully respect the system policy, including bad defaults
-     * from java.
-     */
-    // TODO: remove this hack when insecure defaults are removed from java
-    static final String SECURITY_FILTER_BAD_DEFAULTS_SETTING = "security.manager.filter_bad_defaults";
-
-    private void setupSecurity(Settings settings, Environment environment) throws Exception {
-        if (settings.getAsBoolean(SECURITY_SETTING, true)) {
-            Security.configure(environment, settings.getAsBoolean(SECURITY_FILTER_BAD_DEFAULTS_SETTING, true));
-        }
-    }
-
-    @SuppressForbidden(reason = "Exception#printStackTrace()")
-    private static void setupLogging(Settings settings, Environment environment) {
         try {
-            Class.forName("org.apache.log4j.Logger");
-            LogConfigurator.configure(settings, true);
-        } catch (ClassNotFoundException e) {
-            // no log4j
-        } catch (NoClassDefFoundError e) {
-            // no log4j
-        } catch (Exception e) {
-            sysError("Failed to configure logging...", false);
-            e.printStackTrace();
+            // look for jar hell
+            final Logger logger = LogManager.getLogger(JarHell.class);
+            JarHell.checkJarHell(logger::debug);
+        } catch (IOException | URISyntaxException e) {
+            throw new BootstrapException(e);
         }
+
+        IfConfig.logIfNecessary();
+
+        node = new CrateNode(environment) {
+
+            @Override
+            protected void validateNodeBeforeAcceptingRequests(BoundTransportAddress boundTransportAddress,
+                                                               List<BootstrapCheck> bootstrapChecks) throws NodeValidationException {
+                BootstrapChecks.check(settings, boundTransportAddress, bootstrapChecks);
+            }
+        };
+
     }
 
-    private static Environment initialSettings(boolean foreground) {
-        Terminal terminal = foreground ? Terminal.DEFAULT : null;
-        return CrateSettingsPreparer.prepareEnvironment(Settings.EMPTY, terminal);
-    }
-
-    private void start() {
+    private void start() throws NodeValidationException {
         node.start();
         keepAliveThread.start();
     }
 
-    public static void stop() {
+    public static void stop() throws IOException {
         try {
-            Releasables.close(INSTANCE.node);
+            IOUtils.close(INSTANCE.node);
         } finally {
             INSTANCE.keepAliveLatch.countDown();
         }
     }
 
     /**
-     * This method is invoked by {@link Elasticsearch#main(String[])}
-     * to startup elasticsearch.
+     * This method is invoked by {@link io.crate.bootstrap.CrateDB#main(String[])} to start CrateDB.
      */
-    public static void init(String[] args) throws Throwable {
-        // Set the system property before anything has a chance to trigger its use
-        System.setProperty("es.logger.prefix", "");
-
-        BootstrapCLIParser bootstrapCLIParser = new BootstrapCLIParser();
-        CliTool.ExitStatus status = bootstrapCLIParser.execute(args);
-
-        if (CliTool.ExitStatus.OK != status) {
-            System.exit(status.status());
-        }
+    public static void init(final boolean foreground,
+                            final boolean quiet,
+                            Environment environment) throws BootstrapException, NodeValidationException, UserException {
+        // force the class initializer for BootstrapInfo to run before
+        // the security manager is installed
+        BootstrapInfo.init();
 
         INSTANCE = new BootstrapProxy();
-
-        boolean foreground = !"false".equals(System.getProperty("es.foreground", System.getProperty("es-foreground")));
-        // handle the wrapper system property, if its a service, don't run as a service
-        if (System.getProperty("wrapper.service", "XXX").equalsIgnoreCase("true")) {
-            foreground = false;
-        }
-
-        Environment environment = initialSettings(foreground);
-        Settings settings = environment.settings();
-        setupLogging(settings, environment);
-        checkForCustomConfFile();
-
-        if (environment.pidFile() != null) {
-            PidFile.create(environment.pidFile(), true);
-        }
-
-        if (System.getProperty("es.max-open-files", "false").equals("true")) {
-            ESLogger logger = Loggers.getLogger(Bootstrap.class);
-            logger.info("max_open_files [{}]", ProcessProbe.getInstance().getMaxFileDescriptorCount());
-        }
-
-        // warn if running using the client VM
-        if (JvmInfo.jvmInfo().getVmName().toLowerCase(Locale.ROOT).contains("client")) {
-            ESLogger logger = Loggers.getLogger(Bootstrap.class);
-            logger.warn("jvm uses the client vm, make sure to run `java` with the server vm for best performance by adding `-server` to the command line");
-        }
-
+        LogConfigurator.setNodeName(Node.NODE_NAME_SETTING.get(environment.settings()));
         try {
-            if (!foreground) {
-                Loggers.disableConsoleLogging();
+            LogConfigurator.configure(environment);
+        } catch (IOException e) {
+            throw new BootstrapException(e);
+        }
+        if (environment.pidFile() != null) {
+            try {
+                PidFile.create(environment.pidFile(), true);
+            } catch (IOException e) {
+                throw new BootstrapException(e);
+            }
+        }
+
+        final boolean closeStandardStreams = (foreground == false) || quiet;
+        try {
+            if (closeStandardStreams) {
+                final Logger rootLogger = LogManager.getRootLogger();
+                final Appender maybeConsoleAppender = Loggers.findAppender(rootLogger, ConsoleAppender.class);
+                if (maybeConsoleAppender != null) {
+                    Loggers.removeAppender(rootLogger, maybeConsoleAppender);
+                }
                 closeSystOut();
             }
 
-            // fail if using broken version
-            JVMCheck.check();
+            // fail if somebody replaced the lucene jars
+            checkLucene();
 
-            INSTANCE.setup(true, settings, environment);
+            // install the default uncaught exception handler; must be done before security is
+            // initialized as we do not want to grant the runtime permission
+            // setDefaultUncaughtExceptionHandler
+            Thread.setDefaultUncaughtExceptionHandler(new ElasticsearchUncaughtExceptionHandler());
+
+            INSTANCE.setup(true, environment);
 
             INSTANCE.start();
 
-            if (!foreground) {
+            if (closeStandardStreams) {
                 closeSysError();
             }
-        } catch (Throwable e) {
+        } catch (NodeValidationException | RuntimeException e) {
             // disable console logging, so user does not see the exception twice (jvm will show it already)
-            if (foreground) {
-                Loggers.disableConsoleLogging();
+            final Logger rootLogger = LogManager.getRootLogger();
+            final Appender maybeConsoleAppender = Loggers.findAppender(rootLogger, ConsoleAppender.class);
+            if (foreground && maybeConsoleAppender != null) {
+                Loggers.removeAppender(rootLogger, maybeConsoleAppender);
             }
-            ESLogger logger = Loggers.getLogger(Bootstrap.class);
-            if (INSTANCE.node != null) {
-                logger = Loggers.getLogger(Bootstrap.class, INSTANCE.node.settings().get("name"));
-            }
+            Logger logger = LogManager.getLogger(BootstrapProxy.class);
             // HACK, it sucks to do this, but we will run users out of disk space otherwise
             if (e instanceof CreationException) {
                 // guice: log the shortened exc to the log file
                 ByteArrayOutputStream os = new ByteArrayOutputStream();
-                PrintStream ps = new PrintStream(os, false, "UTF-8");
-                new StartupError(e).printStackTrace(ps);
+                PrintStream ps = null;
+                ps = new PrintStream(os, false, StandardCharsets.UTF_8);
+                new StartupException(e).printStackTrace(ps);
                 ps.flush();
-                logger.error("Guice Exception: {}", os.toString("UTF-8"));
+                logger.error("Guice Exception: {}", os.toString(StandardCharsets.UTF_8));
+            } else if (e instanceof NodeValidationException) {
+                logger.error("node validation exception\n{}", e.getMessage());
             } else {
                 // full exception
                 logger.error("Exception", e);
             }
             // re-enable it if appropriate, so they can see any logging during the shutdown process
-            if (foreground) {
-                Loggers.enableConsoleLogging();
+            if (foreground && maybeConsoleAppender != null) {
+                Loggers.addAppender(rootLogger, maybeConsoleAppender);
             }
 
             throw e;
@@ -344,28 +298,15 @@ public class BootstrapProxy {
         System.err.close();
     }
 
-    @SuppressForbidden(reason = "System#err")
-    private static void sysError(String line, boolean flush) {
-        System.err.println(line);
-        if (flush) {
-            System.err.flush();
-        }
+    @SuppressForbidden(reason = "Allowed to exit explicitly in bootstrap phase")
+    private static void exit(int status) {
+        System.exit(status);
     }
 
-    private static void checkForCustomConfFile() {
-        String confFileSetting = System.getProperty("es.default.config");
-        checkUnsetAndMaybeExit(confFileSetting, "es.default.config");
-        confFileSetting = System.getProperty("es.config");
-        checkUnsetAndMaybeExit(confFileSetting, "es.config");
-        confFileSetting = System.getProperty("elasticsearch.config");
-        checkUnsetAndMaybeExit(confFileSetting, "elasticsearch.config");
-    }
-
-    private static void checkUnsetAndMaybeExit(String confFileSetting, String settingName) {
-        if (confFileSetting != null && confFileSetting.isEmpty() == false) {
-            ESLogger logger = Loggers.getLogger(Bootstrap.class);
-            logger.info("{} is no longer supported. crate.yml must be placed in the config directory and cannot be renamed.", settingName);
-            System.exit(1);
+    private static void checkLucene() {
+        if (org.elasticsearch.Version.CURRENT.luceneVersion.equals(org.apache.lucene.util.Version.LATEST) == false) {
+            throw new AssertionError("Lucene version mismatch this version of CrateDB requires lucene version ["
+                                     + org.elasticsearch.Version.CURRENT.luceneVersion + "]  but the current lucene version is [" + org.apache.lucene.util.Version.LATEST + "]");
         }
     }
 }

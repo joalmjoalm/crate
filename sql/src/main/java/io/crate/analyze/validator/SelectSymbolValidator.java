@@ -21,21 +21,21 @@
 
 package io.crate.analyze.validator;
 
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.MatchPredicate;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolVisitor;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.MatchPredicate;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolVisitor;
 
 import java.util.Collection;
 import java.util.Locale;
 
 public class SelectSymbolValidator {
 
-    private final static InnerValidator INNER_VALIDATOR = new InnerValidator();
+    private static final InnerValidator INNER_VALIDATOR = new InnerValidator();
 
     public static void validate(Collection<Symbol> symbols) {
         for (Symbol symbol : symbols) {
-            INNER_VALIDATOR.process(symbol, null);
+            symbol.accept(INNER_VALIDATOR, null);
         }
     }
 
@@ -46,16 +46,14 @@ public class SelectSymbolValidator {
             switch (symbol.info().type()) {
                 case SCALAR:
                 case AGGREGATE:
+                case TABLE:
                     break;
-                case PREDICATE:
-                    throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
-                        "%s predicate cannot be selected", symbol.info().ident().name()));
                 default:
                     throw new UnsupportedOperationException(String.format(Locale.ENGLISH,
                         "FunctionInfo.Type %s not handled", symbol.info().type()));
             }
             for (Symbol arg : symbol.arguments()) {
-                process(arg, context);
+                arg.accept(this, context);
             }
             return null;
         }

@@ -22,24 +22,22 @@
 package io.crate.integrationtests;
 
 
-import com.google.common.collect.ImmutableSet;
-import com.google.common.util.concurrent.SettableFuture;
-import io.crate.action.sql.*;
+import io.crate.action.sql.SQLActionException;
+import io.crate.testing.SQLResponse;
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.After;
 import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
-@ESIntegTestCase.ClusterScope(numDataNodes = 1, numClientNodes = 0)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(numDataNodes = 1, numClientNodes = 0, supportsDedicatedMasters = false)
 public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -49,7 +47,8 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
         long expectedUnassignedShards = numShards * numReplicas; // calculation is correct for cluster.numDataNodes = 1
 
         execute("create table locations (id integer primary key, name string) " +
-                "clustered into " + numShards + " shards with(number_of_replicas=" + numReplicas + ")");
+                "clustered into " + numShards + " shards with(number_of_replicas=" + numReplicas +
+                ", \"write.wait_for_active_shards\"=1)");
         ensureYellow();
 
         execute("select count(*) from sys.shards where table_name = 'locations' and state = 'UNASSIGNED'");
@@ -64,7 +63,9 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
         int numShards = 5;
 
         execute("create table locations (id integer primary key, name string) " +
-                "clustered into " + numShards + " shards with(number_of_replicas=" + numReplicas + ")");
+                "clustered into " + numShards +
+                " shards with(number_of_replicas=" + numReplicas +
+                ", \"write.wait_for_active_shards\"=1)");
         ensureYellow();
 
         execute("select \"primary\", state, count(*) from sys.shards where table_name = 'locations' group by \"primary\", state order by \"primary\"");
@@ -84,7 +85,7 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
 
         execute("create table locations (id integer primary key, name string) " +
                 "partitioned by (id) clustered into " + numShards + " shards with(number_of_replicas=" + numReplicas +
-                ")");
+                ", \"write.wait_for_active_shards\"=1)");
         execute("insert into locations (id, name) values (1, 'name1')");
         execute("insert into locations (id, name) values (2, 'name2')");
         refresh();
@@ -107,7 +108,7 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
 
         execute("create table locations (id integer primary key, name string) " +
                 "partitioned by (id) clustered into " + numShards + " shards with(number_of_replicas=" + numReplicas +
-                ")");
+                ", \"write.wait_for_active_shards\"=1)");
         execute("insert into locations (id, name) values (1, 'name1')");
         execute("insert into locations (id, name) values (2, 'name2')");
         refresh();
@@ -136,7 +137,7 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
                 "clustered into 2 shards with (number_of_replicas=0)");
         ensureYellow();
 
-        assertBulkResponseWithTypes("insert into bla1 (id, name) values (?, ?)",
+        execute("insert into bla1 (id, name) values (?, ?)",
             new Object[][]{
                 new Object[]{1, "Ford"},
                 new Object[]{2, "Trillian"}
@@ -144,45 +145,34 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
     }
 
     @Test
-    public void testInsertBulkDifferentTypes() throws Exception {
-        execute("create table foo (value integer) with (number_of_replicas=0)");
-        ensureYellow();
-        SQLBulkRequest request = new SQLBulkRequest("insert into foo (bar) values (?)",
+    public void testInsertBulkDifferentTypesResultsInRemoteFailure() throws Exception {
+        execute("create table foo (value integer) with (number_of_replicas=0, column_policy = 'dynamic')");
+        long[] rowCounts = execute("insert into foo (bar) values (?)",
             new Object[][]{
                 new Object[]{new HashMap<String, Object>() {{
                     put("foo", 127);
                 }}},
                 new Object[]{1},
             });
-        SQLBulkResponse response = sqlExecutor.exec(request);
         // One is inserted, the other fails because of a cast error
-        assertThat(response.results()[0].rowCount() + response.results()[1].rowCount(), is(-1L));
+        assertThat(rowCounts[0] + rowCounts[1], is(-1L));
     }
 
     @Test
     public void testInsertDynamicNullArrayInBulk() throws Exception {
-        execute("create table foo (value integer) with (number_of_replicas=0)");
-        ensureYellow();
-        SQLBulkRequest request = new SQLBulkRequest("insert into foo (bar) values (?)",
+        execute("create table foo (value integer) with (number_of_replicas=0, column_policy = 'dynamic')");
+        long[] rowCounts = execute("insert into foo (bar) values (?)",
             new Object[][]{
                 new Object[]{new Object[]{null}},
                 new Object[]{new Object[]{1, 2}},
             });
-        SQLBulkResponse res = sqlExecutor.exec(request);
-        assertThat(res.results()[0].rowCount(), is(1L));
-        assertThat(res.results()[1].rowCount(), is(1L));
+        assertThat(rowCounts[0], is(1L));
+        assertThat(rowCounts[1], is(1L));
 
         waitForMappingUpdateOnAll("foo", "bar");
         execute("select data_type from information_schema.columns where table_name = 'foo' and column_name = 'bar'");
-        assertThat((String) response.rows()[0][0], is("long_array"));
-    }
-
-    private void assertBulkResponseWithTypes(String stmt, Object[][] bulkArgs) {
-        SQLBulkRequest request = new SQLBulkRequest(stmt, bulkArgs);
-        request.includeTypesOnResponse(true);
-        SQLBulkResponse sqlResponse = sqlExecutor.exec(request);
-        assertThat(sqlResponse.columnTypes(), is(notNullValue()));
-        assertThat(sqlResponse.columnTypes().length, is(sqlResponse.cols().length));
+        // integer values for unknown columns will be result in a long type for range safety
+        assertThat(response.rows()[0][0], is("bigint_array"));
     }
 
     @Test
@@ -223,17 +213,12 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
         try {
             assertResponseWithTypes("create ANALYZER \"german_snowball\" extends snowball WITH (language='german')");
         } finally {
-            client().admin().cluster().prepareUpdateSettings()
-                .setPersistentSettingsToRemove(ImmutableSet.of("crate.analysis.custom.analyzer.german_snowball"))
-                .setTransientSettingsToRemove(ImmutableSet.of("crate.analysis.custom.analyzer.german_snowball"))
-                .execute().actionGet();
+            execute("drop analyzer german_snowball");
         }
     }
 
     private void assertResponseWithTypes(String stmt) {
-        SQLRequest request = new SQLRequest(stmt);
-        request.includeTypesOnResponse(true);
-        SQLResponse sqlResponse = sqlExecutor.exec(request);
+        SQLResponse sqlResponse = execute(stmt);
         assertThat(sqlResponse.columnTypes(), is(notNullValue()));
         assertThat(sqlResponse.columnTypes().length, is(sqlResponse.cols().length));
     }
@@ -297,15 +282,15 @@ public class TransportSQLActionSingleNodeTest extends SQLTransportIntegrationTes
         for (int i = 0; i < bulkArgs.length; i++) {
             bulkArgs[i] = new Object[]{"event1", "item1"};
         }
-        final SettableFuture<SQLBulkResponse> res = SettableFuture.create();
+        final CompletableFuture<long[]> res = new CompletableFuture<>();
         Thread insertThread = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    res.set(execute(stmt, bulkArgs));
+                    res.complete(execute(stmt, bulkArgs));
                 } catch (SQLActionException e) {
                     // that's what we want
-                    res.setException(e);
+                    res.completeExceptionally(e);
                 }
             }
         });

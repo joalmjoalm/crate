@@ -22,136 +22,73 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Optional;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import io.crate.exceptions.PartitionUnknownException;
-import io.crate.exceptions.ResourceUnknownException;
-import io.crate.executor.transport.RepositoryService;
-import io.crate.metadata.PartitionName;
-import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.doc.DocTableInfo;
-import io.crate.metadata.settings.SettingsApplier;
-import io.crate.metadata.settings.SettingsAppliers;
-import io.crate.metadata.table.Operation;
-import io.crate.metadata.table.SchemaInfo;
-import io.crate.metadata.table.TableInfo;
+import io.crate.analyze.expressions.ExpressionAnalysisContext;
+import io.crate.analyze.expressions.ExpressionAnalyzer;
+import io.crate.analyze.relations.FieldProvider;
+import io.crate.common.collections.Lists2;
+import io.crate.execution.ddl.RepositoryService;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
 import io.crate.sql.tree.CreateSnapshot;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.GenericProperties;
+import io.crate.sql.tree.ParameterExpression;
 import io.crate.sql.tree.QualifiedName;
 import io.crate.sql.tree.Table;
-import org.elasticsearch.cluster.metadata.SnapshotId;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
-import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.snapshots.Snapshot;
+import org.elasticsearch.snapshots.SnapshotId;
 
-import java.util.*;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.function.Function;
 
-import static io.crate.analyze.SnapshotSettings.IGNORE_UNAVAILABLE;
-import static io.crate.analyze.SnapshotSettings.WAIT_FOR_COMPLETION;
+class CreateSnapshotAnalyzer {
 
-@Singleton
-public class CreateSnapshotAnalyzer {
-
-    private static final ESLogger LOGGER = Loggers.getLogger(CreateSnapshotAnalyzer.class);
     private final RepositoryService repositoryService;
-    private final Schemas schemas;
+    private final Functions functions;
 
-    private static final ImmutableMap<String, SettingsApplier> SETTINGS = ImmutableMap.<String, SettingsApplier>builder()
-        .put(IGNORE_UNAVAILABLE.name(), new SettingsAppliers.BooleanSettingsApplier(IGNORE_UNAVAILABLE))
-        .put(WAIT_FOR_COMPLETION.name(), new SettingsAppliers.BooleanSettingsApplier(WAIT_FOR_COMPLETION))
-        .build();
-
-
-    @Inject
-    public CreateSnapshotAnalyzer(RepositoryService repositoryService, Schemas schemas) {
+    CreateSnapshotAnalyzer(RepositoryService repositoryService, Functions functions) {
         this.repositoryService = repositoryService;
-        this.schemas = schemas;
+        this.functions = functions;
     }
 
-    public CreateSnapshotAnalyzedStatement analyze(CreateSnapshot node, Analysis analysis) {
-        Optional<QualifiedName> repositoryName = node.name().getPrefix();
-        // validate repository
-        Preconditions.checkArgument(repositoryName.isPresent(), "Snapshot must be specified by \"<repository_name>\".\"<snapshot_name>\"");
-        Preconditions.checkArgument(repositoryName.get().getParts().size() == 1,
-            String.format(Locale.ENGLISH, "Invalid repository name '%s'", repositoryName.get()));
-        repositoryService.failIfRepositoryDoesNotExist(repositoryName.get().toString());
+    public AnalyzedCreateSnapshot analyze(CreateSnapshot<Expression> createSnapshot,
+                                          Function<ParameterExpression, Symbol> convertParamFunction,
+                                          CoordinatorTxnCtx txnCtx) {
+        String repositoryName = createSnapshot.name().getPrefix()
+            .map(name -> {
+                validateRepository(name);
+                return name.toString();
+            })
+            .orElseThrow(() -> new IllegalArgumentException(
+                "Snapshot must be specified by \"<repository_name>\".\"<snapshot_name>\""));
 
-        // snapshot existence in repo is validated upon execution
-        String snapshotName = node.name().getSuffix();
-        SnapshotId snapshotId = new SnapshotId(repositoryName.get().toString(), snapshotName);
+        String snapshotName = createSnapshot.name().getSuffix();
+        Snapshot snapshot = new Snapshot(repositoryName, new SnapshotId(snapshotName, UUID.randomUUID().toString()));
 
-        // validate and extract settings
-        Settings settings = GenericPropertiesConverter.settingsFromProperties(
-            node.properties(), analysis.parameterContext(), SETTINGS).build();
+        var exprCtx = new ExpressionAnalysisContext();
+        var exprAnalyzerWithoutFields = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.UNSUPPORTED, null);
+        var exprAnalyzerWithFieldsAsString = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.FIELDS_AS_LITERAL, null);
 
-        boolean ignoreUnavailable = settings.getAsBoolean(IGNORE_UNAVAILABLE.name(), IGNORE_UNAVAILABLE.defaultValue());
+        List<Table<Symbol>> tables = Lists2.map(
+            createSnapshot.tables(),
+            (table) -> table.map(x -> exprAnalyzerWithFieldsAsString.convert(x, exprCtx)));
+        GenericProperties<Symbol> properties = createSnapshot.properties()
+            .map(x -> exprAnalyzerWithoutFields.convert(x, exprCtx));
 
-        // iterate tables
-        if (node.tableList().isPresent()) {
-            List<Table> tableList = node.tableList().get();
-            Set<String> snapshotIndices = new HashSet<>(tableList.size());
-            for (Table table : tableList) {
-                TableInfo tableInfo;
-                try {
-                    tableInfo = schemas.getTableInfo(TableIdent.of(table, analysis.sessionContext().defaultSchema()));
-                } catch (ResourceUnknownException e) {
-                    if (ignoreUnavailable) {
-                        LOGGER.info("ignoring: {}", e.getMessage());
-                        continue;
-                    } else {
-                        throw e;
-                    }
-                }
-                if (!(tableInfo instanceof DocTableInfo)) {
-                    throw new IllegalArgumentException(
-                        String.format(Locale.ENGLISH, "Cannot create snapshot of tables in schema '%s'", tableInfo.ident().schema()));
-                }
-                Operation.blockedRaiseException(tableInfo, Operation.READ);
-                DocTableInfo docTableInfo = (DocTableInfo) tableInfo;
-                if (table.partitionProperties().isEmpty()) {
-                    snapshotIndices.addAll(Arrays.asList(docTableInfo.concreteIndices()));
-                } else {
-                    PartitionName partitionName = PartitionPropertiesAnalyzer.toPartitionName(
-                        docTableInfo,
-                        table.partitionProperties(),
-                        analysis.parameterContext().parameters()
-                    );
-                    if (!docTableInfo.partitions().contains(partitionName)) {
-                        if (!ignoreUnavailable) {
-                            throw new PartitionUnknownException(tableInfo.ident().fqn(), partitionName.ident());
-                        } else {
-                            LOGGER.info("ignoring unknown partition of table '{}' with ident '{}'", partitionName.tableIdent(), partitionName.ident());
-                        }
-                    } else {
-                        snapshotIndices.add(partitionName.asIndexName());
-                    }
-                }
-            }
-            /**
-             * For now, we always (in case there are indices to restore) include the globalMetaData,
-             * not only if one of the tables in the table list is partitioned.
-             * Previously we only included it in snapshots of full partitioned tables.
-             * However, to make restoring of shapshots of single partitions work
-             * we also need to include the global metadata (index templates).
-             */
-            return CreateSnapshotAnalyzedStatement.forTables(snapshotId,
-                settings,
-                ImmutableList.copyOf(snapshotIndices),
-                !snapshotIndices.isEmpty());
-        } else {
-            for (SchemaInfo schemaInfo : schemas) {
-                for (TableInfo tableInfo : schemaInfo) {
-                    // only check for user generated tables
-                    if (tableInfo instanceof DocTableInfo) {
-                        Operation.blockedRaiseException(tableInfo, Operation.READ);
-                    }
-                }
-            }
-            return CreateSnapshotAnalyzedStatement.all(snapshotId, settings);
+        return new AnalyzedCreateSnapshot(snapshot, tables, properties);
+    }
+
+    private void validateRepository(QualifiedName name) {
+        if (name.getParts().size() != 1) {
+            throw new IllegalArgumentException(
+                String.format(Locale.ENGLISH, "Invalid repository name '%s'", name)
+            );
         }
+        repositoryService.failIfRepositoryDoesNotExist(name.toString());
     }
 }

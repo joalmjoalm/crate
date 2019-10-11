@@ -23,43 +23,83 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLOperations;
+import io.crate.execution.engine.collect.stats.JobsLogService;
+import io.crate.protocols.postgres.PostgresNetty;
+import io.crate.shade.org.postgresql.PGProperty;
+import io.crate.shade.org.postgresql.geometric.PGpoint;
+import io.crate.shade.org.postgresql.jdbc.PreferQueryMode;
+import io.crate.shade.org.postgresql.util.PSQLException;
+import io.crate.shade.org.postgresql.util.PSQLState;
+import io.crate.testing.UseJdbc;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.hamcrest.Matchers;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
-import org.postgresql.PGProperty;
-import org.postgresql.jdbc.PreferQueryMode;
-import org.postgresql.util.PSQLException;
-import org.postgresql.util.PSQLState;
 
-import java.sql.*;
-import java.util.*;
+import java.sql.BatchUpdateException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Properties;
+import java.util.UUID;
 
+import static io.crate.protocols.postgres.PostgresNetty.PSQL_PORT_SETTING;
+import static org.hamcrest.Matchers.arrayContaining;
+import static org.hamcrest.Matchers.emptyIterable;
+import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.greaterThan;
-import static org.hamcrest.Matchers.isEmptyOrNullString;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.core.Is.is;
 
-@ESIntegTestCase.ClusterScope(numDataNodes = 2, numClientNodes = 0)
+@ESIntegTestCase.ClusterScope(numDataNodes = 2, numClientNodes = 0, supportsDedicatedMasters = false)
 public class PostgresITest extends SQLTransportIntegrationTest {
 
-    private static final String JDBC_POSTGRESQL_URL = "jdbc:postgresql://127.0.0.1:4242/";
-    private static final String JDBC_POSTGRESQL_URL_READ_ONLY = "jdbc:postgresql://127.0.0.1:4243/";
+    private static final String NO_IPV6 = "CRATE_TESTS_NO_IPV6";
+    private static final String RO = "node_s0";
+    private static final String RW = "node_s1";
 
     private Properties properties = new Properties();
+    private static boolean useIPv6;
+
+    @BeforeClass
+    public static void setupClass() {
+        useIPv6 = randomBoolean() && !"true".equalsIgnoreCase(System.getenv(NO_IPV6));
+    }
+
+    private String url(String nodeName) {
+        PostgresNetty postgresNetty = internalCluster().getInstance(PostgresNetty.class, nodeName);
+        int port = postgresNetty.boundAddress().publishAddress().getPort();
+        if (useIPv6) {
+            return "jdbc:crate://::1:" + port + '/';
+        }
+        return "jdbc:crate://127.0.0.1:" + port + '/';
+    }
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
         Settings.Builder builder = Settings.builder();
-        builder.put(super.nodeSettings(nodeOrdinal))
-            .put("network.host", "127.0.0.1");
+        builder.put(super.nodeSettings(nodeOrdinal));
 
-        if ((nodeOrdinal + 1) % 2 == 0) {
-            builder.put("psql.port", "4242");
+        if (useIPv6) {
+            builder.put("network.host", "::1");
         } else {
-            builder.put(SQLOperations.NODE_READ_ONLY_SETTING, true);
-            builder.put("psql.port", "4243");
+            builder.put("network.host", "127.0.0.1");
+        }
+
+        if ((nodeOrdinal + 1) % 2 != 0) {
+            builder.put(PSQL_PORT_SETTING.getKey(), "5432-5532");
+            builder.put(SQLOperations.NODE_READ_ONLY_SETTING.getKey(), true);
+        } else {
+            builder.put(PSQL_PORT_SETTING.getKey(), "5533-5633");
         }
         return builder.build();
     }
@@ -70,11 +110,14 @@ public class PostgresITest extends SQLTransportIntegrationTest {
             // force binary transfer & use server-side prepared statements
             properties.setProperty("prepareThreshold", "-1");
         }
+        if (randomBoolean()) {
+            properties.setProperty("user", "crate");
+        }
     }
 
     @Test
     public void testGetTransactionIsolation() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             int var = conn.getTransactionIsolation();
             assertThat(var, is(Connection.TRANSACTION_READ_UNCOMMITTED));
         }
@@ -84,7 +127,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
     public void testMultidimensionalArrayWithDifferentSizedArrays() throws Exception {
         Properties properties = new Properties();
         properties.setProperty(PGProperty.PREFER_QUERY_MODE.getName(), PreferQueryMode.SIMPLE.value());
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             Statement statement = conn.createStatement();
             statement.executeUpdate("create table t (o1 array(object as (o2 array(object as (x int)))))");
             ensureYellow();
@@ -101,7 +144,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
         properties = new Properties();
         properties.setProperty("prepareThreshold", "-1"); // force binary transfer
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             ResultSet resultSet = conn.createStatement().executeQuery("select o1['o2']['x'] from t");
             assertThat(resultSet.next(), is(true));
             String array = resultSet.getString(1);
@@ -111,7 +154,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testUseOfUnsupportedType() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             PreparedStatement stmt = conn.prepareStatement("select ? from sys.cluster");
             stmt.setObject(1, UUID.randomUUID());
 
@@ -122,7 +165,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testEmptyStatement() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             assertThat(conn.createStatement().execute(""), is(false));
 
             try {
@@ -138,7 +181,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
     @Test
     public void testSimpleQuery() throws Exception {
         properties.setProperty(PGProperty.PREFER_QUERY_MODE.getName(), PreferQueryMode.SIMPLE.value());
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             conn.createStatement().executeUpdate("create table t (x int) with (number_of_replicas = 0)");
             conn.createStatement().executeUpdate("insert into t (x) values (1), (2)");
@@ -156,7 +199,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
     public void testPreparedStatementHandling() throws Exception {
         Properties properties = new Properties();
         properties.setProperty("prepareThreshold", "-1");
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             PreparedStatement p1 = conn.prepareStatement("select 1 from sys.cluster");
             ResultSet resultSet = p1.executeQuery();
             assertThat(resultSet.next(), is(true));
@@ -177,7 +220,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
     public void testPreparedSelectStatementWithParametersCanBeDescribed() throws Exception {
         Properties properties = new Properties();
         properties.setProperty("prepareThreshold", "-1");
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             PreparedStatement p1 = conn.prepareStatement("select ? from sys.cluster");
             p1.setInt(1, 20);
             ResultSet resultSet = p1.executeQuery();
@@ -201,7 +244,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testWriteOperationsWithoutAutocommitAndCommitAndRollback() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(false);
             try (Statement statement = conn.createStatement()) {
                 statement.executeUpdate("create table t (x int) with (number_of_replicas = 0)");
@@ -228,7 +271,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testNoAutoCommit() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(false);
             ResultSet resultSet = conn.prepareStatement("select name from sys.cluster").executeQuery();
             assertThat(resultSet.next(), is(true));
@@ -238,7 +281,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testArrayTypeSupport() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.createStatement().executeUpdate(
                 "create table t (" +
                 "   ints array(int)," +
@@ -265,7 +308,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
             assertThat(object, is(new Object[]{"foo", "bar"}));
 
             object = (Object[]) resultSet.getArray(3).getArray();
-            assertThat((Double[][]) object, is(new Double[][]{new Double[]{1.1, 2.2}, new Double[]{3.3, 4.4}}));
+            assertThat(object, arrayContaining(new PGpoint(1.1, 2.2), new PGpoint(3.3, 4.4)));
         } catch (BatchUpdateException e) {
             throw e.getNextException();
         }
@@ -273,7 +316,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testFetchSize() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.createStatement().executeUpdate("create table t (x int) with (number_of_replicas = 0)");
             ensureGreen();
 
@@ -301,8 +344,64 @@ public class PostgresITest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    public void testCloseConnectionWithUnfinishedResultSetDoesNotLeaveAnyPendingOperations() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+            conn.setAutoCommit(false);
+            try (Statement statement = conn.createStatement()) {
+                statement.setFetchSize(2);
+                try (ResultSet resultSet = statement.executeQuery("select mountain from sys.summits")) {
+                    resultSet.next();
+                    resultSet.next();
+                }
+            }
+        }
+
+        // The client closes connections lazy, so the statement issued below may arrive on the server *before*
+        // the previous connection is closed, so it may see the previous operation -> use assertBusy
+        assertBusy(() -> {
+            try {
+                try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+                    String q =
+                        "SELECT j.stmt || '-' || o.name FROM sys.operations AS o, sys.jobs AS j WHERE o.job_id = j.id" +
+                        " and j.stmt = ?";
+                    PreparedStatement statement = conn.prepareStatement(q);
+                    statement.setString(1, "select mountain from sys.summits");
+                    ResultSet rs = statement.executeQuery();
+                    List<String> operations = new ArrayList<>();
+                    while (rs.next()) {
+                        operations.add(rs.getString(1));
+                    }
+                    assertThat(operations, Matchers.empty());
+                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    @Test
+    public void testCreateNewStatementAfterUnfinishedResultSet() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties);
+            Statement statement = conn.createStatement()) {
+            conn.setAutoCommit(false);
+            statement.setFetchSize(2);
+            try (ResultSet resultSet = statement.executeQuery("select mountain from sys.summits")) {
+                resultSet.next();
+                resultSet.next();
+            }
+            conn.setAutoCommit(true);
+            statement.setFetchSize(0);
+            try (ResultSet resultSet = statement.executeQuery("select mountain from sys.summits")) {
+                while (resultSet.next()) {
+                    assertFalse(resultSet.getString(1).isEmpty());
+                }
+            }
+        }
+    }
+
+    @Test
     public void testSelectPreparedStatement() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             PreparedStatement preparedStatement = conn.prepareStatement("select name from sys.cluster");
             ResultSet resultSet = preparedStatement.executeQuery();
@@ -313,7 +412,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testExecuteBatch() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
 
             Statement stmt = conn.createStatement();
@@ -336,10 +435,9 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testExecuteBatchWithOneFailingAndNothingExecuted() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             Statement stmt = conn.createStatement();
             stmt.executeUpdate("create table t (x int) with (number_of_replicas = 0)");
-            ensureYellow();
             PreparedStatement preparedStatement = conn.prepareStatement("insert into t (x) values (cast(? as integer))");
             preparedStatement.setString(1, Integer.toString(1));
             preparedStatement.addBatch();
@@ -369,7 +467,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testExecuteBatchWithOneRuntimeFailure() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             Statement stmt = conn.createStatement();
             stmt.executeUpdate("create table t (id int primary key, x int) with (number_of_replicas = 0)");
             ensureYellow();
@@ -405,7 +503,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testExecuteBatchWithDifferentStatements() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             Statement stmt = conn.createStatement();
             stmt.executeUpdate("create table t (x int) with (number_of_replicas = 0)");
@@ -423,21 +521,51 @@ public class PostgresITest extends SQLTransportIntegrationTest {
             assertThat(resultSet.next(), is(true));
             assertThat(resultSet.getInt(1), is(1));
 
+            // add another batch
+            statement.addBatch("insert into t (x) values (3)");
+
+            // only the batches after last execution will be executed
+            results = statement.executeBatch();
+            assertThat(results, is(new int[]{1}));
+
+            statement.executeUpdate("refresh table t");
+            resultSet = statement.executeQuery("select * from t order by x desc");
             assertThat(resultSet.next(), is(true));
-            assertThat(resultSet.getInt(1), is(2));
+            assertThat(resultSet.getInt(1), is(3));
+        }
+    }
+
+    @Test
+    public void test_execute_batch_fails_with_read_operations() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+            conn.setAutoCommit(true);
+            Statement stmt = conn.createStatement();
+            stmt.executeUpdate("create table t (x int) with (number_of_replicas = 0)");
+            Statement statement = conn.createStatement();
+            statement.addBatch("insert into t(x) values(1), (2)");
+            statement.addBatch("refresh table t");
+            statement.addBatch("select count(*) from t");
+
+            expectedException.expect(BatchUpdateException.class);
+            expectedException.expectMessage("Only write operations are allowed in Batch statements");
+            statement.executeBatch();
         }
     }
 
     @Test
     public void testCreateInsertSelectStringAndTimestamp() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             Statement statement = conn.createStatement();
-            assertThat(statement.executeUpdate("create table t (x string, ts timestamp) with (number_of_replicas = 0)"), is(0));
+            assertThat(statement.executeUpdate(
+                "create table t (" +
+                "   x string," +
+                "   ts timestamp with time zone" +
+                ") with (number_of_replicas = 0)"), is(1));
             ensureYellow();
 
             assertThat(statement.executeUpdate("insert into t (x, ts) values ('Marvin', '2016-05-14'), ('Trillian', '2016-06-28')"), is(2));
-            assertThat(statement.executeUpdate("refresh table t"), is(0));
+            assertThat(statement.executeUpdate("refresh table t"), is(1));
 
             statement.executeQuery("select x, ts from t order by x");
             ResultSet resultSet = statement.getResultSet();
@@ -453,7 +581,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testSelectWithParameters() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             PreparedStatement preparedStatement = conn.prepareStatement("select name from sys.cluster where name like ?");
             preparedStatement.setString(1, "SUITE%");
@@ -465,7 +593,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testStatementThatResultsInParseError() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             PreparedStatement stmt = conn.prepareStatement("select name fro sys.cluster");
             expectedException.expect(PSQLException.class);
@@ -475,34 +603,19 @@ public class PostgresITest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testCustomSchemaAndAnalyzerFailure() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL + "foo", properties)) {
-            conn.setAutoCommit(true);
-            PreparedStatement stmt = conn.prepareStatement("select x from t");
-            try {
-                stmt.executeQuery();
-                assertFalse(true); // should've raised PSQLException
-            } catch (PSQLException e) {
-                assertThat(e.getMessage(), Matchers.containsString("Schema 'foo' unknown"));
-            }
-            assertSelectNameFromSysClusterWorks(conn);
-        }
-    }
-
-    @Test
     public void testStatementReadOnlyFailure() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL_READ_ONLY, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RO), properties)) {
             conn.setAutoCommit(true);
             PreparedStatement stmt = conn.prepareStatement("create table test(a integer)");
             expectedException.expect(PSQLException.class);
-            expectedException.expectMessage("ERROR: Only read operations are allowed on this node");
+            expectedException.expectMessage("Only read operations are allowed on this node");
             stmt.executeQuery();
         }
     }
 
     @Test
     public void testErrorRecoveryFromErrorsOutsideSqlOperations() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             PreparedStatement stmt = conn.prepareStatement("select cast([10.3, 20.2] as integer) " +
                                                            "from information_schema.tables");
@@ -510,7 +623,7 @@ public class PostgresITest extends SQLTransportIntegrationTest {
                 stmt.executeQuery();
                 fail("Should've raised PSQLException");
             } catch (PSQLException e) {
-                assertThat(e.getMessage(), Matchers.containsString("Cannot cast double_array to type integer"));
+                assertThat(e.getMessage(), Matchers.containsString("Cannot cast [10.3, 20.2] to type integer"));
             }
 
             assertSelectNameFromSysClusterWorks(conn);
@@ -519,14 +632,149 @@ public class PostgresITest extends SQLTransportIntegrationTest {
 
     @Test
     public void testErrorDetailsFromStackTraceInErrorResponse() throws Exception {
-        try (Connection conn = DriverManager.getConnection(JDBC_POSTGRESQL_URL, properties)) {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
             conn.setAutoCommit(true);
             conn.createStatement().executeUpdate("select sqrt('abcd') from sys.cluster");
         } catch (PSQLException e) {
-            assertThat(e.getServerErrorMessage().getFile(), not(isEmptyOrNullString()));
-            assertThat(e.getServerErrorMessage().getRoutine(), not(isEmptyOrNullString()));
+            assertThat(e.getServerErrorMessage().getFile(), not(is(emptyOrNullString())));
+            assertThat(e.getServerErrorMessage().getRoutine(), not(is(emptyOrNullString())));
             assertThat(e.getServerErrorMessage().getLine(), greaterThan(0));
         }
+    }
+
+    @Test
+    public void testGetPostgresPort() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+            ResultSet resultSet = conn.createStatement().executeQuery("select port['psql'] from sys.nodes limit 1");
+            assertThat(resultSet.next(), is(true));
+            Integer port = resultSet.getInt(1);
+
+            ArrayList<Integer> actualPorts = new ArrayList<>();
+            for (PostgresNetty postgresNetty : internalCluster().getInstances(PostgresNetty.class)) {
+                actualPorts.add(postgresNetty.boundAddress().publishAddress().getPort());
+            }
+            assertThat(port, Matchers.isOneOf(actualPorts.toArray(new Integer[0])));
+        }
+    }
+
+    @Test
+    public void testSetSchemaOnSession() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+            conn.setAutoCommit(true);
+
+            conn.createStatement().execute("set session search_path to bar");
+            conn.createStatement().executeUpdate("create table foo (id int) with (number_of_replicas=0)");
+
+            conn.createStatement().execute("set session search_path to DEFAULT");
+            expectedException.expect(PSQLException.class);
+            expectedException.expectMessage("RelationUnknown: Relation 'foo' unknown");
+            conn.createStatement().execute("select * from foo");
+        }
+    }
+
+    @Test
+    public void testSetMultipleSchemasOnSession() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+            conn.setAutoCommit(true);
+
+            conn.createStatement().execute("set session search_path to bar ,custom");
+            conn.createStatement().executeUpdate("create table foo (id int) with (number_of_replicas=0)");
+            conn.createStatement().executeQuery("select * from bar.foo");
+
+            expectedException.expect(PSQLException.class);
+            expectedException.expectMessage("SchemaUnknownException: Schema 'custom' unknown");
+            conn.createStatement().execute("select * from custom.foo");
+        }
+    }
+
+    @Test
+    public void testCountDistinctFromJoin() throws Exception {
+        // Regression test for a bug where the Postgres-ResultReceiver received types which were a view on symbols which
+        // were mutated during analysis/planning of a join - due to that the types changed which led to a ClassCastException
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+            ResultSet resultSet = conn.createStatement().executeQuery(
+                "select count (distinct 74) from unnest([1, 2]) t1 cross join unnest([2, 3]) t2");
+            assertThat(resultSet.next(), is(true));
+            assertThat(resultSet.getLong(1), is(1L));
+        }
+    }
+
+    @Test
+    public void testMultiStatementQuery() throws Exception {
+        Properties properties = new Properties(this.properties);
+        // multi query support is only available in simple query mode
+        properties.setProperty("preferQueryMode", "simple");
+        try (Connection conn = DriverManager.getConnection(url(RW), properties)) {
+            Statement statement = conn.createStatement();
+            statement.execute("set search_path to 'hoschi';" +
+                              "create table t (id int);" +
+                              "insert into t values (42);" +
+                              "refresh table t");
+            statement = conn.createStatement();
+            ResultSet resultSet = statement.executeQuery("select * from hoschi.t");
+            resultSet.next();
+            assertThat(resultSet.getInt(1), is(42));
+            assertThat(resultSet.isLast(), is(true));
+        }
+    }
+
+    @Test
+    public void testRepeatedFetchDoesNotLeakSysJobsLog() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW))) {
+            conn.prepareStatement(
+                "create table t (" +
+                "   x int, ts timestamp with time zone" +
+                ") clustered into 1 shards " +
+                "with (number_of_replicas = 0)").execute();
+            PreparedStatement preparedStatement = conn.prepareStatement("insert into t (x, ts) values (?, ?)");
+            for (int i = 0; i < 20; i++) {
+                preparedStatement.setInt(1, i);
+                preparedStatement.setLong(2, 1541548800000L);
+                preparedStatement.addBatch();
+            }
+            preparedStatement.executeBatch();
+            conn.prepareStatement("refresh table t").execute();
+
+            conn.setAutoCommit(false);
+            PreparedStatement stmt = conn.prepareStatement("SELECT x FROM t WHERE ts > ? ORDER BY ts ASC LIMIT 5");
+            for (int i = 0; i < 5; i++) {
+                stmt.setInt(1, i);
+                stmt.setFetchSize(5);
+                ResultSet resultSet = stmt.executeQuery();
+                while (resultSet.next()) {
+                    resultSet.getInt(1);
+                }
+            }
+        }
+        for (JobsLogService jobsLogService : internalCluster().getDataNodeInstances(JobsLogService.class)) {
+            assertBusy(() -> assertThat(jobsLogService.get().activeJobs(), emptyIterable()));
+        }
+    }
+
+    @Test
+    public void test_insert_with_on_conflict_do_nothing_batch_error_resp_is_0_for_conflicting_items() throws Exception {
+        try (Connection conn = DriverManager.getConnection(url(RW))) {
+            conn.prepareStatement("create table t (id int primary key) clustered into 1 shards").execute();
+            conn.prepareStatement("insert into t (id) (select col1 from generate_series(1, 3))").execute();
+
+            PreparedStatement stmt = conn.prepareStatement("insert into t (id) values (?) on conflict (id) do nothing");
+            stmt.setInt(1, 4);
+            stmt.addBatch();
+            stmt.setInt(1, 1);
+            stmt.addBatch();
+
+            int[] result = stmt.executeBatch();
+            assertThat(result.length, is(2));
+            assertThat(result[0], is(1));
+            assertThat(result[1], is(0));
+        }
+    }
+
+    @Test
+    @UseJdbc(0) // Simulate explicit call by a user through HTTP iface
+    public void test_proper_termination_of_deallocate_through_http_call() throws Exception {
+       execute("DEALLOCATE ALL");
+       assertThat(response.rowCount(), is (0L));
     }
 
     private void assertSelectNameFromSysClusterWorks(Connection conn) throws SQLException {

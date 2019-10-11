@@ -18,163 +18,73 @@
  * with Crate these terms will supersede the license and you may use the
  * software solely pursuant to the terms of the relevant commercial agreement.
  */
+
 package io.crate.analyze;
 
-import com.google.common.collect.ImmutableList;
-import io.crate.analyze.expressions.ExpressionToStringVisitor;
-import io.crate.metadata.ColumnIdent;
-import io.crate.metadata.FulltextAnalyzerResolver;
-import io.crate.metadata.Schemas;
-import io.crate.metadata.TableIdent;
-import io.crate.metadata.information.InformationSchemaInfo;
-import io.crate.metadata.pg_catalog.PgCatalogSchemaInfo;
-import io.crate.metadata.sys.SysSchemaInfo;
-import io.crate.sql.tree.*;
-import org.elasticsearch.cluster.metadata.IndexMetaData;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
+import io.crate.analyze.expressions.ExpressionAnalysisContext;
+import io.crate.analyze.expressions.ExpressionAnalyzer;
+import io.crate.analyze.expressions.TableReferenceResolver;
+import io.crate.analyze.relations.FieldProvider;
+import io.crate.common.collections.Lists2;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
+import io.crate.metadata.Functions;
+import io.crate.metadata.RelationName;
+import io.crate.sql.tree.CreateTable;
+import io.crate.sql.tree.Expression;
+import io.crate.sql.tree.ParameterExpression;
+import io.crate.sql.tree.TableElement;
 
-import java.util.Collection;
-import java.util.Locale;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
 
-@Singleton
-public class CreateTableStatementAnalyzer extends DefaultTraversalVisitor<CreateTableAnalyzedStatement,
-    CreateTableStatementAnalyzer.Context> {
+public final class CreateTableStatementAnalyzer {
 
-    private static final TablePropertiesAnalyzer TABLE_PROPERTIES_ANALYZER = new TablePropertiesAnalyzer();
-    private static final String CLUSTERED_BY_IN_PARTITIONED_ERROR = "Cannot use CLUSTERED BY column in PARTITIONED BY clause";
-    private final Schemas schemas;
-    private final FulltextAnalyzerResolver fulltextAnalyzerResolver;
-    private final AnalysisMetaData analysisMetaData;
-    private final NumberOfShards numberOfShards;
+    private final Functions functions;
 
-    static final Collection<String> READ_ONLY_SCHEMAS = ImmutableList.of(
-        SysSchemaInfo.NAME,
-        InformationSchemaInfo.NAME,
-        PgCatalogSchemaInfo.NAME
-    );
-
-    static class Context {
-        Analysis analysis;
-        CreateTableAnalyzedStatement statement;
-
-        public Context(Analysis analysis) {
-            this.analysis = analysis;
-        }
+    public CreateTableStatementAnalyzer(Functions functions) {
+        this.functions = functions;
     }
 
-    public CreateTableAnalyzedStatement analyze(Node node, Analysis analysis) {
-        return super.process(node, new Context(analysis));
-    }
+    public AnalyzedCreateTable analyze(CreateTable<Expression> createTable,
+                                       Function<ParameterExpression, Symbol> convertParamFunction,
+                                       CoordinatorTxnCtx txnCtx) {
+        RelationName relationName = RelationName
+            .of(createTable.name().getName(), txnCtx.sessionContext().searchPath().currentSchema());
+        relationName.ensureValidForRelationCreation();
 
-    @Inject
-    public CreateTableStatementAnalyzer(Schemas schemas,
-                                        FulltextAnalyzerResolver fulltextAnalyzerResolver,
-                                        AnalysisMetaData analysisMetaData,
-                                        NumberOfShards numberOfShards) {
-        this.schemas = schemas;
-        this.fulltextAnalyzerResolver = fulltextAnalyzerResolver;
-        this.analysisMetaData = analysisMetaData;
-        this.numberOfShards = numberOfShards;
-    }
+        var exprAnalyzerWithoutFields = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.UNSUPPORTED, null);
+        var exprAnalyzerWithFieldsAsString = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, FieldProvider.FIELDS_AS_LITERAL, null);
+        var exprCtx = new ExpressionAnalysisContext();
 
-    @Override
-    protected CreateTableAnalyzedStatement visitNode(Node node, Context context) {
-        throw new RuntimeException(
-            String.format(Locale.ENGLISH, "Encountered node %s but expected a CreateTable node", node));
-    }
-
-    @Override
-    public CreateTableAnalyzedStatement visitCreateTable(CreateTable node, Context context) {
-        assert context.statement == null;
-        context.statement = new CreateTableAnalyzedStatement(fulltextAnalyzerResolver);
-        setTableIdent(node, context);
-
-        // apply default in case it is not specified in the genericProperties,
-        // if it is it will get overwritten afterwards.
-        TABLE_PROPERTIES_ANALYZER.analyze(
-            context.statement.tableParameter(), new TableParameterInfo(),
-            node.properties(), context.analysis.parameterContext().parameters(), true);
-
-        context.statement.analyzedTableElements(TableElementsAnalyzer.analyze(
-            node.tableElements(),
-            context.analysis.parameterContext(),
-            context.statement.fulltextAnalyzerResolver()));
-
-        // validate table elements
-        context.statement.analyzedTableElements().finalizeAndValidate(
-            context.statement.tableIdent(),
-            null,
-            analysisMetaData,
-            context.analysis.parameterContext(),
-            context.analysis.sessionContext(),
-            context.analysis.statementContext());
-
-        // update table settings
-        context.statement.tableParameter().settingsBuilder().put(context.statement.analyzedTableElements().settings());
-        context.statement.tableParameter().settingsBuilder().put(
-            IndexMetaData.SETTING_NUMBER_OF_SHARDS,
-            numberOfShards.defaultNumberOfShards()
+        // 1st phase, map and analyze everything BESIDE generated and default expressions and
+        CreateTable<Symbol> analyzedCreateTable = new CreateTable<>(
+            createTable.name().map(x -> exprAnalyzerWithFieldsAsString.convert(x, exprCtx)),
+            Lists2.map(createTable.tableElements(), x -> x.map(y -> exprAnalyzerWithFieldsAsString.convert(y, exprCtx))),
+            createTable.partitionedBy().map(x -> x.map(y -> exprAnalyzerWithFieldsAsString.convert(y, exprCtx))),
+            createTable.clusteredBy().map(x -> x.map(y -> exprAnalyzerWithFieldsAsString.convert(y, exprCtx))),
+            createTable.properties().map(x -> exprAnalyzerWithoutFields.convert(x, exprCtx)),
+            createTable.ifNotExists()
         );
+        AnalyzedTableElements<Symbol> analyzedTableElements = TableElementsAnalyzer.analyze(
+            analyzedCreateTable.tableElements(), relationName, null);
 
-        for (CrateTableOption option : node.crateTableOptions()) {
-            process(option, context);
+        // 2nd phase, analyze possible generatedExpressions and defaultExpressions with a reference resolver
+        TableReferenceResolver referenceResolver = analyzedTableElements.referenceResolver(relationName);
+        var exprAnalyzerWithReferences = new ExpressionAnalyzer(
+            functions, txnCtx, convertParamFunction, referenceResolver, null);
+        List<TableElement<Symbol>> tableElementsWithExpressions = new ArrayList<>(analyzedCreateTable.tableElements().size());
+        for (int i = 0; i < analyzedCreateTable.tableElements().size(); i++) {
+            TableElement<Expression> elementExpression = createTable.tableElements().get(i);
+            TableElement<Symbol> elementSymbol = analyzedCreateTable.tableElements().get(i);
+            tableElementsWithExpressions.add(elementExpression.mapExpressions(elementSymbol, x -> exprAnalyzerWithReferences.convert(x, exprCtx)));
         }
+        AnalyzedTableElements<Symbol> analyzedTableElementsWithExpressions = TableElementsAnalyzer.analyze(
+            tableElementsWithExpressions, relationName, null, false);
 
-        return context.statement;
-    }
-
-    private void setTableIdent(CreateTable node, Context context) {
-        TableIdent tableIdent = TableIdent.of(node.name(), context.analysis.sessionContext().defaultSchema());
-        if (READ_ONLY_SCHEMAS.contains(tableIdent.schema())) {
-            throw new IllegalArgumentException(
-                String.format(Locale.ENGLISH, "Cannot create table in read-only schema '%s'", tableIdent.schema())
-            );
-        }
-        context.statement.table(tableIdent, node.ifNotExists(), schemas);
-    }
-
-    @Override
-    public CreateTableAnalyzedStatement visitClusteredBy(ClusteredBy clusteredBy, Context context) {
-        if (clusteredBy.column().isPresent()) {
-            ColumnIdent routingColumn = ColumnIdent.fromPath(
-                ExpressionToStringVisitor.convert(clusteredBy.column().get(), context.analysis.parameterContext().parameters()));
-
-            for (AnalyzedColumnDefinition column : context.statement.analyzedTableElements().partitionedByColumns) {
-                if (column.ident().equals(routingColumn)) {
-                    throw new IllegalArgumentException(CLUSTERED_BY_IN_PARTITIONED_ERROR);
-                }
-            }
-            if (!context.statement.hasColumnDefinition(routingColumn)) {
-                throw new IllegalArgumentException(
-                    String.format(Locale.ENGLISH, "Invalid or non-existent routing column \"%s\"",
-                        routingColumn));
-            }
-            if (context.statement.primaryKeys().size() > 0 &&
-                !context.statement.primaryKeys().contains(routingColumn.fqn())) {
-                throw new IllegalArgumentException("Clustered by column must be part of primary keys");
-            }
-
-            context.statement.routing(routingColumn);
-        }
-        context.statement.tableParameter().settingsBuilder().put(
-            IndexMetaData.SETTING_NUMBER_OF_SHARDS,
-            numberOfShards.fromClusteredByClause(clusteredBy, context.analysis.parameterContext().parameters())
-        );
-        return context.statement;
-    }
-
-    @Override
-    public CreateTableAnalyzedStatement visitPartitionedBy(PartitionedBy node, Context context) {
-        for (Expression partitionByColumn : node.columns()) {
-            ColumnIdent partitionedByIdent = ColumnIdent.fromPath(
-                ExpressionToStringVisitor.convert(partitionByColumn, context.analysis.parameterContext().parameters()));
-            context.statement.analyzedTableElements().changeToPartitionedByColumn(partitionedByIdent, false);
-            ColumnIdent routing = context.statement.routing();
-            if (routing != null && routing.equals(partitionedByIdent)) {
-                throw new IllegalArgumentException(CLUSTERED_BY_IN_PARTITIONED_ERROR);
-            }
-        }
-        return null;
+        return new AnalyzedCreateTable(relationName, analyzedCreateTable, analyzedTableElements, analyzedTableElementsWithExpressions);
     }
 }

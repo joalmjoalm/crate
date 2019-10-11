@@ -24,10 +24,13 @@ package io.crate.analyze;
 
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
-import io.crate.analyze.symbol.Field;
+import io.crate.analyze.relations.AnalyzedRelation;
 import io.crate.exceptions.AmbiguousColumnAliasException;
-import io.crate.metadata.Path;
+import io.crate.expression.symbol.Field;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.table.Operation;
 
+import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -41,15 +44,16 @@ public class Fields {
         fieldsList = new ArrayList<>(expectedSize);
     }
 
-    public void add(Path key, Field value) {
-        fieldsMap.put(key.outputName(), value);
+    public void add(Field value) {
+        fieldsMap.put(value.path().sqlFqn(), value);
         fieldsList.add(value);
     }
 
-    public Field get(Path key) {
-        Collection<Field> fieldList = fieldsMap.get(key.outputName());
+    @Nullable
+    public Field get(ColumnIdent key) {
+        Collection<Field> fieldList = fieldsMap.get(key.sqlFqn());
         if (fieldList.size() > 1) {
-            throw new AmbiguousColumnAliasException(key.outputName());
+            throw new AmbiguousColumnAliasException(key.sqlFqn(), fieldList);
         }
         if (fieldList.isEmpty()) {
             return null;
@@ -57,7 +61,27 @@ public class Fields {
         return fieldList.iterator().next();
     }
 
+    @Nullable
+    public Field getWithSubscriptFallback(ColumnIdent column,
+                                          AnalyzedRelation scope,
+                                          AnalyzedRelation childRelation) {
+        Field field = get(column);
+        if (field == null && !column.isTopLevel()) {
+            Field childField = childRelation.getField(column, Operation.READ);
+            if (childField == null) {
+                return null;
+            }
+            return new Field(scope, column, childField);
+        }
+        return field;
+    }
+
     public List<Field> asList() {
         return fieldsList;
+    }
+
+    @Override
+    public String toString() {
+        return "Fields{" + fieldsList + '}';
     }
 }

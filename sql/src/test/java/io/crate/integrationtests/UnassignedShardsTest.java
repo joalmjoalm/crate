@@ -22,29 +22,20 @@
 package io.crate.integrationtests;
 
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.is;
 
-@ESIntegTestCase.ClusterScope(numDataNodes = 2)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(numDataNodes = 1)
 public class UnassignedShardsTest extends SQLTransportIntegrationTest {
 
     @Test
-    public void testOnlyUnassignedShards() throws Exception {
-        execute("set global transient cluster.routing.allocation.enable=none");
-        try {
-            execute("create table no_shards (id int) clustered into 5 shards with (number_of_replicas=2)");
-            execute("select state, id, table_name from sys.shards where schema_name='doc' AND table_name='no_shards'");
-            assertThat(response.rowCount(), is(15L));
-            Object[] stateColumn = TestingHelpers.getColumn(response.rows(), 0);
-            for (Object val : stateColumn) {
-                assertThat((String) val, is("UNASSIGNED"));
-            }
-        } finally {
-            execute("reset global cluster.routing.allocation.enable");
-        }
+    public void testUnassignedReplicasAreVisibleAsUnassignedInSysShards() throws Exception {
+        execute("create table t (id int) clustered into 1 shards with (number_of_replicas=1, \"write.wait_for_active_shards\"=1)");
+        execute("select state, id, table_name from sys.shards where schema_name = ? AND table_name='t' order by state", new Object[]{sqlExecutor.getCurrentSchema()});
+        assertThat(TestingHelpers.printedTable(response.rows()),
+            is("STARTED| 0| t\n" +
+               "UNASSIGNED| 0| t\n"));
     }
 }

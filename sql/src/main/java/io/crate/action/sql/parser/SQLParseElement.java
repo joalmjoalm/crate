@@ -24,8 +24,8 @@ package io.crate.action.sql.parser;
 import org.elasticsearch.common.xcontent.XContentParser;
 
 /**
- * This interface is for the {@link io.crate.action.sql.parser.SQLXContentSourceParser}
- * The {@link io.crate.action.sql.parser.SQLXContentSourceParser} receives a JSON structured body in the form of:
+ * This interface is for the {@link SQLRequestParser}
+ * The {@link SQLRequestParser} receives a JSON structured body in the form of:
  * <p>
  * {
  * "stmt": "...",
@@ -36,7 +36,7 @@ import org.elasticsearch.common.xcontent.XContentParser;
  * <p>
  * E.g. for "stmt" property the {@link io.crate.action.sql.parser.SQLStmtParseElement} is used.
  */
-public interface SQLParseElement {
+interface SQLParseElement {
 
-    void parse(XContentParser parser, SQLXContentSourceContext context) throws Exception;
+    void parse(XContentParser parser, SQLRequestParseContext context) throws Exception;
 }

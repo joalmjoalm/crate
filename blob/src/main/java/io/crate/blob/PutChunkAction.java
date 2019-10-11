@@ -27,7 +27,7 @@ import org.elasticsearch.client.ElasticsearchClient;
 public class PutChunkAction extends Action<PutChunkRequest, PutChunkResponse, PutChunkRequestBuilder> {
 
     public static final PutChunkAction INSTANCE = new PutChunkAction();
-    public static final String NAME = "put_chunk";
+    public static final String NAME = "internal:crate:blob/put_chunk";
 
     protected PutChunkAction() {
         super(NAME);
@@ -38,8 +38,4 @@ public class PutChunkAction extends Action<PutChunkRequest, PutChunkResponse, Pu
         return new PutChunkRequestBuilder(client, this);
     }
 
-    @Override
-    public PutChunkResponse newResponse() {
-        return new PutChunkResponse();
-    }
 }

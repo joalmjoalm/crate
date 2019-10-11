@@ -23,15 +23,19 @@
 package io.crate.analyze.relations;
 
 
-import io.crate.analyze.symbol.Function;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolVisitor;
-import io.crate.operation.operator.AndOperator;
-import io.crate.planner.consumer.ManyTableConsumer;
+import io.crate.expression.operator.AndOperator;
+import io.crate.expression.symbol.Field;
+import io.crate.expression.symbol.Function;
+import io.crate.expression.symbol.MatchPredicate;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolVisitor;
+import io.crate.planner.consumer.QualifiedNameCollector;
 import io.crate.sql.tree.QualifiedName;
 
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -41,11 +45,9 @@ public class QuerySplitter {
 
     /**
      * <p>
-     * Splits a (function) symbol on <code>AND</code> based on relation occurrences of {@link io.crate.analyze.symbol.RelationColumn}
+     * Splits a (function) symbol on <code>AND</code> based on relation occurrences of {@link io.crate.expression.symbol.Field}
      * into multiple symbols.
      * </p>
-     * <p>
-     * <b>This does not work with  {@link io.crate.analyze.symbol.Field}</b>
      * <p>
      * <h3>Examples:</h3>
      * <p>
@@ -82,8 +84,8 @@ public class QuerySplitter {
      * </pre>
      */
     public static Map<Set<QualifiedName>, Symbol> split(Symbol symbol) {
-        Map<Set<QualifiedName>, Symbol> splits = new HashMap<>();
-        SPLIT_VISITOR.process(symbol, splits);
+        Map<Set<QualifiedName>, Symbol> splits = new LinkedHashMap<>();
+        symbol.accept(SPLIT_VISITOR, splits);
         return splits;
     }
 
@@ -92,8 +94,8 @@ public class QuerySplitter {
         @Override
         public Void visitFunction(Function function, Map<Set<QualifiedName>, Symbol> splits) {
             if (!function.info().equals(AndOperator.INFO)) {
-                HashSet<QualifiedName> qualifiedNames = new HashSet<>();
-                ManyTableConsumer.QualifiedNameCounter.INSTANCE.process(function, qualifiedNames);
+                HashSet<QualifiedName> qualifiedNames = new LinkedHashSet<>();
+                ((Symbol) function).accept(QualifiedNameCollector.INSTANCE, qualifiedNames);
                 Symbol prevQuery = splits.put(qualifiedNames, function);
                 if (prevQuery != null) {
                     splits.put(qualifiedNames, AndOperator.of(prevQuery, function));
@@ -102,8 +104,24 @@ public class QuerySplitter {
             }
 
             for (Symbol arg : function.arguments()) {
-                process(arg, splits);
+                arg.accept(this, splits);
             }
+            return null;
+        }
+
+        @Override
+        public Void visitField(Field field, Map<Set<QualifiedName>, Symbol> context) {
+            context.put(Collections.singleton(field.relation().getQualifiedName()), field);
+            return null;
+        }
+
+        @Override
+        public Void visitMatchPredicate(MatchPredicate matchPredicate, Map<Set<QualifiedName>, Symbol> context) {
+            LinkedHashSet<QualifiedName> relationNames = new LinkedHashSet<>();
+            for (Field field : matchPredicate.identBoostMap().keySet()) {
+                relationNames.add(field.relation().getQualifiedName());
+            }
+            context.put(relationNames, matchPredicate);
             return null;
         }
     }

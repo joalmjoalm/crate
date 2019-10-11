@@ -24,33 +24,25 @@ package io.crate.metadata.sys;
 
 import io.crate.metadata.Reference;
 import io.crate.metadata.table.TableInfo;
-import io.crate.test.integration.CrateUnitTest;
-import io.crate.testing.MockedClusterServiceModule;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
 import io.crate.testing.TestingHelpers;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.inject.Injector;
-import org.elasticsearch.common.inject.ModulesBuilder;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Locale;
 
-public class SystemTableInfoTest extends CrateUnitTest {
+public class SystemTableInfoTest extends CrateDummyClusterServiceUnitTest {
 
     private SysSchemaInfo sysSchemaInfo;
 
     @Before
-    public void prepare() throws Exception {
-        Injector injector = new ModulesBuilder()
-            .add(new MockedClusterServiceModule())
-            .createInjector();
-        ClusterService clusterService = injector.getInstance(ClusterService.class);
-        sysSchemaInfo = new SysSchemaInfo(clusterService);
+    public void prepare() {
+        sysSchemaInfo = new SysSchemaInfo(this.clusterService);
     }
 
     @Test
     public void testColumnsInAlphabeticalColumnOrder() throws Exception {
-        for (TableInfo tableInfo : sysSchemaInfo) {
+        for (TableInfo tableInfo : sysSchemaInfo.getTables()) {
             assertSortedColumns(tableInfo);
         }
     }
@@ -58,10 +50,10 @@ public class SystemTableInfoTest extends CrateUnitTest {
     private void assertSortedColumns(TableInfo tableInfo) {
         assertThat(String.format(Locale.ENGLISH, "columns from iterator of table %s not in alphabetical order", tableInfo.ident().fqn()),
             tableInfo,
-            TestingHelpers.isSortedBy(Reference.TO_COLUMN_IDENT));
+            TestingHelpers.isSortedBy(Reference::column));
         assertThat(String.format(
             Locale.ENGLISH, "columns of table %s not in alphabetical order", tableInfo.ident().fqn()),
             tableInfo.columns(),
-            TestingHelpers.isSortedBy(Reference.TO_COLUMN_IDENT));
+            TestingHelpers.isSortedBy(Reference::column));
     }
 }

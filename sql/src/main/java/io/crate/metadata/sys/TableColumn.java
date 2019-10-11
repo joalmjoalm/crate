@@ -24,7 +24,7 @@ package io.crate.metadata.sys;
 import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.Reference;
 import io.crate.metadata.ReferenceIdent;
-import io.crate.metadata.TableIdent;
+import io.crate.metadata.RelationName;
 
 import java.util.Map;
 
@@ -34,7 +34,6 @@ import java.util.Map;
  * E.g.
  * _doc['foo'] is pointing to 'foo'
  * <p>
- * _node['name'] is pointing to 'name' of the sys.nodes table
  */
 public class TableColumn {
 
@@ -50,7 +49,7 @@ public class TableColumn {
         this.columns = columns;
     }
 
-    public Reference getReference(TableIdent tableIdent, ColumnIdent columnIdent) {
+    public Reference getReference(RelationName relationName, ColumnIdent columnIdent) {
         if (!columnIdent.isChildOf(column)) {
             return null;
         }
@@ -58,6 +57,6 @@ public class TableColumn {
         if (info == null) {
             return null;
         }
-        return info.getRelocated(new ReferenceIdent(tableIdent, columnIdent));
+        return info.getRelocated(new ReferenceIdent(relationName, columnIdent));
     }
 }

@@ -23,15 +23,16 @@ package io.crate.sql.tree;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableList;
+import io.crate.common.collections.Lists2;
 
-import javax.annotation.Nullable;
 import java.util.List;
+import java.util.function.Function;
 
-public class Table
-    extends QueryBody {
+public class Table<T> extends QueryBody {
+
     private final QualifiedName name;
     private final boolean excludePartitions;
-    private final List<Assignment> partitionProperties;
+    private final List<Assignment<T>> partitionProperties;
 
     public Table(QualifiedName name) {
         this(name, true);
@@ -43,10 +44,10 @@ public class Table
         this.partitionProperties = ImmutableList.of();
     }
 
-    public Table(QualifiedName name, @Nullable List<Assignment> partitionProperties) {
+    public Table(QualifiedName name, List<Assignment<T>> partitionProperties) {
         this.name = name;
         this.excludePartitions = false;
-        this.partitionProperties = MoreObjects.firstNonNull(partitionProperties, ImmutableList.<Assignment>of());
+        this.partitionProperties = partitionProperties;
     }
 
     public QualifiedName getName() {
@@ -57,8 +58,16 @@ public class Table
         return excludePartitions;
     }
 
-    public List<Assignment> partitionProperties() {
+    public List<Assignment<T>> partitionProperties() {
         return partitionProperties;
+    }
+
+    public <U> Table<U> map(Function<? super T, ? extends U> mapper) {
+        if (partitionProperties.isEmpty()) {
+            return new Table<>(name, excludePartitions);
+        } else {
+            return new Table<>(name, Lists2.map(partitionProperties, x -> x.map(mapper)));
+        }
     }
 
     @Override

@@ -22,67 +22,74 @@
 
 package io.crate.protocols.postgres.types;
 
-import org.apache.lucene.util.BytesRef;
-import org.jboss.netty.buffer.ChannelBuffer;
+import io.netty.buffer.ByteBuf;
 
 import javax.annotation.Nonnull;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 
 class VarCharType extends PGType {
 
-    public static final PGType INSTANCE = new VarCharType();
     static final int OID = 1043;
-
+    private static final int ARRAY_OID = 1015;
     private static final int TYPE_LEN = -1;
     private static final int TYPE_MOD = -1;
 
-    private VarCharType() {
+    public static final PGType INSTANCE = new VarCharType(ARRAY_OID);
+
+    private final int typArray;
+
+    private VarCharType(int typArray) {
         super(OID, TYPE_LEN, TYPE_MOD, "varchar");
+        this.typArray = typArray;
+    }
+
+    private VarCharType(int oid, int typArray, int maxLength, String aliasName) {
+        super(oid, maxLength, TYPE_MOD, aliasName);
+        this.typArray = typArray;
     }
 
     @Override
-    public int writeAsBinary(ChannelBuffer buffer, @Nonnull Object value) {
-        if (value instanceof String) {
-            // we sometimes still get String instead of BytesRef, e.g. from the ESGetTask
-            byte[] bytes = ((String) value).getBytes(StandardCharsets.UTF_8);
-            buffer.writeInt(bytes.length);
-            buffer.writeBytes(bytes);
-            return INT32_BYTE_SIZE + bytes.length;
-        }
-        BytesRef bytesRef = (BytesRef) value;
-        buffer.writeInt(bytesRef.length);
-        buffer.writeBytes(bytesRef.bytes, bytesRef.offset, bytesRef.length);
-        return INT32_BYTE_SIZE + bytesRef.length;
+    public int typArray() {
+        return typArray;
     }
 
     @Override
-    public int writeAsText(ChannelBuffer buffer, @Nonnull Object value) {
+    public int writeAsBinary(ByteBuf buffer, @Nonnull Object value) {
+        assert value instanceof String : "value must be a string, got: " + value;
+        byte[] bytes = ((String) value).getBytes(StandardCharsets.UTF_8);
+        buffer.writeInt(bytes.length);
+        buffer.writeBytes(bytes);
+        return INT32_BYTE_SIZE + bytes.length;
+    }
+
+    @Override
+    public int writeAsText(ByteBuf buffer, @Nonnull Object value) {
         return writeAsBinary(buffer, value);
     }
 
     @Override
     protected byte[] encodeAsUTF8Text(@Nonnull Object value) {
-        if (value instanceof String) {
-            return ((String) value).getBytes(StandardCharsets.UTF_8);
-        }
-        BytesRef bytesRef = (BytesRef) value;
-        if (bytesRef.offset == 0 && bytesRef.length == bytesRef.bytes.length) {
-            return bytesRef.bytes;
-        }
-        return Arrays.copyOfRange(bytesRef.bytes, bytesRef.offset, bytesRef.length + bytesRef.offset);
+        assert value instanceof String : "value must be a string";
+        return ((String) value).getBytes(StandardCharsets.UTF_8);
     }
 
     @Override
-    public Object readBinaryValue(ChannelBuffer buffer, int valueLength) {
-        BytesRef bytesRef = new BytesRef(valueLength);
-        bytesRef.length = valueLength;
-        buffer.readBytes(bytesRef.bytes);
-        return bytesRef;
+    public Object readBinaryValue(ByteBuf buffer, int valueLength) {
+        byte[] utf8 = new byte[valueLength];
+        buffer.readBytes(utf8);
+        return new String(utf8, StandardCharsets.UTF_8);
     }
 
     @Override
     Object decodeUTF8Text(byte[] bytes) {
-        return new BytesRef(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    static class NameType {
+        static final int OID = 19;
+        private static final int ARRAY_OID = -1;
+        private static final int TYPE_LEN = 64;
+
+        static final PGType INSTANCE = new VarCharType(OID, ARRAY_OID, TYPE_LEN, "name");
     }
 }

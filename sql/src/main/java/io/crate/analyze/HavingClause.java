@@ -21,10 +21,10 @@
 
 package io.crate.analyze;
 
-import io.crate.analyze.symbol.Symbol;
-import io.crate.metadata.StmtCtx;
+import io.crate.expression.symbol.Symbol;
 
 import javax.annotation.Nullable;
+import java.util.function.Function;
 
 public class HavingClause extends QueryClause {
 
@@ -32,14 +32,11 @@ public class HavingClause extends QueryClause {
         super(query);
     }
 
-    public HavingClause normalize(EvaluatingNormalizer normalizer, StmtCtx stmtCtx) {
-        if (noMatch || query == null) {
+    public HavingClause map(Function<? super Symbol, ? extends Symbol> mapper) {
+        if (hasQuery()) {
+            return new HavingClause(mapper.apply(query));
+        } else {
             return this;
         }
-        Symbol normalizedQuery = normalizer.normalize(query, stmtCtx);
-        if (normalizedQuery == query) {
-            return this;
-        }
-        return new HavingClause(normalizedQuery);
     }
 }

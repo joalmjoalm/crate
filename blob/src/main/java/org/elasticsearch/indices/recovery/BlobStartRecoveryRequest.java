@@ -29,25 +29,20 @@ import java.io.IOException;
 
 public class BlobStartRecoveryRequest extends BlobRecoveryRequest {
 
-    private ShardId shardId;
+    private final ShardId shardId;
 
     public BlobStartRecoveryRequest(long recoveryId, ShardId shardId) {
         super(recoveryId);
         this.shardId = shardId;
     }
 
-    public BlobStartRecoveryRequest() {
-    }
-
     public ShardId shardId() {
         return shardId;
     }
 
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        super.readFrom(in);
-        shardId = ShardId.readShardId(in);
+    public BlobStartRecoveryRequest(StreamInput in) throws IOException {
+        super(in);
+        shardId = new ShardId(in);
     }
 
     @Override

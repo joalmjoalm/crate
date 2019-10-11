@@ -21,180 +21,210 @@
 
 package io.crate.metadata.doc.array;
 
-import com.google.common.base.Joiner;
-import io.crate.integrationtests.SQLTransportIntegrationTest;
-import io.crate.test.CauseMatcher;
-import org.elasticsearch.ElasticsearchParseException;
-import org.elasticsearch.action.get.GetResponse;
-import org.elasticsearch.action.index.IndexResponse;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.common.Priority;
+import io.crate.Constants;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
+import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.compress.CompressedXContent;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
-import org.elasticsearch.index.IndexService;
-import org.elasticsearch.index.mapper.*;
-import org.elasticsearch.index.mapper.core.StringFieldMapper;
-import org.elasticsearch.indices.IndicesService;
-import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.index.MapperTestUtils;
+import org.elasticsearch.index.mapper.ArrayMapper;
+import org.elasticsearch.index.mapper.ArrayTypeParser;
+import org.elasticsearch.index.mapper.DocumentMapper;
+import org.elasticsearch.index.mapper.DocumentMapperParser;
+import org.elasticsearch.index.mapper.FieldMapper;
+import org.elasticsearch.index.mapper.KeywordFieldMapper;
+import org.elasticsearch.index.mapper.Mapper;
+import org.elasticsearch.index.mapper.MapperParsingException;
+import org.elasticsearch.index.mapper.MapperService;
+import org.elasticsearch.index.mapper.Mapping;
+import org.elasticsearch.index.mapper.ObjectArrayMapper;
+import org.elasticsearch.index.mapper.ParseContext;
+import org.elasticsearch.index.mapper.ParsedDocument;
+import org.elasticsearch.index.mapper.SourceToParse;
+import org.elasticsearch.indices.IndicesModule;
+import org.elasticsearch.plugins.MapperPlugin;
 import org.hamcrest.Matchers;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.arrayContainingInAnyOrder;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
-@ESIntegTestCase.ClusterScope(numDataNodes = 1, numClientNodes = 0, randomDynamicTemplates = false)
-public class ArrayMapperTest extends SQLTransportIntegrationTest {
+public class ArrayMapperTest extends CrateDummyClusterServiceUnitTest {
 
     public static final String INDEX = "my_index";
-    public static final String TYPE = "type";
+    public static final String TYPE = Constants.DEFAULT_MAPPING_TYPE;
 
     /**
      * create index with type and mapping and validate DocumentMapper serialization
      */
-    private DocumentMapper mapper(String indexName, String type, String mapping) throws IOException {
-        // we serialize and deserialize the mapping to make sure serialization works just fine
-        client().admin().indices().prepareCreate(indexName)
-            .addMapping(type, mapping)
-            .setSettings(Settings.builder().put("number_of_replicas", 0).build()).execute().actionGet();
-        client().admin().cluster().prepareHealth(indexName)
-            .setWaitForGreenStatus()
-            .setWaitForRelocatingShards(0)
-            .setWaitForEvents(Priority.LANGUID).execute().actionGet();
-        IndicesService instanceFromNode = internalCluster().getInstance(IndicesService.class);
-        IndexService indexService = instanceFromNode.indexServiceSafe(indexName);
+    private DocumentMapper mapper(String indexName, String mapping) throws IOException {
+        IndicesModule indicesModule = new IndicesModule(Collections.singletonList(new MapperPlugin() {
+            @Override
+            public Map<String, Mapper.TypeParser> getMappers() {
+                return Collections.singletonMap(ArrayMapper.CONTENT_TYPE, new ArrayTypeParser());
+            }
+        }));
+        MapperService mapperService = MapperTestUtils.newMapperService(
+            NamedXContentRegistry.EMPTY,
+            createTempDir(),
+            Settings.EMPTY,
+            indicesModule,
+            indexName
+        );
+        DocumentMapperParser parser = mapperService.documentMapperParser();
 
-        DocumentMapperParser parser = indexService.mapperService().documentMapperParser();
-
-        DocumentMapper defaultMapper = parser.parse(type, new CompressedXContent(mapping));
+        DocumentMapper defaultMapper = parser.parse(TYPE, new CompressedXContent(mapping));
         XContentBuilder builder = XContentFactory.contentBuilder(XContentType.JSON);
         builder.startObject();
         defaultMapper.toXContent(builder, ToXContent.EMPTY_PARAMS);
         builder.endObject();
-        String rebuildMapping = builder.string();
-        return parser.parse(type, new CompressedXContent(rebuildMapping));
+        String rebuildMapping = Strings.toString(builder);
+        return parser.parse(TYPE, new CompressedXContent(rebuildMapping));
     }
 
     @Test
     public void testSimpleArrayMapping() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject(TYPE).startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "string")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
+        // @formatter:off
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject()
+                .startObject(TYPE)
+                    .startObject("properties")
+                        .startObject("array_field")
+                            .field("type", ArrayMapper.CONTENT_TYPE)
+                            .startObject(ArrayMapper.INNER_TYPE)
+                                .field("type", "keyword")
+                            .endObject()
+                        .endObject()
+                    .endObject()
+                .endObject()
+            .endObject());
+        // @formatter:on
+        DocumentMapper mapper = mapper(INDEX, mapping);
 
         assertThat(mapper.mappers().getMapper("array_field"), is(instanceOf(ArrayMapper.class)));
-        ParsedDocument doc = mapper.parse(INDEX, TYPE, "abc", JsonXContent.contentBuilder()
+
+        BytesReference bytesReference = BytesReference.bytes(JsonXContent.contentBuilder()
             .startObject()
             .array("array_field", "a", "b", "c")
-            .endObject()
-            .bytes());
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        ParsedDocument doc = mapper.parse(sourceToParse);
         assertThat(doc.dynamicMappingsUpdate() == null, is(true));
         assertThat(doc.docs().size(), is(1));
-        assertThat(doc.docs().get(0).getValues("array_field"), arrayContainingInAnyOrder("a", "b", "c"));
+
+        ParseContext.Document fields = doc.docs().get(0);
+        Set<String> values = uniqueValuesFromFields(fields, "array_field");
+        assertThat(values, Matchers.containsInAnyOrder("a", "b", "c"));
         assertThat(
             mapper.mappingSource().string(),
-            is("{\"type\":{" +
+            is("{\"default\":{" +
                "\"properties\":{" +
                "\"array_field\":{" +
                "\"type\":\"array\"," +
                "\"inner\":{" +
-               "\"type\":\"string\"," +
-               "\"index\":\"not_analyzed\"}" +
+               "\"type\":\"keyword\"" +
                "}" +
                "}" +
                "}" +
-               "}"));
+               "}}"));
+    }
+
+    private static Set<String> uniqueValuesFromFields(ParseContext.Document fields, String fieldName) {
+        return Stream.of(fields.getFields(fieldName))
+                .map(IndexableField::binaryValue)
+                .map(BytesRef::utf8ToString)
+                .collect(Collectors.toSet());
     }
 
     @Test
     public void testInvalidArraySimpleField() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
             .startObject().startObject("type").startObject("properties")
             .startObject("array_field")
             .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
+            .startObject(ArrayMapper.INNER_TYPE)
             .field("type", "string")
-            .field("index", "not_analyzed")
             .endObject()
             .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
+            .endObject().endObject().endObject());
 
-        try {
-            mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
-                .startObject()
-                .field("array_field", "a")
-                .endObject()
-                .bytes());
-            fail("array_field parsed simple field");
-        } catch (MapperParsingException e) {
-            assertThat(e.getCause(), instanceOf(ElasticsearchParseException.class));
-            assertThat(e.getCause().getMessage(), is("invalid array"));
-        }
+        expectedException.expect(MapperParsingException.class);
+        mapper(INDEX, mapping);
     }
 
     @Test
     public void testInvalidArrayNonConvertableType() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject().startObject(TYPE).startObject("properties")
             .startObject("array_field")
             .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
+            .startObject(ArrayMapper.INNER_TYPE)
             .field("type", "double")
-            .field("index", "not_analyzed")
             .endObject()
             .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
+            .endObject().endObject().endObject());
+        DocumentMapper mapper = mapper(INDEX, mapping);
 
         expectedException.expect(MapperParsingException.class);
-        expectedException.expectMessage("failed to parse [array_field]");
+        expectedException.expectMessage("failed to parse field [array_field] of type [double]");
 
-        mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
             .startObject()
             .array("array_field", true, false, true)
-            .endObject()
-            .bytes());
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        mapper.parse(sourceToParse);
     }
 
     @Test
     public void testObjectArrayMapping() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "object")
-            .field("dynamic", true)
-            .startObject("properties")
-            .startObject("s")
-            .field("type", "string")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
+        // @formatter: off
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject()
+                .startObject(TYPE)
+                    .startObject("properties")
+                        .startObject("array_field")
+                            .field("type", ArrayMapper.CONTENT_TYPE)
+                            .startObject(ArrayMapper.INNER_TYPE)
+                                .field("type", "object")
+                                .field("dynamic", true)
+                                .startObject("properties")
+                                    .startObject("s")
+                                        .field("type", "keyword")
+                                    .endObject()
+                                .endObject()
+                            .endObject()
+                        .endObject()
+                    .endObject()
+                .endObject()
+            .endObject());
+        DocumentMapper mapper = mapper(INDEX, mapping);
         // child object mapper
-        assertThat(mapper.mappers().getMapper("array_field"), is(instanceOf(ArrayMapper.class)));
-        ParsedDocument doc = mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
+        assertThat(mapper.objectMappers().get("array_field"), is(instanceOf(ObjectArrayMapper.class)));
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
             .startObject()
             .startArray("array_field")
             .startObject()
@@ -207,15 +237,19 @@ public class ArrayMapperTest extends SQLTransportIntegrationTest {
             .field("s", "c")
             .endObject()
             .endArray()
-            .endObject()
-            .bytes());
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        ParsedDocument doc = mapper.parse(sourceToParse);
+        // @formatter: off
         assertThat(doc.dynamicMappingsUpdate(), nullValue());
         assertThat(doc.docs().size(), is(1));
-        assertThat(doc.docs().get(0).getValues("array_field.s"), arrayContainingInAnyOrder("a", "b", "c"));
-        assertThat(mapper.mappers().smartNameFieldMapper("array_field.s"), instanceOf(StringFieldMapper.class));
+        assertThat(
+            uniqueValuesFromFields(doc.docs().get(0), "array_field.s"),
+            containsInAnyOrder("a", "b", "c"));
+        assertThat(mapper.mappers().getMapper("array_field.s"), instanceOf(KeywordFieldMapper.class));
         assertThat(
             mapper.mappingSource().string(),
-            is("{\"type\":{" +
+            is("{\"default\":{" +
                "\"properties\":{" +
                "\"array_field\":{" +
                "\"type\":\"array\"," +
@@ -223,8 +257,7 @@ public class ArrayMapperTest extends SQLTransportIntegrationTest {
                "\"dynamic\":\"true\"," +
                "\"properties\":{" +
                "\"s\":{" +
-               "\"type\":\"string\"," +
-               "\"index\":\"not_analyzed\"" +
+               "\"type\":\"keyword\"" +
                "}" +
                "}" +
                "}" +
@@ -234,27 +267,30 @@ public class ArrayMapperTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testObjectArrayMappingNewColumn() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "object")
-            .field("dynamic", true)
-            .startObject("properties")
-            .startObject("s")
-            .field("type", "string")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
+        // @formatter: off
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject()
+                .startObject(TYPE)
+                    .startObject("properties")
+                        .startObject("array_field")
+                            .field("type", ArrayMapper.CONTENT_TYPE)
+                            .startObject(ArrayMapper.INNER_TYPE)
+                                .field("type", "object")
+                                .field("dynamic", true)
+                                .startObject("properties")
+                                    .startObject("s")
+                                        .field("type", "keyword")
+                                    .endObject()
+                                .endObject()
+                            .endObject()
+                        .endObject()
+                    .endObject()
+                .endObject()
+            .endObject());
+        DocumentMapper mapper = mapper(INDEX, mapping);
         // child object mapper
-        assertThat(mapper.mappers().getMapper("array_field"), is(instanceOf(ArrayMapper.class)));
-        ParsedDocument doc = mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
+        assertThat(mapper.objectMappers().get("array_field"), is(instanceOf(ObjectArrayMapper.class)));
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
             .startObject()
             .startArray("array_field")
             .startObject()
@@ -262,16 +298,20 @@ public class ArrayMapperTest extends SQLTransportIntegrationTest {
             .field("new", true)
             .endObject()
             .endArray()
-            .endObject()
-            .bytes());
-        assertThat(doc.dynamicMappingsUpdate() != null, is(true));
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        ParsedDocument doc = mapper.parse(sourceToParse);
+
+        Mapping mappingUpdate = doc.dynamicMappingsUpdate();
+        assertThat(mappingUpdate, notNullValue());
+        mapper = mapper.merge(mappingUpdate, true);
         assertThat(doc.docs().size(), is(1));
         String[] values = doc.docs().get(0).getValues("array_field.new");
         assertThat(values, arrayContainingInAnyOrder(is("T"), is("1")));
         String mappingSourceString = new CompressedXContent(mapper, XContentType.JSON, ToXContent.EMPTY_PARAMS).string();
         assertThat(
             mappingSourceString,
-            is("{\"type\":{" +
+            is("{\"default\":{" +
                "\"properties\":{" +
                "\"array_field\":{" +
                "\"type\":\"array\"," +
@@ -280,8 +320,7 @@ public class ArrayMapperTest extends SQLTransportIntegrationTest {
                "\"properties\":{" +
                "\"new\":{\"type\":\"boolean\"}," +
                "\"s\":{" +
-               "\"type\":\"string\"," +
-               "\"index\":\"not_analyzed\"" +
+               "\"type\":\"keyword\"" +
                "}" +
                "}" +
                "}" +
@@ -290,203 +329,79 @@ public class ArrayMapperTest extends SQLTransportIntegrationTest {
     }
 
     @Test
-    public void testInsertGetArray() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "double")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
-        IndexResponse response = client().prepareIndex(INDEX, "type").setId("123").setSource("{array_field:[0.0, 99.9, -100.5678]}").execute().actionGet();
-        assertThat(response.getVersion(), is(1L));
-
-        client().admin().indices().prepareRefresh(INDEX).execute().actionGet();
-
-        // realtime
-        GetResponse rtGetResponse = client().prepareGet(INDEX, "type", "123")
-            .setFetchSource(true).setFields("array_field").setRealtime(true).execute().actionGet();
-        assertThat(rtGetResponse.getId(), is("123"));
-        assertThat(Joiner.on(',').withKeyValueSeparator(":").join(rtGetResponse.getSource()), is("array_field:[0.0, 99.9, -100.5678]"));
-        assertThat(rtGetResponse.getField("array_field").getValues(), Matchers.<Object>hasItems(0.0D, 99.9D, -100.5678D));
-
-        // non-realtime
-        GetResponse getResponse = client().prepareGet(INDEX, "type", "123")
-            .setFetchSource(true).setFields("array_field").setRealtime(false).execute().actionGet();
-        assertThat(getResponse.getId(), is("123"));
-        assertThat(Joiner.on(',').withKeyValueSeparator(":").join(getResponse.getSource()), is("array_field:[0.0, 99.9, -100.5678]"));
-        assertThat(getResponse.getField("array_field").getValues(), Matchers.<Object>hasItems(0.0D, 99.9D, -100.5678D));
-    }
-
-    @Test
-    public void testInsertSearchArray() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "double")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        mapper(INDEX, TYPE, mapping);
-        IndexResponse response = client().prepareIndex(INDEX, "type").setId("123").setSource("{array_field:[0.0, 99.9, -100.5678]}").execute().actionGet();
-        assertThat(response.getVersion(), is(1L));
-
-        client().admin().indices().prepareRefresh(INDEX).execute().actionGet();
-
-        SearchResponse searchResponse = client().prepareSearch(INDEX).setTypes("type")
-            .setFetchSource(true).addField("array_field")
-            .setQuery("{\"term\": {\"array_field\": 0.0}}").execute().actionGet();
-        assertThat(searchResponse.getHits().getTotalHits(), is(1L));
-        assertThat(Joiner.on(',').withKeyValueSeparator(":").join(
-            searchResponse.getHits().getAt(0).getSource()),
-            is("array_field:[0.0, 99.9, -100.5678]"));
-        assertThat(searchResponse.getHits().getAt(0).field("array_field").getValues(), Matchers.<Object>hasItems(0.0D, 99.9D, -100.5678D));
-    }
-
-    @Test
-    public void testEmptyArray() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "double")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
-
-        // parse source with empty array
-        ParsedDocument doc = mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
-            .startObject()
-            .array("array_field")
-            .endObject()
-            .bytes());
-        assertThat(doc.dynamicMappingsUpdate() == null, is(true));
-        assertThat(doc.docs().size(), is(1));
-        assertThat(doc.docs().get(0).get("array_field"), is(nullValue())); // no lucene field generated
-
-        // insert
-        IndexResponse response = client().prepareIndex(INDEX, "type", "123").setSource("{array_field:[]}").execute().actionGet();
-        assertThat(response.getVersion(), is(1L));
-
-        client().admin().indices().prepareRefresh(INDEX).execute().actionGet();
-
-        SearchResponse searchResponse = client().prepareSearch(INDEX).setTypes("type")
-            .setFetchSource(true).addField("array_field")
-            .setQuery("{\"term\": {\"_id\": \"123\"}}").execute().actionGet();
-        assertThat(searchResponse.getHits().getTotalHits(), is(1L));
-        assertThat(Joiner.on(',').withKeyValueSeparator(":").join(
-            searchResponse.getHits().getAt(0).getSource()),
-            is("array_field:[]"));
-        assertThat(searchResponse.getHits().getAt(0).fields().containsKey("array_field"), is(false));
-    }
-
-    @Test
     public void testNestedArrayMapping() throws Exception {
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject().startObject(TYPE).startObject("properties")
+            .startObject("array_field")
+            .field("type", ArrayMapper.CONTENT_TYPE)
+            .startObject(ArrayMapper.INNER_TYPE)
+            .field("type", ArrayMapper.CONTENT_TYPE)
+            .startObject(ArrayMapper.INNER_TYPE)
+            .field("type", "double")
+            .endObject()
+            .endObject()
+            .endObject()
+            .endObject().endObject().endObject());
+
         expectedException.expect(MapperParsingException.class);
         expectedException.expectMessage("nested arrays are not supported");
-
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "double")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        mapper(INDEX, TYPE, mapping);
-    }
-
-    @Test
-    public void testParseDynamicNestedArray() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "double")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
-
-        expectedException.expect(MapperParsingException.class);
-        expectedException.expectMessage("failed to parse");
-        expectedException.expectCause(CauseMatcher.cause(ElasticsearchParseException.class, "nested arrays are not supported"));
-        // parse source with empty array
-        mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
-            .startObject()
-            .startArray("new_array_field")
-            .startArray().value("a").value("b").endArray()
-            .endArray()
-            .endObject()
-            .bytes());
-
+        mapper(INDEX, mapping);
     }
 
     @Test
     public void testParseNull() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "double")
-            .field("index", "not_analyzed")
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
-        ParsedDocument parsedDoc = mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
+        // @formatter: off
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject()
+                .startObject(TYPE)
+                    .startObject("properties")
+                        .startObject("array_field")
+                            .field("type", ArrayMapper.CONTENT_TYPE)
+                            .startObject(ArrayMapper.INNER_TYPE)
+                                .field("type", "double")
+                            .endObject()
+                        .endObject()
+                    .endObject()
+                .endObject()
+            .endObject());
+        // @formatter: on
+        DocumentMapper mapper = mapper(INDEX, mapping);
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
             .startObject()
             .nullField("array_field")
-            .endObject()
-            .bytes());
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        ParsedDocument parsedDoc = mapper.parse(sourceToParse);
         assertThat(parsedDoc.docs().size(), is(1));
         assertThat(parsedDoc.docs().get(0).getField("array_field"), is(nullValue()));
     }
 
     @Test
     public void testParseNullOnObjectArray() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .startObject("array_field")
-            .field("type", ArrayMapper.CONTENT_TYPE)
-            .startObject(ArrayMapper.INNER)
-            .field("type", "object")
-            .startObject("properties")
-            .endObject()
-            .endObject()
-            .endObject()
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
-        ParsedDocument parsedDoc = mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
+        // @formatter: on
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject()
+                .startObject(TYPE)
+                    .startObject("properties")
+                        .startObject("array_field")
+                            .field("type", ArrayMapper.CONTENT_TYPE)
+                            .startObject(ArrayMapper.INNER_TYPE)
+                                .field("type", "object")
+                                .startObject("properties")
+                                .endObject()
+                            .endObject()
+                        .endObject()
+                    .endObject()
+                .endObject()
+            .endObject());
+        // @formatter: off
+        DocumentMapper mapper = mapper(INDEX, mapping);
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
             .startObject()
             .nullField("array_field")
-            .endObject()
-            .bytes());
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        ParsedDocument parsedDoc = mapper.parse(sourceToParse);
         assertThat(parsedDoc.docs().size(), is(1));
         assertThat(parsedDoc.docs().get(0).getField("array_field"), is(nullValue()));
 
@@ -495,37 +410,79 @@ public class ArrayMapperTest extends SQLTransportIntegrationTest {
 
     @Test
     public void testParseDynamicEmptyArray() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject().startObject(TYPE).startObject("properties")
+            .endObject().endObject().endObject());
+        DocumentMapper mapper = mapper(INDEX, mapping);
 
         // parse source with empty array
-        ParsedDocument doc = mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
             .startObject()
             .array("new_array_field")
-            .endObject()
-            .bytes());
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        ParsedDocument doc = mapper.parse(sourceToParse);
         assertThat(doc.docs().get(0).getField("new_array_field"), is(nullValue()));
-        assertThat(mapper.mappers().smartNameFieldMapper("new_array_field"), is(nullValue()));
+        assertThat(mapper.mappers().getMapper("new_array_field"), is(nullValue()));
     }
 
     @Test
     public void testParseDynamicNullArray() throws Exception {
-        String mapping = XContentFactory.jsonBuilder()
-            .startObject().startObject("type").startObject("properties")
-            .endObject().endObject().endObject()
-            .string();
-        DocumentMapper mapper = mapper(INDEX, TYPE, mapping);
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject().startObject(TYPE).startObject("properties")
+            .endObject().endObject().endObject());
+        DocumentMapper mapper = mapper(INDEX, mapping);
 
         // parse source with null array
-        ParsedDocument doc = mapper.parse(INDEX, TYPE, "abc", XContentFactory.jsonBuilder()
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
             .startObject()
             .startArray("new_array_field").nullValue().endArray()
-            .endObject()
-            .bytes());
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "abc", bytesReference, XContentType.JSON);
+        ParsedDocument doc = mapper.parse(sourceToParse);
         assertThat(doc.docs().get(0).getField("new_array_field"), is(nullValue()));
-        assertThat(mapper.mappers().smartNameFieldMapper("new_array_field"), is(nullValue()));
+        assertThat(mapper.mappers().getMapper("new_array_field"), is(nullValue()));
+    }
+
+    @Test
+    public void testCopyToFieldsOfInnerMapping() throws Exception {
+        // @formatter:off
+        String mapping = Strings.toString(XContentFactory.jsonBuilder()
+            .startObject().startObject(TYPE).startObject("properties")
+                .startObject("string_array")
+                    .field("type", ArrayMapper.CONTENT_TYPE)
+                    .startObject(ArrayMapper.INNER_TYPE)
+                        .field("type", "text")
+                        .field("index", "true")
+                        .field("copy_to", "string_array_ft")
+                    .endObject()
+                .endObject()
+            .endObject().endObject().endObject());
+        // @formatter:on
+
+        DocumentMapper mapper = mapper(INDEX, mapping);
+        FieldMapper arrayMapper = (FieldMapper) mapper.mappers().getMapper("string_array");
+        assertThat(arrayMapper, is(instanceOf(ArrayMapper.class)));
+        assertThat(arrayMapper.copyTo().copyToFields(), contains("string_array_ft"));
+
+        // @formatter:on
+        BytesReference bytesReference = BytesReference.bytes(XContentFactory.jsonBuilder()
+            .startObject()
+            .startArray("string_array")
+            .value("foo")
+            .value("bar")
+            .endArray()
+            .endObject());
+        SourceToParse sourceToParse = new SourceToParse(INDEX, "1", bytesReference, XContentType.JSON);
+        ParsedDocument doc = mapper.parse(sourceToParse);
+        // @formatter:off
+
+        List<String> copyValues = new ArrayList<>();
+        for (IndexableField field : doc.docs().get(0).getFields()) {
+            if (field.name().equals("string_array_ft")) {
+                copyValues.add(field.stringValue());
+            }
+        }
+        assertThat(copyValues, containsInAnyOrder("foo", "bar"));
     }
 }

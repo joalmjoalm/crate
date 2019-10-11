@@ -21,22 +21,25 @@
 
 package io.crate.analyze;
 
-import com.google.common.base.Preconditions;
-import io.crate.exceptions.InvalidColumnNameException;
 import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.Functions;
 import io.crate.metadata.GeneratedReference;
 import io.crate.metadata.Reference;
+import io.crate.metadata.Schemas;
+import io.crate.sql.tree.Expression;
 import io.crate.sql.tree.Insert;
 
 import java.util.ArrayList;
 import java.util.Locale;
 
-public abstract class AbstractInsertAnalyzer {
+abstract class AbstractInsertAnalyzer {
 
-    protected final AnalysisMetaData analysisMetaData;
+    final Functions functions;
+    final Schemas schemas;
 
-    protected AbstractInsertAnalyzer(AnalysisMetaData analysisMetaData) {
-        this.analysisMetaData = analysisMetaData;
+    AbstractInsertAnalyzer(Functions functions, Schemas schemas) {
+        this.functions = functions;
+        this.schemas = schemas;
     }
 
     private IllegalArgumentException tooManyValuesException(int actual, int expected) {
@@ -46,7 +49,7 @@ public abstract class AbstractInsertAnalyzer {
                 actual, expected));
     }
 
-    protected void handleInsertColumns(Insert node, int maxInsertValues, AbstractInsertAnalyzedStatement context) {
+    void handleInsertColumns(Insert<Expression> node, int maxInsertValues, AbstractInsertAnalyzedStatement context) {
         // allocate columnsLists
         int numColumns;
 
@@ -55,14 +58,14 @@ public abstract class AbstractInsertAnalyzer {
             if (maxInsertValues > numColumns) {
                 throw tooManyValuesException(maxInsertValues, numColumns);
             }
-            context.columns(new ArrayList<Reference>(numColumns));
+            context.columns(new ArrayList<>(numColumns));
 
             int i = 0;
             for (Reference columnInfo : context.tableInfo().columns()) {
                 if (i >= maxInsertValues) {
                     break;
                 }
-                addColumn(columnInfo.ident().columnIdent(), context, i);
+                addColumn(columnInfo.column(), context, i);
                 i++;
             }
 
@@ -71,9 +74,9 @@ public abstract class AbstractInsertAnalyzer {
             if (maxInsertValues > numColumns) {
                 throw tooManyValuesException(maxInsertValues, numColumns);
             }
-            context.columns(new ArrayList<Reference>(numColumns));
+            context.columns(new ArrayList<>(numColumns));
             for (int i = 0; i < node.columns().size(); i++) {
-                addColumn(new ColumnIdent(node.columns().get(i)), context, i);
+                addColumn(ColumnIdent.fromNameSafe(node.columns().get(i)), context, i);
             }
         }
 
@@ -91,7 +94,10 @@ public abstract class AbstractInsertAnalyzer {
             }
         }
         ColumnIdent clusteredBy = context.tableInfo().clusteredBy();
-        if (clusteredBy != null && !clusteredBy.name().equalsIgnoreCase("_id") && context.routingColumnIndex() < 0) {
+        if (clusteredBy != null &&
+            !clusteredBy.name().equalsIgnoreCase("_id") &&
+            context.routingColumnIndex() < 0 &&
+            context.tableInfo().getReference(clusteredBy).defaultExpression() == null) {
             if (!checkReferencesForGeneratedColumn(clusteredBy, context)) {
                 throw new IllegalArgumentException("Clustered by value is required but is missing from the insert statement");
             }
@@ -102,9 +108,9 @@ public abstract class AbstractInsertAnalyzer {
         Reference reference = context.tableInfo().getReference(columnIdent);
         if (reference instanceof GeneratedReference) {
             for (Reference referencedReference : ((GeneratedReference) reference).referencedReferences()) {
-                for (Reference column : context.columns()) {
-                    if (column.equals(referencedReference) ||
-                        referencedReference.ident().columnIdent().isChildOf(column.ident().columnIdent())) {
+                for (Reference columnRef : context.columns()) {
+                    if (columnRef.equals(referencedReference) ||
+                        referencedReference.column().isChildOf(columnRef.column())) {
                         return true;
                     }
                 }
@@ -114,17 +120,12 @@ public abstract class AbstractInsertAnalyzer {
     }
 
     /**
-     * validates the column and sets primary key / partitioned by / routing information as well as a
+     * Sets primary key / partitioned by / routing information as well as a
      * column Reference to the context.
      * <p>
      * the created column reference is returned
      */
     private Reference addColumn(ColumnIdent column, AbstractInsertAnalyzedStatement context, int i) {
-        Preconditions.checkArgument(!column.name().startsWith("_"), "Inserting system columns is not allowed");
-        if (ColumnIdent.INVALID_COLUMN_NAME_PREDICATE.apply(column.name())) {
-            throw new InvalidColumnNameException(column.name());
-        }
-
         // set primary key column if found
         for (ColumnIdent pkIdent : context.tableInfo().primaryKey()) {
             if (pkIdent.getRoot().equals(column)) {

@@ -23,58 +23,128 @@ package io.crate.planner.node;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.crate.action.sql.SessionContext;
+import io.crate.analyze.OrderBy;
 import io.crate.analyze.WhereClause;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.Value;
+import io.crate.execution.dsl.phases.RoutedCollectPhase;
+import io.crate.execution.dsl.projection.Projection;
+import io.crate.expression.eval.EvaluatingNormalizer;
+import io.crate.expression.scalar.cast.CastFunctionResolver;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.CoordinatorTxnCtx;
 import io.crate.metadata.Routing;
 import io.crate.metadata.RowGranularity;
 import io.crate.planner.distribution.DistributionInfo;
-import io.crate.planner.node.dql.RoutedCollectPhase;
-import io.crate.planner.projection.Projection;
 import io.crate.test.integration.CrateUnitTest;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.junit.Test;
 
-import java.util.List;
-import java.util.Map;
+import java.util.Collections;
 import java.util.UUID;
 
+import static io.crate.testing.TestingHelpers.getFunctions;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.sameInstance;
 
 public class RoutedCollectPhaseTest extends CrateUnitTest {
 
     @Test
     public void testStreaming() throws Exception {
-        ImmutableList<Symbol> toCollect = ImmutableList.<Symbol>of(new Value(DataTypes.STRING));
+        ImmutableList<Symbol> toCollect = ImmutableList.<Symbol>of(Literal.of(DataTypes.STRING, null));
         UUID jobId = UUID.randomUUID();
         RoutedCollectPhase cn = new RoutedCollectPhase(
             jobId,
             0,
             "cn",
-            new Routing(ImmutableMap.<String, Map<String, List<Integer>>>of()),
+            new Routing(ImmutableMap.of()),
             RowGranularity.DOC,
             toCollect,
             ImmutableList.<Projection>of(),
-            WhereClause.MATCH_ALL,
+            WhereClause.MATCH_ALL.queryOrFallback(),
             DistributionInfo.DEFAULT_MODULO
         );
 
         BytesStreamOutput out = new BytesStreamOutput();
         cn.writeTo(out);
 
-        StreamInput in = StreamInput.wrap(out.bytes());
-        RoutedCollectPhase cn2 = RoutedCollectPhase.FACTORY.create();
-        cn2.readFrom(in);
+        StreamInput in = out.bytes().streamInput();
+        RoutedCollectPhase cn2 = new RoutedCollectPhase(in);
         assertThat(cn, equalTo(cn2));
 
         assertThat(cn.toCollect(), is(cn2.toCollect()));
-        assertThat(cn.executionNodes(), is(cn2.executionNodes()));
+        assertThat(cn.nodeIds(), is(cn2.nodeIds()));
         assertThat(cn.jobId(), is(cn2.jobId()));
-        assertThat(cn.executionPhaseId(), is(cn2.executionPhaseId()));
+        assertThat(cn.phaseId(), is(cn2.phaseId()));
         assertThat(cn.maxRowGranularity(), is(cn2.maxRowGranularity()));
         assertThat(cn.distributionInfo(), is(cn2.distributionInfo()));
+    }
+
+    @Test
+    public void testNormalizeDoesNotRemoveOrderBy() throws Exception {
+        Symbol toInt10 = CastFunctionResolver.generateCastFunction(Literal.of(10L), DataTypes.INTEGER, false);
+        RoutedCollectPhase collect = new RoutedCollectPhase(
+            UUID.randomUUID(),
+            1,
+            "collect",
+            new Routing(Collections.emptyMap()),
+            RowGranularity.DOC,
+            Collections.singletonList(toInt10),
+            Collections.emptyList(),
+            WhereClause.MATCH_ALL.queryOrFallback(),
+            DistributionInfo.DEFAULT_SAME_NODE
+        );
+        collect.orderBy(new OrderBy(Collections.singletonList(toInt10)));
+        EvaluatingNormalizer normalizer = EvaluatingNormalizer.functionOnlyNormalizer(getFunctions());
+        RoutedCollectPhase normalizedCollect = collect.normalize(
+            normalizer, new CoordinatorTxnCtx(SessionContext.systemSessionContext()));
+
+        assertThat(normalizedCollect.orderBy(), notNullValue());
+    }
+
+    @Test
+    public void testNormalizePreservesNodePageSizeHint() throws Exception {
+        Symbol toInt10 = CastFunctionResolver.generateCastFunction(Literal.of(10L), DataTypes.INTEGER, false);
+        RoutedCollectPhase collect = new RoutedCollectPhase(
+            UUID.randomUUID(),
+            1,
+            "collect",
+            new Routing(Collections.emptyMap()),
+            RowGranularity.DOC,
+            Collections.singletonList(toInt10),
+            Collections.emptyList(),
+            WhereClause.MATCH_ALL.queryOrFallback(),
+            DistributionInfo.DEFAULT_SAME_NODE
+        );
+        collect.nodePageSizeHint(10);
+        EvaluatingNormalizer normalizer = EvaluatingNormalizer.functionOnlyNormalizer(getFunctions());
+        RoutedCollectPhase normalizedCollect = collect.normalize(
+            normalizer, new CoordinatorTxnCtx(SessionContext.systemSessionContext()));
+
+        assertThat(normalizedCollect.nodePageSizeHint(), is(10));
+    }
+
+    @Test
+    public void testNormalizeNoop() throws Exception {
+        RoutedCollectPhase collect = new RoutedCollectPhase(
+            UUID.randomUUID(),
+            1,
+            "collect",
+            new Routing(Collections.emptyMap()),
+            RowGranularity.DOC,
+            Collections.singletonList(Literal.of(10)),
+            Collections.emptyList(),
+            WhereClause.MATCH_ALL.queryOrFallback(),
+            DistributionInfo.DEFAULT_SAME_NODE
+        );
+        EvaluatingNormalizer normalizer = EvaluatingNormalizer.functionOnlyNormalizer(getFunctions());
+        RoutedCollectPhase normalizedCollect = collect.normalize(
+            normalizer, new CoordinatorTxnCtx(SessionContext.systemSessionContext()));
+
+        assertThat(normalizedCollect, sameInstance(collect));
     }
 }

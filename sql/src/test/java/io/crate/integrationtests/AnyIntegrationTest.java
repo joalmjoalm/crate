@@ -22,14 +22,12 @@
 package io.crate.integrationtests;
 
 import io.crate.testing.TestingHelpers;
-import io.crate.testing.UseJdbc;
 import org.hamcrest.Matchers;
 import org.hamcrest.core.Is;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.is;
 
-@UseJdbc
 public class AnyIntegrationTest extends SQLTransportIntegrationTest {
 
     @Test
@@ -125,5 +123,37 @@ public class AnyIntegrationTest extends SQLTransportIntegrationTest {
         execute("insert into t (x) values ([1, 2, 3, 4])");
         execute("refresh table t");
         execute("select * from t where 4 < ANY (x) ");
+    }
+
+    @Test
+    public void testNotAnyInWhereClauseDoesNotFilterOutEmptyArrays() {
+        execute("create table t (b integer, labels array(string))");
+        ensureYellow();
+        execute("insert into t (b, labels) values (1, ['one', 'two'])," +
+                "(2, ['two', 'three'])," +
+                "(3, ['three', 'four'])," +
+                "(4, [])");
+        refresh();
+        execute("select b from t where not 'two' = ANY(labels) order by b");
+
+        assertThat(response.rowCount(), is(2L));
+        assertThat(response.rows()[0][0], is(3));
+        assertThat(response.rows()[1][0], is(4));
+    }
+
+    @Test
+    public void testAnyOperatorWithFieldThatRequiresConversion() {
+        execute(
+            "create table t (" +
+            "   ts timestamp with time zone" +
+            ") clustered into 1 shards with (number_of_replicas = 0)");
+        ensureYellow();
+        execute("insert into t values ('2017-12-31'), ('2016-12-31'), ('2015-12-31')");
+        execute("refresh table t");
+
+        execute("select ts from t where ts = ANY (['2017-12-31', '2016-12-31']) order by ts");
+        assertThat(response.rowCount(), is(2L));
+        assertThat(response.rows()[0][0], is(1483142400000L));
+        assertThat(response.rows()[1][0], is(1514678400000L));
     }
 }

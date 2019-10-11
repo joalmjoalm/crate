@@ -22,49 +22,60 @@
 package io.crate.analyze;
 
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Optional;
-import com.google.common.collect.Iterators;
-import io.crate.analyze.symbol.Literal;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.Symbols;
-import io.crate.analyze.symbol.ValueSymbolVisitor;
-import io.crate.analyze.where.DocKeys;
-import io.crate.metadata.StmtCtx;
-import io.crate.operation.operator.AndOperator;
+import io.crate.exceptions.VersioninigValidationException;
+import io.crate.expression.operator.AndOperator;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.Symbols;
+import io.crate.metadata.doc.DocSysColumns;
 import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Streamable;
 
-import java.io.IOException;
-import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
-public class WhereClause extends QueryClause implements Streamable {
+public class WhereClause extends QueryClause {
 
     public static final WhereClause MATCH_ALL = new WhereClause(Literal.BOOLEAN_TRUE);
     public static final WhereClause NO_MATCH = new WhereClause(Literal.BOOLEAN_FALSE);
 
-    private Optional<Set<Symbol>> clusteredBy = Optional.absent();
+    private Set<Symbol> clusteredBy = Collections.emptySet();
+    private List<String> partitions = Collections.emptyList();
 
-    private Optional<DocKeys> docKeys = Optional.absent();
-
-    private List<String> partitions = new ArrayList<>();
-
-
-    public WhereClause(StreamInput in) throws IOException {
-        readFrom(in);
-    }
 
     public WhereClause(@Nullable Symbol normalizedQuery,
-                       @Nullable DocKeys docKeys,
-                       @Nullable List<String> partitions) {
+                       @Nullable List<String> partitions,
+                       Set<Symbol> clusteredBy) {
         super(normalizedQuery);
-        docKeys(docKeys);
+        this.clusteredBy = clusteredBy;
         if (partitions != null) {
             this.partitions = partitions;
+        }
+        if (query != null) {
+            validateVersioningColumnsUsage();
+        }
+    }
+
+    private void validateVersioningColumnsUsage() {
+        if (Symbols.containsColumn(query, DocSysColumns.SEQ_NO)) {
+            if (!Symbols.containsColumn(query, DocSysColumns.PRIMARY_TERM)) {
+                throw VersioninigValidationException.seqNoAndPrimaryTermUsage();
+            } else {
+                if (Symbols.containsColumn(query, DocSysColumns.VERSION)) {
+                    throw VersioninigValidationException.mixedVersioningMeachanismsUsage();
+                }
+            }
+        } else if (Symbols.containsColumn(query, DocSysColumns.PRIMARY_TERM)) {
+            if (!Symbols.containsColumn(query, DocSysColumns.SEQ_NO)) {
+                throw VersioninigValidationException.seqNoAndPrimaryTermUsage();
+            } else {
+                if (Symbols.containsColumn(query, DocSysColumns.VERSION)) {
+                    throw VersioninigValidationException.mixedVersioningMeachanismsUsage();
+                }
+            }
         }
     }
 
@@ -72,61 +83,22 @@ public class WhereClause extends QueryClause implements Streamable {
         super(query);
     }
 
-    public WhereClause normalize(EvaluatingNormalizer normalizer, StmtCtx stmtCtx) {
-        if (noMatch || query == null) {
-            return this;
-        }
-        Symbol normalizedQuery = normalizer.normalize(query, stmtCtx);
-        if (normalizedQuery == query) {
-            return this;
-        }
-        WhereClause normalizedWhereClause = new WhereClause(normalizedQuery,
-            docKeys.orNull(), partitions);
-        normalizedWhereClause.clusteredBy = clusteredBy;
-        return normalizedWhereClause;
-    }
-
-    public Optional<Set<Symbol>> clusteredBy() {
+    public Set<Symbol> clusteredBy() {
         return clusteredBy;
     }
 
     @Nullable
     public Set<String> routingValues() {
-        if (clusteredBy.isPresent()) {
-            HashSet<String> result = new HashSet<>(clusteredBy.get().size());
-            Iterators.addAll(result, Iterators.transform(
-                clusteredBy.get().iterator(), ValueSymbolVisitor.STRING.function));
+        if (clusteredBy.isEmpty() == false) {
+            HashSet<String> result = new HashSet<>(clusteredBy.size());
+            for (Symbol symbol : clusteredBy) {
+                assert symbol instanceof Literal : "clustered by symbols must be literals";
+                result.add(((Literal) symbol).value().toString());
+            }
             return result;
         } else {
             return null;
         }
-    }
-
-    public void clusteredBy(@Nullable Set<Symbol> clusteredBy) {
-        assert this != NO_MATCH && this != MATCH_ALL : "may not set clusteredByLiteral on MATCH_ALL/NO_MATCH singleton";
-        if (clusteredBy != null && !clusteredBy.isEmpty()) {
-            this.clusteredBy = Optional.of(clusteredBy);
-        }
-    }
-
-    public void partitions(List<Literal> partitions) {
-        assert this != NO_MATCH && this != MATCH_ALL : "may not set partitions on MATCH_ALL/NO_MATCH singleton";
-        for (Literal partition : partitions) {
-            this.partitions.add(ValueSymbolVisitor.STRING.process(partition));
-        }
-    }
-
-    public void docKeys(@Nullable DocKeys docKeys) {
-        assert this != NO_MATCH && this != MATCH_ALL : "may not set docKeys on MATCH_ALL/NO_MATCH singleton";
-        if (docKeys == null) {
-            this.docKeys = Optional.absent();
-        } else {
-            this.docKeys = Optional.of(docKeys);
-        }
-    }
-
-    public Optional<DocKeys> docKeys() {
-        return docKeys;
     }
 
     /**
@@ -142,26 +114,6 @@ public class WhereClause extends QueryClause implements Streamable {
     }
 
     @Override
-    public void readFrom(StreamInput in) throws IOException {
-        if (in.readBoolean()) {
-            query = Symbols.fromStream(in);
-        } else {
-            noMatch = in.readBoolean();
-        }
-    }
-
-    @Override
-    public void writeTo(StreamOutput out) throws IOException {
-        if (query != null) {
-            out.writeBoolean(true);
-            Symbols.toStream(query, out);
-        } else {
-            out.writeBoolean(false);
-            out.writeBoolean(noMatch);
-        }
-    }
-
-    @Override
     public String toString() {
         MoreObjects.ToStringHelper helper = MoreObjects.toStringHelper(this);
         if (noMatch()) {
@@ -174,34 +126,14 @@ public class WhereClause extends QueryClause implements Streamable {
         return helper.toString();
     }
 
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof WhereClause)) return false;
-
-        WhereClause that = (WhereClause) o;
-        if (query != null ? !query.equals(that.query) : that.query != null) return false;
-        if (noMatch != that.noMatch) return false;
-        if (!docKeys.equals(that.docKeys)) return false;
-        if (!clusteredBy.equals(that.clusteredBy)) return false;
-        if (partitions != null ? !partitions.equals(that.partitions) : that.partitions != null)
-            return false;
-        return true;
-    }
-
-    @Override
-    public int hashCode() {
-        int result = query != null ? query.hashCode() : 0;
-        result = 31 * result + (noMatch ? 1 : 0);
-        result = 31 * result + (clusteredBy != null ? clusteredBy.hashCode() : 0);
-        result = 31 * result + (partitions != null ? partitions.hashCode() : 0);
-        return result;
-    }
-
     public boolean hasVersions() {
-        return docKeys.isPresent() && docKeys.get().withVersions();
+        return query != null && Symbols.containsColumn(query, DocSysColumns.VERSION);
     }
 
+    public boolean hasSeqNoAndPrimaryTerm() {
+        return query != null && Symbols.containsColumn(query, DocSysColumns.SEQ_NO) &&
+               Symbols.containsColumn(query, DocSysColumns.PRIMARY_TERM);
+    }
 
     /**
      * Adds another query to this WhereClause.
@@ -209,7 +141,6 @@ public class WhereClause extends QueryClause implements Streamable {
      * The result is either a new WhereClause or the same (but modified) instance.
      */
     public WhereClause add(Symbol otherQuery) {
-        assert !docKeys.isPresent() : "Cannot add otherQuery if there are docKeys in the WhereClause";
         if (this == MATCH_ALL) {
             return new WhereClause(otherQuery);
         }
@@ -217,7 +148,40 @@ public class WhereClause extends QueryClause implements Streamable {
             // NO_MATCH & anything is still NO_MATCH
             return NO_MATCH;
         }
+        if (this.query == null) {
+            return new WhereClause(otherQuery);
+        }
         this.query = AndOperator.of(this.query, otherQuery);
         return this;
+    }
+
+    public WhereClause map(Function<? super Symbol, ? extends Symbol> mapper) {
+        if (query == null && clusteredBy.isEmpty()) {
+            return this;
+        }
+        Symbol newQuery = query == null ? null : mapper.apply(query);
+        HashSet<Symbol> newClusteredBy = new HashSet<>(clusteredBy.size());
+        for (Symbol symbol : clusteredBy) {
+            newClusteredBy.add(mapper.apply(symbol));
+        }
+        return new WhereClause(newQuery, partitions, newClusteredBy);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        WhereClause that = (WhereClause) o;
+        return Objects.equals(clusteredBy, that.clusteredBy) &&
+               Objects.equals(partitions, that.partitions);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(clusteredBy, partitions);
     }
 }

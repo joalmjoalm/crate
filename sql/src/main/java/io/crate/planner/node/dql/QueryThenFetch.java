@@ -22,66 +22,77 @@
 
 package io.crate.planner.node.dql;
 
-import io.crate.planner.Plan;
-import io.crate.planner.PlanAndPlannedAnalyzedRelation;
-import io.crate.planner.PlanVisitor;
-import io.crate.planner.distribution.UpstreamPhase;
-import io.crate.planner.node.fetch.FetchPhase;
-import io.crate.planner.projection.Projection;
+import io.crate.planner.ExecutionPlan;
+import io.crate.planner.ExecutionPlanVisitor;
+import io.crate.planner.PositionalOrderBy;
+import io.crate.planner.ResultDescription;
+import io.crate.planner.distribution.DistributionInfo;
+import io.crate.execution.dsl.phases.FetchPhase;
+import io.crate.execution.dsl.projection.Projection;
 
 import javax.annotation.Nullable;
-import java.util.UUID;
+import java.util.Objects;
 
-public class QueryThenFetch extends PlanAndPlannedAnalyzedRelation {
+public class QueryThenFetch implements ExecutionPlan {
 
     private final FetchPhase fetchPhase;
-    private final Plan subPlan;
-    private final MergePhase localMerge;
-    private final UUID id;
+    private final ExecutionPlan subExecutionPlan;
 
-    public QueryThenFetch(Plan subPlan, FetchPhase fetchPhase, @Nullable MergePhase localMerge, UUID id) {
-        this.subPlan = subPlan;
+    public QueryThenFetch(ExecutionPlan subExecutionPlan, FetchPhase fetchPhase) {
+        this.subExecutionPlan = subExecutionPlan;
         this.fetchPhase = fetchPhase;
-        this.localMerge = localMerge;
-        this.id = id;
     }
 
     public FetchPhase fetchPhase() {
         return fetchPhase;
     }
 
-    @Nullable
-    public MergePhase localMerge() {
-        return localMerge;
-    }
-
-    public Plan subPlan() {
-        return subPlan;
+    public ExecutionPlan subPlan() {
+        return subExecutionPlan;
     }
 
     @Override
-    public <C, R> R accept(PlanVisitor<C, R> visitor, C context) {
+    public <C, R> R accept(ExecutionPlanVisitor<C, R> visitor, C context) {
         return visitor.visitQueryThenFetch(this, context);
     }
 
     @Override
-    public UUID jobId() {
-        return id;
-    }
-
-    @Override
     public void addProjection(Projection projection) {
-        throw new UnsupportedOperationException("Adding projections to QTF is not possible");
+        subExecutionPlan.addProjection(projection);
     }
 
     @Override
-    public boolean resultIsDistributed() {
-        return false;
+    public void addProjection(Projection projection,
+                              int unfinishedLimit,
+                              int unfinishedOffset,
+                              @Nullable PositionalOrderBy unfinishedOrderBy) {
+        subExecutionPlan.addProjection(projection, unfinishedLimit, unfinishedOffset, unfinishedOrderBy);
     }
 
     @Override
-    public UpstreamPhase resultPhase() {
-        assert localMerge != null;
-        return localMerge;
+    public ResultDescription resultDescription() {
+        return subExecutionPlan.resultDescription();
+    }
+
+    @Override
+    public void setDistributionInfo(DistributionInfo distributionInfo) {
+        subExecutionPlan.setDistributionInfo(distributionInfo);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        QueryThenFetch that = (QueryThenFetch) o;
+        return Objects.equals(fetchPhase, that.fetchPhase) && Objects.equals(subExecutionPlan, that.subExecutionPlan);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(fetchPhase, subExecutionPlan);
     }
 }

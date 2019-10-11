@@ -22,28 +22,30 @@
 
 package io.crate.analyze.relations;
 
-import com.google.common.base.Function;
 import com.google.common.base.Objects;
-import io.crate.analyze.symbol.Symbol;
+import io.crate.expression.symbol.Symbol;
 import io.crate.planner.node.dql.join.JoinType;
 import io.crate.sql.tree.QualifiedName;
 
 import javax.annotation.Nullable;
+import java.util.function.Function;
 
 public class JoinPair {
 
-    private JoinType joinType;
+    private final JoinType joinType;
 
-    private QualifiedName left;
-    private QualifiedName right;
+    private final QualifiedName left;
+    private final QualifiedName right;
+
     @Nullable
-    private Symbol condition;
+    private final Symbol condition;
 
-    public JoinPair(QualifiedName left, QualifiedName right, JoinType joinType) {
-        this(left, right, joinType, null);
+    public static JoinPair of(QualifiedName left, QualifiedName right, JoinType joinType, Symbol condition) {
+        assert condition != null || joinType == JoinType.CROSS : "condition must be present unless it's a cross-join";
+        return new JoinPair(left, right, joinType, condition);
     }
 
-    public JoinPair(QualifiedName left, QualifiedName right, JoinType joinType, @Nullable Symbol condition) {
+    private JoinPair(QualifiedName left, QualifiedName right, JoinType joinType, @Nullable Symbol condition) {
         this.left = left;
         this.right = right;
         this.joinType = joinType;
@@ -67,8 +69,9 @@ public class JoinPair {
         return condition;
     }
 
-    public void condition(Symbol condition) {
-        this.condition = condition;
+    @Override
+    public String toString() {
+        return "Join{" + joinType + " " + left + " ⇔ " + right + '}';
     }
 
     @Override
@@ -87,36 +90,10 @@ public class JoinPair {
         return Objects.hashCode(left, right, joinType, condition);
     }
 
-    public void replaceCondition(Function<? super Symbol, Symbol> replaceFunction) {
-        condition = replaceFunction.apply(condition);
-    }
-
-    boolean equalsNames(QualifiedName left, QualifiedName right) {
-        return this.left.equals(left) && this.right.equals(right);
-    }
-
-    void replaceNames(QualifiedName left, QualifiedName right, QualifiedName newName) {
-        if (this.left.equals(left) || this.left.equals(right)) {
-            this.left = newName;
+    public JoinPair mapCondition(Function<? super Symbol,? extends Symbol> updateField) {
+        if (condition == null) {
+            return this;
         }
-        if (this.right.equals(right) || this.right.equals(left)) {
-            this.right = newName;
-        }
-    }
-
-    boolean isOuterRelation(QualifiedName name) {
-        if (joinType.isOuter()) {
-            if (left.equals(name) && (joinType == JoinType.RIGHT || joinType == JoinType.FULL)) {
-                return true;
-            }
-            if (right.equals(name) && (joinType == JoinType.LEFT || joinType == JoinType.FULL)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    public void joinType(JoinType joinType) {
-        this.joinType = joinType;
+        return new JoinPair(left, right, joinType, updateField.apply(condition));
     }
 }

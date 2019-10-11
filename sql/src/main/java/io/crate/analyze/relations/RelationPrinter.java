@@ -22,7 +22,7 @@
 
 package io.crate.analyze.relations;
 
-import io.crate.analyze.QueriedTable;
+import io.crate.analyze.QueriedSelectRelation;
 
 public class RelationPrinter extends AnalyzedRelationVisitor<Void, String> {
 
@@ -33,7 +33,7 @@ public class RelationPrinter extends AnalyzedRelationVisitor<Void, String> {
 
     @Override
     protected String visitAnalyzedRelation(AnalyzedRelation relation, Void context) {
-        return relation.getClass().getCanonicalName();
+        return relation.getClass().getSimpleName();
     }
 
     @Override
@@ -47,12 +47,17 @@ public class RelationPrinter extends AnalyzedRelationVisitor<Void, String> {
     }
 
     @Override
-    public String visitQueriedDocTable(QueriedDocTable table, Void context) {
-        return table.tableRelation().tableInfo().ident().sqlFqn();
+    public String visitQueriedSelectRelation(QueriedSelectRelation relation, Void context) {
+        return relation.getQualifiedName().toString();
     }
 
     @Override
-    public String visitQueriedTable(QueriedTable table, Void context) {
-        return table.tableRelation().tableInfo().ident().sqlFqn();
+    public String visitUnionSelect(UnionSelect unionSelect, Void context) {
+        return unionSelect.getQualifiedName().toString();
+    }
+
+    @Override
+    public String visitAliasedAnalyzedRelation(AliasedAnalyzedRelation relation, Void context) {
+        return relation.getQualifiedName().toString();
     }
 }

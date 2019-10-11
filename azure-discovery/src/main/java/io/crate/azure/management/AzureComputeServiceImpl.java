@@ -28,7 +28,9 @@ import com.microsoft.azure.utility.AuthHelper;
 import com.microsoft.windowsazure.Configuration;
 import com.microsoft.windowsazure.core.DefaultBuilder;
 import com.microsoft.windowsazure.management.configuration.ManagementConfiguration;
-import io.crate.azure.AzureModule;
+import io.crate.azure.AzureConfiguration;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.component.AbstractLifecycleComponent;
@@ -38,10 +40,14 @@ import org.elasticsearch.common.settings.Settings;
 import java.io.IOException;
 import java.net.URI;
 
-import static io.crate.azure.management.AzureComputeService.Management.*;
+import static io.crate.azure.management.AzureComputeService.Management.APP_ID;
+import static io.crate.azure.management.AzureComputeService.Management.APP_SECRET;
+import static io.crate.azure.management.AzureComputeService.Management.SUBSCRIPTION_ID;
+import static io.crate.azure.management.AzureComputeService.Management.TENANT_ID;
 
-public class AzureComputeServiceImpl extends AbstractLifecycleComponent<AzureComputeService>
-    implements AzureComputeService {
+public class AzureComputeServiceImpl extends AbstractLifecycleComponent implements AzureComputeService {
+
+    private static final Logger LOGGER = LogManager.getLogger(AzureComputeServiceImpl.class);
 
     private final String resourceGroupName;
     private final String subscriptionId;
@@ -60,12 +66,11 @@ public class AzureComputeServiceImpl extends AbstractLifecycleComponent<AzureCom
 
     @Inject
     public AzureComputeServiceImpl(Settings settings) {
-        super(settings);
-        subscriptionId = settings.get(SUBSCRIPTION_ID);
-        tenantId = settings.get(TENANT_ID);
-        appId = settings.get(APP_ID);
-        appSecret = settings.get(APP_SECRET);
-        resourceGroupName = settings.get(Management.RESOURCE_GROUP_NAME);
+        subscriptionId = SUBSCRIPTION_ID.get(settings);
+        tenantId = TENANT_ID.get(settings);
+        appId = APP_ID.get(settings);
+        appSecret = APP_SECRET.get(settings);
+        resourceGroupName = Management.RESOURCE_GROUP_NAME.get(settings);
     }
 
     @Nullable
@@ -97,7 +102,7 @@ public class AzureComputeServiceImpl extends AbstractLifecycleComponent<AzureCom
     @Override
     public Configuration configuration() {
         if (configuration == null) {
-            logger.trace("Creating new Azure configuration for [{}], [{}]", subscriptionId, resourceGroupName);
+            LOGGER.trace("Creating new Azure configuration for [{}], [{}]", subscriptionId, resourceGroupName);
             configuration = createConfiguration();
         }
         return configuration;
@@ -115,11 +120,11 @@ public class AzureComputeServiceImpl extends AbstractLifecycleComponent<AzureCom
             );
 
             DefaultBuilder registry = DefaultBuilder.create();
-            AzureModule.registerServices(registry);
+            AzureConfiguration.registerServices(registry);
             conf = ManagementConfiguration.configure(null, new Configuration(registry),
                 URI.create(Azure.ENDPOINT), subscriptionId, authRes.getAccessToken());
         } catch (Exception e) {
-            logger.error("Could not create configuration for Azure clients", e);
+            LOGGER.error("Could not create configuration for Azure clients", e);
         }
         return conf;
     }
@@ -138,14 +143,14 @@ public class AzureComputeServiceImpl extends AbstractLifecycleComponent<AzureCom
             try {
                 computeManagementClient.close();
             } catch (IOException e) {
-                logger.error("Error while closing Azure computeManagementClient", e);
+                LOGGER.error("Error while closing Azure computeManagementClient", e);
             }
         }
         if (networkResourceClient != null) {
             try {
                 networkResourceClient.close();
             } catch (IOException e) {
-                logger.error("Error while closing Azure networkResourceClient", e);
+                LOGGER.error("Error while closing Azure networkResourceClient", e);
             }
         }
     }

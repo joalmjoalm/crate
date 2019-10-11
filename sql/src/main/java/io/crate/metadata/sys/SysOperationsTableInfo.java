@@ -21,57 +21,57 @@
 
 package io.crate.metadata.sys;
 
+import com.google.common.collect.ImmutableMap;
+import io.crate.action.sql.SessionContext;
 import io.crate.analyze.WhereClause;
-import io.crate.metadata.*;
+import io.crate.expression.reference.sys.operation.OperationContext;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.Routing;
+import io.crate.metadata.RoutingProvider;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
 import io.crate.metadata.table.ColumnRegistrar;
 import io.crate.metadata.table.StaticTableInfo;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
-import org.elasticsearch.common.inject.Inject;
-import org.elasticsearch.common.inject.Singleton;
+import io.crate.types.ObjectType;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.node.DiscoveryNode;
 
-import javax.annotation.Nullable;
-import java.util.Collections;
+import java.util.Map;
+import java.util.function.Supplier;
 
-@Singleton
-public class SysOperationsTableInfo extends StaticTableInfo {
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.LONG;
+import static io.crate.types.DataTypes.STRING;
+import static io.crate.types.DataTypes.TIMESTAMPZ;
 
-    public static final TableIdent IDENT = new TableIdent(SysSchemaInfo.NAME, "operations");
-    private final ClusterService clusterService;
+public class SysOperationsTableInfo extends StaticTableInfo<OperationContext> {
 
-    public static class Columns {
-        public final static ColumnIdent ID = new ColumnIdent("id");
-        public final static ColumnIdent JOB_ID = new ColumnIdent("job_id");
-        public final static ColumnIdent NAME = new ColumnIdent("name");
-        public final static ColumnIdent STARTED = new ColumnIdent("started");
-        public final static ColumnIdent USED_BYTES = new ColumnIdent("used_bytes");
+    public static final RelationName IDENT = new RelationName(SysSchemaInfo.NAME, "operations");
+
+    public static Map<ColumnIdent, RowCollectExpressionFactory<OperationContext>> expressions(Supplier<DiscoveryNode> localNode) {
+        return columnRegistrar(localNode).expressions();
     }
 
-    private final TableColumn nodesTableColumn;
-
-    @Inject
-    public SysOperationsTableInfo(ClusterService clusterService, SysNodesTableInfo sysNodesTableInfo) {
-        super(IDENT, new ColumnRegistrar(IDENT, RowGranularity.DOC)
-                .register(Columns.ID, DataTypes.STRING)
-                .register(Columns.JOB_ID, DataTypes.STRING)
-                .register(Columns.NAME, DataTypes.STRING)
-                .register(Columns.STARTED, DataTypes.TIMESTAMP)
-                .register(Columns.USED_BYTES, DataTypes.LONG)
-                .putInfoOnly(SysNodesTableInfo.SYS_COL_IDENT, SysNodesTableInfo.tableColumnInfo(IDENT)),
-            Collections.<ColumnIdent>emptyList());
-        this.clusterService = clusterService;
-        nodesTableColumn = sysNodesTableInfo.tableColumn();
+    private static ColumnRegistrar<OperationContext> columnRegistrar(Supplier<DiscoveryNode> localNode) {
+        return new ColumnRegistrar<OperationContext>(IDENT, RowGranularity.DOC)
+            .register("id", STRING, () -> forFunction(c -> String.valueOf(c.id())))
+            .register("job_id", STRING, () -> forFunction(c -> c.jobId().toString()))
+            .register("name", STRING, () -> forFunction(OperationContext::name))
+            .register("started", TIMESTAMPZ, () -> forFunction(OperationContext::started))
+            .register("used_bytes", LONG, () -> forFunction(OperationContext::usedBytes))
+            .register("node", ObjectType.builder()
+                .setInnerType("id", STRING)
+                .setInnerType("name", STRING).build(), () -> forFunction(ignored -> ImmutableMap.of(
+                "id", localNode.get().getId(),
+                "name", localNode.get().getName()
+            )))
+            .register("node", "id", STRING, () -> forFunction(ignored -> localNode.get().getId()))
+            .register("node", "name", STRING, () -> forFunction(ignored -> localNode.get().getName()));
     }
 
-
-    @Nullable
-    @Override
-    public Reference getReference(ColumnIdent columnIdent) {
-        Reference info = super.getReference(columnIdent);
-        if (info == null) {
-            return nodesTableColumn.getReference(this.ident(), columnIdent);
-        }
-        return info;
+    SysOperationsTableInfo(Supplier<DiscoveryNode> localNode) {
+        super(IDENT, columnRegistrar(localNode));
     }
 
     @Override
@@ -80,7 +80,11 @@ public class SysOperationsTableInfo extends StaticTableInfo {
     }
 
     @Override
-    public Routing getRouting(WhereClause whereClause, @Nullable String preference) {
-        return Routing.forTableOnAllNodes(IDENT, clusterService.state().nodes());
+    public Routing getRouting(ClusterState clusterState,
+                              RoutingProvider routingProvider,
+                              WhereClause whereClause,
+                              RoutingProvider.ShardSelection shardSelection,
+                              SessionContext sessionContext) {
+        return Routing.forTableOnAllNodes(IDENT, clusterState.getNodes());
     }
 }

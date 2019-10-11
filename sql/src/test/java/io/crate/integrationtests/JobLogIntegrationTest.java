@@ -21,92 +21,137 @@
 
 package io.crate.integrationtests;
 
-import io.crate.action.sql.SQLResponse;
-import io.crate.metadata.settings.CrateSettings;
+import io.crate.action.sql.SQLOperations;
+import io.crate.action.sql.Session;
+import io.crate.execution.engine.collect.stats.JobsLogService;
+import io.crate.execution.engine.collect.stats.JobsLogs;
+import io.crate.expression.reference.sys.job.JobContextLog;
+import io.crate.testing.UseHashJoins;
 import io.crate.testing.UseJdbc;
+import io.crate.testing.UseRandomizedSchema;
 import org.elasticsearch.test.ESIntegTestCase;
-import org.hamcrest.Matchers;
 import org.junit.After;
 import org.junit.Test;
 
+import java.util.Iterator;
+
 import static org.hamcrest.core.Is.is;
 
-@ESIntegTestCase.ClusterScope(numDataNodes = 2, numClientNodes = 0)
-@UseJdbc
+@ESIntegTestCase.ClusterScope(numDataNodes = 2, numClientNodes = 0, supportsDedicatedMasters = false)
+@UseRandomizedSchema(random = false) // Avoid set session stmt to interfere with tests
+@UseHashJoins(1) // Avoid set session stmt to interfere with tests
 public class JobLogIntegrationTest extends SQLTransportIntegrationTest {
 
     @After
-    public void resetSettings() throws Exception {
+    public void resetSettings() {
         // reset stats settings in case of some tests changed it and failed without resetting.
-        sqlExecutor.exec("reset global stats.enabled, stats.jobs_log_size, stats.operations_log_size");
+        execute("reset global stats.enabled, stats.jobs_log_size, stats.operations_log_size");
     }
 
     @Test
-    @UseJdbc(false) // SET extra_float_digits = 3 gets added to the jobs_log
+    @UseJdbc(0) // SET extra_float_digits = 3 gets added to the jobs_log
     public void testJobLogWithEnabledAndDisabledStats() throws Exception {
-        sqlExecutor.exec("select name from sys.cluster");
-        SQLResponse response = sqlExecutor.exec("select * from sys.jobs_log");
-        assertThat(response.rowCount(), is(0L)); // default length is zero
+        String setStmt = "set global transient stats.jobs_log_size=1";
+        execute(setStmt);
 
-        sqlExecutor.exec("set global transient stats.enabled = true, stats.jobs_log_size=1");
+        // We record the statements in the log **after** we notify the result receivers (see {@link JobsLogsUpdateListener usage).
+        // So it might happen that the "set global ..." statement execution is returned to this test but the recording
+        // in the log is done AFTER the execution of the below "select name from sys.cluster" statement (because async
+        // programming is evil like that). And then this test will fail and people will spend days and days to figure
+        // out what's going on.
+        // So let's just wait for the "set global ... " statement to be recorded here and then move on with our test.
+        assertBusy(() -> {
+            boolean setStmtFound = false;
+            for (JobsLogService jobsLogService : internalCluster().getDataNodeInstances(JobsLogService.class)) {
+                // each node must have received the new jobs_log_size setting change instruction
+                assertThat(jobsLogService.jobsLogSize(), is(1));
+                JobsLogs jobsLogs = jobsLogService.get();
+                Iterator<JobContextLog> iterator = jobsLogs.jobsLog().iterator();
+                if (iterator.hasNext()) {
+                    if (iterator.next().statement().equalsIgnoreCase(setStmt)) {
+                       setStmtFound = true;
+                    }
+                }
+            }
+            // at least one node must have the set statement logged
+            assertThat(setStmtFound, is(true));
+        });
 
-        sqlExecutor.exec("select id from sys.cluster");
-        sqlExecutor.exec("select id from sys.cluster");
-        sqlExecutor.exec("select id from sys.cluster");
-        response = sqlExecutor.exec("select stmt from sys.jobs_log order by ended desc");
+        // Each node can hold only 1 query (the latest one) so in total we should always see 2 queries in
+        // the jobs_log. We make sure that we hit both nodes with 2 queries each and then assert that
+        // only the latest queries are found in the log.
+        for (SQLOperations sqlOperations : internalCluster().getDataNodeInstances(SQLOperations.class)) {
+            Session session = sqlOperations.newSystemSession();
+            execute("select name from sys.cluster", null, session);
+        }
+        assertJobLogOnNodesHaveOnlyStatement("select name from sys.cluster");
 
-        // there are 2 nodes so depending on whether both nodes were hit this should be either 1 or 2
-        // but never 3 because the queue size is only 1
-        assertThat(response.rowCount(), Matchers.lessThanOrEqualTo(2L));
-        assertThat((String) response.rows()[0][0], is("select id from sys.cluster"));
+        for (SQLOperations sqlOperations : internalCluster().getDataNodeInstances(SQLOperations.class)) {
+            Session session = sqlOperations.newSystemSession();
+            execute("select id from sys.cluster", null, session);
+        }
+        assertJobLogOnNodesHaveOnlyStatement("select id from sys.cluster");
 
-        sqlExecutor.exec("reset global stats.enabled, stats.jobs_log_size");
-        waitNoPendingTasksOnAll();
-        response = sqlExecutor.exec("select * from sys.jobs_log");
+        execute("set global transient stats.enabled = false");
+        for (JobsLogService jobsLogService : internalCluster().getDataNodeInstances(JobsLogService.class)) {
+            assertBusy(() -> assertThat(jobsLogService.isEnabled(), is(false)));
+        }
+        execute("select * from sys.jobs_log");
         assertThat(response.rowCount(), is(0L));
     }
 
+    private void assertJobLogOnNodesHaveOnlyStatement(String statement) throws Exception {
+        for (JobsLogService jobsLogService : internalCluster().getDataNodeInstances(JobsLogService.class)) {
+            assertBusy(() -> {
+                assertThat(jobsLogService.jobsLogSize(), is(1));
+                JobsLogs jobsLogs = jobsLogService.get();
+                Iterator<JobContextLog> iterator = jobsLogs.jobsLog().iterator();
+                if (iterator.hasNext()) {
+                    assertThat(iterator.next().statement(), is(statement));
+                }
+            });
+        }
+    }
+
     @Test
-    @UseJdbc(false) // set has no rowcount
     public void testSetSingleStatement() throws Exception {
-        SQLResponse response = sqlExecutor.exec("select settings['stats']['jobs_log_size'] from sys.cluster");
+        execute("select settings['stats']['jobs_log_size'] from sys.cluster");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Integer) response.rows()[0][0], is(CrateSettings.STATS_JOBS_LOG_SIZE.defaultValue()));
+        assertThat(response.rows()[0][0], is(JobsLogService.STATS_JOBS_LOG_SIZE_SETTING.getDefault()));
 
-        response = sqlExecutor.exec("set global persistent stats.enabled= true, stats.jobs_log_size=7");
+        execute("set global persistent stats.enabled= true, stats.jobs_log_size=7");
         assertThat(response.rowCount(), is(1L));
 
-        response = sqlExecutor.exec("select settings['stats']['jobs_log_size'] from sys.cluster");
+        execute("select settings['stats']['jobs_log_size'] from sys.cluster");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Integer) response.rows()[0][0], is(7));
+        assertThat(response.rows()[0][0], is(7));
 
-        response = sqlExecutor.exec("reset global stats.enabled, stats.jobs_log_size");
+        execute("reset global stats.jobs_log_size");
         assertThat(response.rowCount(), is(1L));
         waitNoPendingTasksOnAll();
 
-        response = sqlExecutor.exec("select settings['stats']['enabled'], settings['stats']['jobs_log_size'] from sys.cluster");
+        execute("select settings['stats']['enabled'], settings['stats']['jobs_log_size'] from sys.cluster");
         assertThat(response.rowCount(), is(1L));
-        assertThat((Boolean) response.rows()[0][0], is(CrateSettings.STATS_ENABLED.defaultValue()));
-        assertThat((Integer) response.rows()[0][1], is(CrateSettings.STATS_JOBS_LOG_SIZE.defaultValue()));
+        assertThat(response.rows()[0][0], is(JobsLogService.STATS_ENABLED_SETTING.getDefault()));
+        assertThat(response.rows()[0][1], is(JobsLogService.STATS_JOBS_LOG_SIZE_SETTING.getDefault()));
 
     }
 
     @Test
     public void testEmptyJobsInLog() throws Exception {
         // Setup data
-        sqlExecutor.exec("create table characters (id int primary key, name string)");
+        execute("create table characters (id int primary key, name string)");
         sqlExecutor.ensureYellowOrGreen();
 
-        sqlExecutor.exec("set global transient stats.enabled = true");
-        sqlExecutor.exec("insert into characters (id, name) values (1, 'sysjobstest')");
-        sqlExecutor.exec("refresh table characters");
-        SQLResponse response = sqlExecutor.exec("delete from characters where id = 1");
+        execute("set global transient stats.enabled = true");
+        execute("insert into characters (id, name) values (1, 'sysjobstest')");
+        execute("refresh table characters");
+        execute("delete from characters where id = 1");
         // make sure everything is deleted (nothing changed in whole class lifecycle cluster state)
         assertThat(response.rowCount(), is(1L));
-        sqlExecutor.exec("refresh table characters");
+        execute("refresh table characters");
 
-        response = sqlExecutor.exec(
-            "select * from sys.jobs_log where stmt like 'insert into%' or stmt like 'delete%'");
+        execute("select * from sys.jobs_log where stmt like 'insert into%' or stmt like 'delete%'");
         assertThat(response.rowCount(), is(2L));
     }
 }

@@ -23,7 +23,7 @@ package io.crate.analyze;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
-import org.apache.lucene.util.BytesRef;
+import org.elasticsearch.cluster.metadata.AutoExpandReplicas;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.Booleans;
 import org.elasticsearch.common.settings.Settings;
@@ -32,24 +32,24 @@ import java.util.regex.Pattern;
 
 public class NumberOfReplicas {
 
-    public final static String NUMBER_OF_REPLICAS = IndexMetaData.SETTING_NUMBER_OF_REPLICAS;
-    public final static String AUTO_EXPAND_REPLICAS = IndexMetaData.SETTING_AUTO_EXPAND_REPLICAS;
+    public static final String NUMBER_OF_REPLICAS = IndexMetaData.SETTING_NUMBER_OF_REPLICAS;
+    public static final String AUTO_EXPAND_REPLICAS = IndexMetaData.SETTING_AUTO_EXPAND_REPLICAS;
 
     private static final Pattern EXPAND_REPLICA_PATTERN = Pattern.compile("\\d+\\-(all|\\d+)");
     private final String esSettingKey;
     private final String esSettingsValue;
 
-    public NumberOfReplicas(Integer replicas) {
+    public NumberOfReplicas(Integer numReplicas) {
         this.esSettingKey = NUMBER_OF_REPLICAS;
-        this.esSettingsValue = replicas.toString();
+        this.esSettingsValue = numReplicas.toString();
     }
 
-    public NumberOfReplicas(String replicas) {
-        assert replicas != null;
-        validateExpandReplicaSetting(replicas);
+    public NumberOfReplicas(String numReplicas) {
+        assert numReplicas != null : "numReplicas must not be null";
+        validateExpandReplicaSetting(numReplicas);
 
         this.esSettingKey = AUTO_EXPAND_REPLICAS;
-        this.esSettingsValue = replicas;
+        this.esSettingsValue = numReplicas;
     }
 
     private static void validateExpandReplicaSetting(String replicas) {
@@ -65,15 +65,30 @@ public class NumberOfReplicas {
         return esSettingsValue;
     }
 
-    public static BytesRef fromSettings(Settings settings) {
-        BytesRef numberOfReplicas;
+    public static String fromSettings(Settings settings) {
+        String numberOfReplicas;
         String autoExpandReplicas = settings.get(AUTO_EXPAND_REPLICAS);
-        if (autoExpandReplicas != null && !Booleans.isExplicitFalse(autoExpandReplicas)) {
+        if (autoExpandReplicas != null && !Booleans.isFalse(autoExpandReplicas)) {
             validateExpandReplicaSetting(autoExpandReplicas);
-            numberOfReplicas = new BytesRef(autoExpandReplicas);
+            numberOfReplicas = autoExpandReplicas;
         } else {
-            numberOfReplicas = new BytesRef(MoreObjects.firstNonNull(settings.get(NUMBER_OF_REPLICAS), "1"));
+            numberOfReplicas = MoreObjects.firstNonNull(settings.get(NUMBER_OF_REPLICAS), "1");
         }
         return numberOfReplicas;
+    }
+
+    public static int fromSettings(Settings settings, int dataNodeCount) {
+        AutoExpandReplicas autoExpandReplicas = IndexMetaData.INDEX_AUTO_EXPAND_REPLICAS_SETTING.get(settings);
+        if (autoExpandReplicas.isEnabled()) {
+            final int min = autoExpandReplicas.getMinReplicas();
+            final int max = autoExpandReplicas.getMaxReplicas(dataNodeCount);
+            int numberOfReplicas = dataNodeCount - 1;
+            if (numberOfReplicas < min) {
+                return min;
+            } else if (numberOfReplicas > max) {
+                return max;
+            }
+        }
+        return IndexMetaData.INDEX_NUMBER_OF_REPLICAS_SETTING.get(settings);
     }
 }

@@ -21,81 +21,74 @@
 
 package io.crate.metadata;
 
-import com.google.common.base.Function;
-import com.google.common.base.MoreObjects;
-import com.google.common.base.Objects;
-import io.crate.analyze.symbol.Symbol;
-import io.crate.analyze.symbol.SymbolType;
-import io.crate.analyze.symbol.SymbolVisitor;
-import io.crate.metadata.table.ColumnPolicy;
+import io.crate.expression.symbol.Symbol;
+import io.crate.expression.symbol.SymbolType;
+import io.crate.expression.symbol.SymbolVisitor;
+import io.crate.expression.symbol.Symbols;
+import io.crate.sql.tree.ColumnPolicy;
 import io.crate.types.DataType;
 import io.crate.types.DataTypes;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.io.stream.Streamable;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.Comparator;
-import java.util.Locale;
+import java.util.Objects;
 
-public class Reference extends Symbol implements Streamable {
+import static io.crate.metadata.RowGranularity.DOC;
 
-    public static final Comparator<Reference> COMPARE_BY_COLUMN_IDENT = new Comparator<Reference>() {
-        @Override
-        public int compare(Reference o1, Reference o2) {
-            return o1.ident().columnIdent().compareTo(o2.ident().columnIdent());
-        }
-    };
+public class Reference extends Symbol {
 
-    public static final Function<? super Reference, ColumnIdent> TO_COLUMN_IDENT = new Function<Reference, ColumnIdent>() {
-        @Nullable
-        @Override
-        public ColumnIdent apply(@Nullable Reference input) {
-            return input == null ? null : input.ident.columnIdent();
-        }
-    };
-
-    public static final Function<? super Reference, String> TO_COLUMN_NAME = new Function<Reference, String>() {
-        @Nullable
-        @Override
-        public String apply(@Nullable Reference input) {
-            return input == null ? null : input.ident.columnIdent().sqlFqn();
-        }
-    };
+    public static final Comparator<Reference> COMPARE_BY_COLUMN_IDENT = Comparator.comparing(Reference::column);
 
     public enum IndexType {
         ANALYZED,
         NOT_ANALYZED,
         NO;
-
-        public String toString() {
-            return name().toLowerCase(Locale.ENGLISH);
-        }
     }
 
-    public static final SymbolFactory<Reference> FACTORY = new SymbolFactory<Reference>() {
-        @Override
-        public Reference newInstance() {
-            return new Reference();
-        }
-    };
-
     protected DataType type;
-    private ReferenceIdent ident;
-    private ColumnPolicy columnPolicy = ColumnPolicy.DYNAMIC;
-    private RowGranularity granularity;
-    private IndexType indexType = IndexType.NOT_ANALYZED;
-    private boolean nullable = true;
+    private final Integer position;
+    private final ReferenceIdent ident;
+    private final ColumnPolicy columnPolicy;
+    private final RowGranularity granularity;
+    private final IndexType indexType;
+    private final boolean nullable;
+    private final boolean columnStoreDisabled;
 
-    public Reference() {
+    @Nullable
+    private final Symbol defaultExpression;
 
+    public Reference(StreamInput in) throws IOException {
+        ident = new ReferenceIdent(in);
+        position = in.readOptionalVInt();
+        type = DataTypes.fromStream(in);
+        granularity = RowGranularity.fromStream(in);
+
+        columnPolicy = ColumnPolicy.values()[in.readVInt()];
+        indexType = IndexType.values()[in.readVInt()];
+        nullable = in.readBoolean();
+        columnStoreDisabled = in.readBoolean();
+        final boolean hasDefaultExpression = in.readBoolean();
+        defaultExpression = hasDefaultExpression
+            ? Symbols.fromStream(in)
+            : null;
     }
 
     public Reference(ReferenceIdent ident,
                      RowGranularity granularity,
-                     DataType type) {
-        this(ident, granularity, type, ColumnPolicy.DYNAMIC, IndexType.NOT_ANALYZED, true);
+                     DataType type,
+                     @Nullable Integer position,
+                     @Nullable Symbol defaultExpression) {
+        this(ident,
+             granularity,
+             type,
+             ColumnPolicy.DYNAMIC,
+             IndexType.NOT_ANALYZED,
+             true,
+             position,
+             defaultExpression);
     }
 
     public Reference(ReferenceIdent ident,
@@ -103,20 +96,54 @@ public class Reference extends Symbol implements Streamable {
                      DataType type,
                      ColumnPolicy columnPolicy,
                      IndexType indexType,
-                     boolean nullable) {
+                     boolean nullable,
+                     @Nullable Integer position,
+                     @Nullable Symbol defaultExpression) {
+        this(ident,
+             granularity,
+             type,
+             columnPolicy,
+             indexType,
+             nullable,
+             false,
+             position,
+             defaultExpression);
+    }
+
+    public Reference(ReferenceIdent ident,
+                     RowGranularity granularity,
+                     DataType type,
+                     ColumnPolicy columnPolicy,
+                     IndexType indexType,
+                     boolean nullable,
+                     boolean columnStoreDisabled,
+                     @Nullable Integer position,
+                     @Nullable Symbol defaultExpression) {
+        this.position = position;
         this.ident = ident;
         this.type = type;
         this.granularity = granularity;
         this.columnPolicy = columnPolicy;
         this.indexType = indexType;
         this.nullable = nullable;
+        this.columnStoreDisabled = columnStoreDisabled;
+        this.defaultExpression = defaultExpression;
     }
 
     /**
      * Returns a cloned Reference with the given ident
      */
     public Reference getRelocated(ReferenceIdent newIdent) {
-        return new Reference(newIdent, granularity, type, columnPolicy, indexType, nullable);
+        return new Reference(newIdent,
+                             granularity,
+                             type,
+                             columnPolicy,
+                             indexType,
+                             nullable,
+                             columnStoreDisabled,
+                             position,
+                             defaultExpression
+                             );
     }
 
     @Override
@@ -139,6 +166,10 @@ public class Reference extends Symbol implements Streamable {
         return ident;
     }
 
+    public ColumnIdent column() {
+        return ident.columnIdent();
+    }
+
     public RowGranularity granularity() {
         return granularity;
     }
@@ -155,69 +186,85 @@ public class Reference extends Symbol implements Streamable {
         return nullable;
     }
 
+    public boolean isColumnStoreDisabled() {
+        return columnStoreDisabled;
+    }
+
+    @Nullable
+    public Integer position() {
+        return position;
+    }
+
+    @Nullable
+    public Symbol defaultExpression() {
+        return defaultExpression;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
-
-        Reference that = (Reference) o;
-
-        if (granularity != that.granularity) return false;
-        if (ident != null ? !ident.equals(that.ident) : that.ident != null) return false;
-        if (columnPolicy.ordinal() != that.columnPolicy.ordinal()) {
-            return false;
-        }
-        if (indexType.ordinal() != that.indexType.ordinal()) {
-            return false;
-        }
-        if (type != null ? !type.equals(that.type) : that.type != null) return false;
-        if (nullable != that.nullable) return false;
-        return true;
+        Reference reference = (Reference) o;
+        return Objects.equals(position, reference.position) &&
+               nullable == reference.nullable &&
+               columnStoreDisabled == reference.columnStoreDisabled &&
+               Objects.equals(type, reference.type) &&
+               Objects.equals(ident, reference.ident) &&
+               Objects.equals(defaultExpression, reference.defaultExpression) &&
+               columnPolicy == reference.columnPolicy &&
+               granularity == reference.granularity &&
+               indexType == reference.indexType;
     }
 
     @Override
     public int hashCode() {
-        int result = Objects.hashCode(granularity, ident, type, columnPolicy, indexType);
-        return 31 * result + (nullable ? 1 : 0);
+        return Objects.hash(position,
+                            type,
+                            ident,
+                            columnPolicy,
+                            granularity,
+                            indexType,
+                            nullable,
+                            columnStoreDisabled,
+                            defaultExpression);
+    }
+
+    @Override
+    public String representation() {
+        return "Ref{" + ident.tableIdent() + '.' + ident.columnIdent() + ", " + type + '}';
     }
 
     @Override
     public String toString() {
-        MoreObjects.ToStringHelper helper = MoreObjects.toStringHelper(this)
-            .add("ident", ident)
-            .add("granularity", granularity)
-            .add("type", type);
-        if (type.equals(DataTypes.OBJECT)) {
-            helper.add("column policy", columnPolicy.name());
-        }
-        helper.add("index type", indexType.toString());
-        helper.add("nullable", nullable);
-        return helper.toString();
-    }
-
-    @Override
-    public void readFrom(StreamInput in) throws IOException {
-        ident = new ReferenceIdent();
-        ident.readFrom(in);
-        type = DataTypes.fromStream(in);
-        granularity = RowGranularity.fromStream(in);
-
-        columnPolicy = ColumnPolicy.values()[in.readVInt()];
-        indexType = IndexType.values()[in.readVInt()];
-        nullable = in.readBoolean();
+        return "Ref{"
+               + ident.tableIdent().fqn() + '.' + ident.columnIdent().sqlFqn() + "::" + type +
+               ", pos=" + position +
+               (columnPolicy != ColumnPolicy.DYNAMIC ? ", columnPolicy=" + columnPolicy : "") +
+               (granularity != DOC ? ", granularity=" + granularity : "") +
+               (indexType != IndexType.NOT_ANALYZED ? ", index=" + indexType : "") +
+               ", nullable=" + nullable +
+               (columnStoreDisabled ? ", columnStoreOff=" + columnStoreDisabled : "") +
+               (defaultExpression != null ? ", defaultExpression=" + defaultExpression : "") +
+               '}';
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         ident.writeTo(out);
+        out.writeOptionalVInt(position);
         DataTypes.toStream(type, out);
         RowGranularity.toStream(granularity, out);
 
         out.writeVInt(columnPolicy.ordinal());
         out.writeVInt(indexType.ordinal());
         out.writeBoolean(nullable);
+        out.writeBoolean(columnStoreDisabled);
+        final boolean hasDefaultExpression = defaultExpression != null;
+        out.writeBoolean(hasDefaultExpression);
+        if (hasDefaultExpression) {
+            Symbols.toStream(defaultExpression, out);
+        }
     }
-
 
     public static void toStream(Reference reference, StreamOutput out) throws IOException {
         out.writeVInt(reference.symbolType().ordinal());
@@ -225,8 +272,6 @@ public class Reference extends Symbol implements Streamable {
     }
 
     public static <R extends Reference> R fromStream(StreamInput in) throws IOException {
-        Symbol symbol = SymbolType.values()[in.readVInt()].newInstance();
-        symbol.readFrom(in);
-        return (R) symbol;
+        return (R) SymbolType.VALUES.get(in.readVInt()).newInstance(in);
     }
 }

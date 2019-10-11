@@ -21,141 +21,169 @@
 
 package io.crate.metadata.information;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSortedMap;
-import io.crate.metadata.*;
-import io.crate.types.ArrayType;
-import io.crate.types.DataType;
-import io.crate.types.DataTypes;
-import org.elasticsearch.cluster.ClusterService;
+import io.crate.common.collections.Lists2;
+import io.crate.expression.reference.information.TablesSettingsExpression;
+import io.crate.expression.reference.information.TablesVersionExpression;
+import io.crate.metadata.ColumnIdent;
+import io.crate.metadata.IndexMappings;
+import io.crate.metadata.RelationInfo;
+import io.crate.metadata.RelationName;
+import io.crate.metadata.RowGranularity;
+import io.crate.metadata.blob.BlobTableInfo;
+import io.crate.metadata.doc.DocTableInfo;
+import io.crate.metadata.expressions.RowCollectExpressionFactory;
+import io.crate.metadata.table.ColumnRegistrar;
+import io.crate.metadata.table.ShardedTable;
+import io.crate.sql.tree.ColumnPolicy;
+import io.crate.types.ObjectType;
+import org.elasticsearch.Version;
 
-public class InformationTablesTableInfo extends InformationTableInfo {
+import java.util.List;
+import java.util.Map;
+
+import static io.crate.execution.engine.collect.NestableCollectExpression.forFunction;
+import static io.crate.types.DataTypes.BOOLEAN;
+import static io.crate.types.DataTypes.INTEGER;
+import static io.crate.types.DataTypes.LONG;
+import static io.crate.types.DataTypes.STRING;
+import static io.crate.types.DataTypes.STRING_ARRAY;
+
+public class InformationTablesTableInfo extends InformationTableInfo<RelationInfo> {
 
     public static final String NAME = "tables";
-    public static final TableIdent IDENT = new TableIdent(InformationSchemaInfo.NAME, NAME);
+    public static final RelationName IDENT = new RelationName(InformationSchemaInfo.NAME, NAME);
 
-    public static class References {
-        public static final Reference SCHEMA_NAME = createRef(Columns.SCHEMA_NAME, DataTypes.STRING);
-        public static final Reference TABLE_NAME = createRef(Columns.TABLE_NAME, DataTypes.STRING);
-        public static final Reference NUMBER_OF_SHARDS = createRef(Columns.NUMBER_OF_SHARDS, DataTypes.INTEGER);
-        public static final Reference NUMBER_OF_REPLICAS = createRef(Columns.NUMBER_OF_REPLICAS, DataTypes.STRING);
-        public static final Reference CLUSTERED_BY = createRef(Columns.CLUSTERED_BY, DataTypes.STRING);
-        public static final Reference PARTITIONED_BY = createRef(Columns.PARTITIONED_BY, new ArrayType(DataTypes.STRING));
-        public static final Reference BLOBS_PATH = createRef(Columns.BLOBS_PATH, DataTypes.STRING);
-        public static final Reference COLUMN_POLICY = createRef(Columns.COLUMN_POLICY, DataTypes.STRING);
+    private static final String SELF_REFERENCING_COLUMN_NAME = "_id";
+    private static final String REFERENCE_GENERATION = "SYSTEM GENERATED";
 
-        public static final Reference TABLE_SETTINGS = createRef(Columns.TABLE_SETTINGS, DataTypes.OBJECT);
-
-        public static final Reference TABLE_SETTINGS_REFRESH_INTERVAL = createRef(
-            Columns.TABLE_SETTINGS_REFRESH_INTERVAL, DataTypes.LONG);
-
-        public static final Reference TABLE_SETTINGS_BLOCKS = createRef(
-            Columns.TABLE_SETTINGS_BLOCKS, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_BLOCKS_READ_ONLY = createRef(
-            Columns.TABLE_SETTINGS_BLOCKS_READ_ONLY, DataTypes.BOOLEAN);
-        public static final Reference TABLE_SETTINGS_BLOCKS_READ = createRef(
-            Columns.TABLE_SETTINGS_BLOCKS_READ, DataTypes.BOOLEAN);
-        public static final Reference TABLE_SETTINGS_BLOCKS_WRITE = createRef(
-            Columns.TABLE_SETTINGS_BLOCKS_WRITE, DataTypes.BOOLEAN);
-        public static final Reference TABLE_SETTINGS_BLOCKS_METADATA = createRef(
-            Columns.TABLE_SETTINGS_BLOCKS_METADATA, DataTypes.BOOLEAN);
-
-        public static final Reference TABLE_SETTINGS_TRANSLOG = createRef(
-            Columns.TABLE_SETTINGS_TRANSLOG, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_OPS = createRef(
-            Columns.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_OPS, DataTypes.INTEGER);
-        public static final Reference TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_SIZE = createRef(
-            Columns.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_SIZE, DataTypes.LONG);
-        public static final Reference TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_PERIOD = createRef(
-            Columns.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_PERIOD, DataTypes.LONG);
-        public static final Reference TABLE_SETTINGS_TRANSLOG_DISABLE_FLUSH = createRef(
-            Columns.TABLE_SETTINGS_TRANSLOG_DISABLE_FLUSH, DataTypes.BOOLEAN);
-        public static final Reference TABLE_SETTINGS_TRANSLOG_INTERVAL = createRef(
-            Columns.TABLE_SETTINGS_TRANSLOG_INTERVAL, DataTypes.LONG);
-
-        public static final Reference TABLE_SETTINGS_ROUTING = createRef(
-            Columns.TABLE_SETTINGS_ROUTING, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_ROUTING_ALLOCATION = createRef(
-            Columns.TABLE_SETTINGS_ROUTING_ALLOCATION, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_ROUTING_ALLOCATION_ENABLE = createRef(
-            Columns.TABLE_SETTINGS_ROUTING_ALLOCATION_ENABLE, DataTypes.STRING);
-        public static final Reference TABLE_SETTINGS_ROUTING_ALLOCATION_TOTAL_SHARDS_PER_NODE = createRef(
-            Columns.TABLE_SETTINGS_ROUTING_ALLOCATION_TOTAL_SHARDS_PER_NODE, DataTypes.INTEGER);
-
-        public static final Reference TABLE_SETTINGS_RECOVERY = createRef(
-            Columns.TABLE_SETTINGS_RECOVERY, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_RECOVERY_INITIAL_SHARDS = createRef(
-            Columns.TABLE_SETTINGS_RECOVERY_INITIAL_SHARDS, DataTypes.STRING);
-        public static final Reference TABLE_SETTINGS_WARMER = createRef(
-            Columns.TABLE_SETTINGS_WARMER, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_WARMER_ENABLED = createRef(
-            Columns.TABLE_SETTINGS_WARMER_ENABLED, DataTypes.BOOLEAN);
-
-        public static final Reference TABLE_SETTINGS_TRANSLOG_SYNC_INTERVAL = createRef(
-            Columns.TABLE_SETTINGS_TRANSLOG_SYNC_INTERVAL, DataTypes.LONG);
-
-        public static final Reference TABLE_SETTINGS_UNASSIGNED = createRef(
-            Columns.TABLE_SETTINGS_UNASSIGNED, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_UNASSIGNED_NODE_LEFT = createRef(
-            Columns.TABLE_SETTINGS_UNASSIGNED_NODE_LEFT, DataTypes.OBJECT);
-        public static final Reference TABLE_SETTINGS_UNASSIGNED_NODE_LEFT_DELAYED_TIMEOUT = createRef(
-            Columns.TABLE_SETTINGS_UNASSIGNED_NODE_LEFT_DELAYED_TIMEOUT, DataTypes.LONG);
+    private static ColumnRegistrar<RelationInfo> columnRegistrar() {
+        return new ColumnRegistrar<RelationInfo>(IDENT, RowGranularity.DOC)
+            .register("table_schema", STRING, () -> forFunction(r -> r.ident().schema()))
+            .register("table_name", STRING, () -> forFunction(r -> r.ident().name()))
+            .register("table_catalog", STRING, () -> forFunction(r -> r.ident().schema()))
+            .register("table_type", STRING, () -> forFunction(r -> r.relationType().pretty()))
+            .register("number_of_shards", INTEGER, () -> forFunction(row -> {
+                if (row instanceof ShardedTable) {
+                    return ((ShardedTable) row).numberOfShards();
+                }
+                return null;
+            }))
+            .register("number_of_replicas", STRING,
+                () -> forFunction(row -> {
+                    if (row instanceof ShardedTable) {
+                        return ((ShardedTable) row).numberOfReplicas();
+                    }
+                    return null;
+                }))
+            .register("clustered_by", STRING,
+                () -> forFunction(row -> {
+                    if (row instanceof ShardedTable) {
+                        ColumnIdent clusteredBy = ((ShardedTable) row).clusteredBy();
+                        if (clusteredBy == null) {
+                            return null;
+                        }
+                        return clusteredBy.fqn();
+                    }
+                    return null;
+                }))
+            .register("partitioned_by", STRING_ARRAY,
+                () -> forFunction(row -> {
+                    if (row instanceof DocTableInfo) {
+                        List<ColumnIdent> partitionedBy = ((DocTableInfo) row).partitionedBy();
+                        if (partitionedBy == null || partitionedBy.isEmpty()) {
+                            return null;
+                        }
+                        return Lists2.map(partitionedBy, ColumnIdent::fqn);
+                    }
+                    return null;
+                }))
+            .register("blobs_path", STRING,
+                () -> forFunction(row -> {
+                    if (row instanceof BlobTableInfo) {
+                        return ((BlobTableInfo) row).blobsPath();
+                    }
+                    return null;
+                }))
+            .register("column_policy", STRING,
+                () -> forFunction(row -> {
+                    if (row instanceof DocTableInfo) {
+                        return ((DocTableInfo) row).columnPolicy().lowerCaseName();
+                    }
+                    return ColumnPolicy.STRICT.lowerCaseName();
+                }))
+            .register("routing_hash_function", STRING,
+                () -> forFunction(row -> {
+                    if (row instanceof ShardedTable) {
+                        return IndexMappings.DEFAULT_ROUTING_HASH_FUNCTION_PRETTY_NAME;
+                    }
+                    return null;
+                }))
+            .register("version", ObjectType.builder()
+                .setInnerType(Version.Property.CREATED.toString(), STRING)
+                .setInnerType(Version.Property.UPGRADED.toString(), STRING)
+                .build(), TablesVersionExpression::new)
+            .register("closed", BOOLEAN, () -> forFunction(row -> {
+                if (row instanceof ShardedTable) {
+                    return ((ShardedTable) row).isClosed();
+                }
+                return null;
+            }))
+            .register("reference_generation", STRING, () -> forFunction(r -> REFERENCE_GENERATION))
+            .register("self_referencing_column_name", STRING,() -> forFunction(row -> {
+                if (row instanceof ShardedTable) {
+                    return SELF_REFERENCING_COLUMN_NAME;
+                }
+                return null;
+            }))
+            .register("settings", ObjectType.builder()
+                .setInnerType("refresh_interval", LONG)
+                .setInnerType("blocks", ObjectType.builder()
+                    .setInnerType("read_only", BOOLEAN)
+                    .setInnerType("read", BOOLEAN)
+                    .setInnerType("write", BOOLEAN)
+                    .setInnerType("metadata", BOOLEAN)
+                    .build())
+                .setInnerType("codec", STRING)
+                .setInnerType("store", ObjectType.builder()
+                    .setInnerType("type", STRING)
+                    .build())
+                .setInnerType("translog", ObjectType.builder()
+                    .setInnerType("flush_threshold_size", LONG)
+                    .setInnerType("sync_interval", LONG)
+                    .build())
+                .setInnerType("routing", ObjectType.builder()
+                    .setInnerType("allocation", ObjectType.builder()
+                        .setInnerType("enable", STRING)
+                        .setInnerType("total_shards_per_node", INTEGER)
+                        .setInnerType("require", ObjectType.untyped())
+                        .setInnerType("include", ObjectType.untyped())
+                        .setInnerType("exclude", ObjectType.untyped())
+                        .build())
+                    .build())
+                .setInnerType("warmer", ObjectType.builder()
+                    .setInnerType("enabled", BOOLEAN)
+                    .build())
+                .setInnerType("write", ObjectType.builder()
+                    .setInnerType("wait_for_active_shards", STRING)
+                    .build())
+                .setInnerType("unassigned", ObjectType.builder()
+                    .setInnerType("node_left", ObjectType.builder()
+                        .setInnerType("delayed_timeout", LONG)
+                        .build())
+                    .build())
+                .setInnerType("mapping", ObjectType.builder()
+                    .setInnerType("total_fields", ObjectType.builder()
+                        .setInnerType("limit", INTEGER)
+                        .build())
+                    .build())
+                .build(), TablesSettingsExpression::new);
     }
 
-    private static Reference createRef(ColumnIdent columnIdent, DataType dataType) {
-        return new Reference(new ReferenceIdent(IDENT, columnIdent), RowGranularity.DOC, dataType);
+    public static Map<ColumnIdent, RowCollectExpressionFactory<RelationInfo>> expressions() {
+        return columnRegistrar().expressions();
     }
 
-    public InformationTablesTableInfo(ClusterService clusterService) {
-        super(clusterService,
-            IDENT,
-            ImmutableList.of(Columns.SCHEMA_NAME, Columns.TABLE_NAME),
-            ImmutableSortedMap.<ColumnIdent, Reference>naturalOrder()
-                .put(Columns.SCHEMA_NAME, References.SCHEMA_NAME)
-                .put(Columns.TABLE_NAME, References.TABLE_NAME)
-                .put(Columns.NUMBER_OF_SHARDS, References.NUMBER_OF_SHARDS)
-                .put(Columns.NUMBER_OF_REPLICAS, References.NUMBER_OF_REPLICAS)
-                .put(Columns.CLUSTERED_BY, References.CLUSTERED_BY)
-                .put(Columns.PARTITIONED_BY, References.PARTITIONED_BY)
-                .put(Columns.BLOBS_PATH, References.BLOBS_PATH)
-                .put(Columns.COLUMN_POLICY, References.COLUMN_POLICY)
-                .put(Columns.TABLE_SETTINGS, References.TABLE_SETTINGS)
-                .put(Columns.TABLE_SETTINGS_BLOCKS, References.TABLE_SETTINGS_BLOCKS)
-                .put(Columns.TABLE_SETTINGS_BLOCKS_READ_ONLY, References.TABLE_SETTINGS_BLOCKS_READ_ONLY)
-                .put(Columns.TABLE_SETTINGS_BLOCKS_READ, References.TABLE_SETTINGS_BLOCKS_READ)
-                .put(Columns.TABLE_SETTINGS_BLOCKS_WRITE, References.TABLE_SETTINGS_BLOCKS_WRITE)
-                .put(Columns.TABLE_SETTINGS_BLOCKS_METADATA, References.TABLE_SETTINGS_BLOCKS_METADATA)
-                .put(Columns.TABLE_SETTINGS_TRANSLOG, References.TABLE_SETTINGS_TRANSLOG)
-                .put(Columns.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_OPS, References.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_OPS)
-                .put(Columns.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_SIZE, References.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_SIZE)
-                .put(Columns.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_PERIOD, References.TABLE_SETTINGS_TRANSLOG_FLUSH_THRESHOLD_PERIOD)
-                .put(Columns.TABLE_SETTINGS_TRANSLOG_DISABLE_FLUSH, References.TABLE_SETTINGS_TRANSLOG_DISABLE_FLUSH)
-                .put(Columns.TABLE_SETTINGS_TRANSLOG_INTERVAL, References.TABLE_SETTINGS_TRANSLOG_INTERVAL)
-                .put(Columns.TABLE_SETTINGS_TRANSLOG_SYNC_INTERVAL, References.TABLE_SETTINGS_TRANSLOG_SYNC_INTERVAL)
-                .put(Columns.TABLE_SETTINGS_REFRESH_INTERVAL, References.TABLE_SETTINGS_REFRESH_INTERVAL)
-                .put(Columns.TABLE_SETTINGS_ROUTING, References.TABLE_SETTINGS_ROUTING)
-                .put(Columns.TABLE_SETTINGS_ROUTING_ALLOCATION, References.TABLE_SETTINGS_ROUTING_ALLOCATION)
-                .put(Columns.TABLE_SETTINGS_ROUTING_ALLOCATION_ENABLE, References.TABLE_SETTINGS_ROUTING_ALLOCATION_ENABLE)
-                .put(Columns.TABLE_SETTINGS_ROUTING_ALLOCATION_TOTAL_SHARDS_PER_NODE, References.TABLE_SETTINGS_ROUTING_ALLOCATION_TOTAL_SHARDS_PER_NODE)
-                .put(Columns.TABLE_SETTINGS_RECOVERY, References.TABLE_SETTINGS_RECOVERY)
-                .put(Columns.TABLE_SETTINGS_RECOVERY_INITIAL_SHARDS, References.TABLE_SETTINGS_RECOVERY_INITIAL_SHARDS)
-                .put(Columns.TABLE_SETTINGS_WARMER, References.TABLE_SETTINGS_WARMER)
-                .put(Columns.TABLE_SETTINGS_WARMER_ENABLED, References.TABLE_SETTINGS_WARMER_ENABLED)
-                .put(Columns.TABLE_SETTINGS_UNASSIGNED, References.TABLE_SETTINGS_UNASSIGNED)
-                .put(Columns.TABLE_SETTINGS_UNASSIGNED_NODE_LEFT, References.TABLE_SETTINGS_UNASSIGNED_NODE_LEFT)
-                .put(Columns.TABLE_SETTINGS_UNASSIGNED_NODE_LEFT_DELAYED_TIMEOUT, References.TABLE_SETTINGS_UNASSIGNED_NODE_LEFT_DELAYED_TIMEOUT)
-                .build(),
-            ImmutableList.of(
-                References.BLOBS_PATH,
-                References.CLUSTERED_BY,
-                References.COLUMN_POLICY,
-                References.NUMBER_OF_REPLICAS,
-                References.NUMBER_OF_SHARDS,
-                References.PARTITIONED_BY,
-                References.SCHEMA_NAME,
-                References.TABLE_SETTINGS,
-                References.TABLE_NAME
-            )
-        );
+    InformationTablesTableInfo() {
+        super(IDENT, columnRegistrar(), "table_catalog", "table_schema", "table_name");
     }
 }

@@ -23,45 +23,59 @@
 package io.crate.cluster.gracefulstop;
 
 import io.crate.action.sql.SQLOperations;
-import io.crate.operation.collect.StatsTables;
+import io.crate.execution.engine.collect.stats.JobsLogs;
+import io.crate.plugin.SQLPlugin;
+import io.crate.test.integration.CrateDummyClusterServiceUnitTest;
 import org.elasticsearch.action.admin.cluster.health.TransportClusterHealthAction;
 import org.elasticsearch.action.admin.cluster.settings.TransportClusterUpdateSettingsAction;
-import org.elasticsearch.cluster.ClusterService;
+import org.elasticsearch.cluster.service.ClusterService;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.node.settings.NodeSettingsService;
-import org.elasticsearch.test.cluster.NoopClusterService;
-import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.common.util.set.Sets;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Answers;
+import org.mockito.Mockito;
 
 import javax.annotation.Nullable;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.hamcrest.core.Is.is;
-import static org.junit.Assert.assertThat;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
-public class DecommissioningServiceTest {
+public class DecommissioningServiceTest extends CrateDummyClusterServiceUnitTest {
 
-    private StatsTables statsTables;
+    private JobsLogs jobsLogs;
     private TestableDecommissioningService decommissioningService;
-    private ThreadPool threadPool;
+    private ScheduledExecutorService executorService;
     private SQLOperations sqlOperations;
+    private AtomicBoolean exited = new AtomicBoolean(false);
+
+    @Override
+    protected Set<Setting<?>> additionalClusterSettings() {
+        SQLPlugin sqlPlugin = new SQLPlugin(Settings.EMPTY);
+        return Sets.newHashSet(sqlPlugin.getSettings());
+    }
 
     @Before
-    public void setUp() throws Exception {
-        statsTables = new StatsTables(Settings.EMPTY, mock(NodeSettingsService.class));
-        threadPool = mock(ThreadPool.class, Answers.RETURNS_MOCKS.get());
-        sqlOperations = mock(SQLOperations.class, Answers.RETURNS_MOCKS.get());
+    public void init() throws Exception {
+        executorService = mock(ScheduledExecutorService.class, Answers.RETURNS_MOCKS);
+        jobsLogs = new JobsLogs(() -> true);
+        sqlOperations = mock(SQLOperations.class, Answers.RETURNS_MOCKS);
         decommissioningService = new TestableDecommissioningService(
             Settings.EMPTY,
-            new NoopClusterService(),
-            statsTables,
-            threadPool,
-            mock(NodeSettingsService.class),
+            clusterService,
+            jobsLogs,
+            executorService,
             sqlOperations,
+            () -> exited.set(true),
             mock(TransportClusterHealthAction.class),
             mock(TransportClusterUpdateSettingsAction.class)
         );
@@ -70,22 +84,23 @@ public class DecommissioningServiceTest {
     @Test
     public void testExitIfNoActiveRequests() throws Exception {
         decommissioningService.exitIfNoActiveRequests(0);
-        assertThat(decommissioningService.exited, is(true));
+        assertThat(exited.get(), is(true));
         assertThat(decommissioningService.forceStopOrAbortCalled, is(false));
     }
 
     @Test
     public void testNoExitIfRequestAreActive() throws Exception {
-        statsTables.logExecutionEnd(UUID.randomUUID(), null);
+        jobsLogs.logExecutionEnd(UUID.randomUUID(), null);
         decommissioningService.exitIfNoActiveRequests(System.nanoTime());
-        assertThat(decommissioningService.exited, is(false));
+        assertThat(exited.get(), is(false));
         assertThat(decommissioningService.forceStopOrAbortCalled, is(false));
-        verify(threadPool, times(1)).scheduler();
+        verify(executorService, times(1)).schedule(
+            Mockito.any(Runnable.class), Mockito.anyLong(), Mockito.any(TimeUnit.class));
     }
 
     @Test
     public void testAbortOrForceStopIsCalledOnTimeout() throws Exception {
-        statsTables.logExecutionEnd(UUID.randomUUID(), null);
+        jobsLogs.logExecutionEnd(UUID.randomUUID(), null);
         decommissioningService.exitIfNoActiveRequests(System.nanoTime() - TimeValue.timeValueHours(3).nanos());
         assertThat(decommissioningService.forceStopOrAbortCalled, is(true));
         verify(sqlOperations, times(1)).enable();
@@ -93,25 +108,26 @@ public class DecommissioningServiceTest {
 
     private static class TestableDecommissioningService extends DecommissioningService {
 
-        private boolean exited = false;
         private boolean forceStopOrAbortCalled = false;
 
         TestableDecommissioningService(Settings settings,
                                        ClusterService clusterService,
-                                       StatsTables statsTables,
-                                       ThreadPool threadPool,
-                                       NodeSettingsService nodeSettingsService,
+                                       JobsLogs jobsLogs,
+                                       ScheduledExecutorService executorService,
                                        SQLOperations sqlOperations,
+                                       Runnable safeExitAction,
                                        TransportClusterHealthAction healthAction,
                                        TransportClusterUpdateSettingsAction updateSettingsAction) {
-            super(settings, clusterService, statsTables, threadPool, nodeSettingsService,
-                sqlOperations, healthAction, updateSettingsAction);
-
-        }
-
-        @Override
-        void exit() {
-            exited = true;
+            super(
+                settings,
+                clusterService,
+                jobsLogs,
+                executorService,
+                sqlOperations,
+                () -> 0,
+                safeExitAction,
+                healthAction,
+                updateSettingsAction);
         }
 
         @Override

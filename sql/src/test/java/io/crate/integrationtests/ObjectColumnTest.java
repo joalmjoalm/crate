@@ -22,13 +22,18 @@
 package io.crate.integrationtests;
 
 import io.crate.action.sql.SQLActionException;
+import io.crate.testing.UseJdbc;
 import org.elasticsearch.common.collect.MapBuilder;
 import org.hamcrest.Matchers;
 import org.junit.Before;
 import org.junit.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+
+import static org.hamcrest.Matchers.arrayContaining;
+import static org.hamcrest.Matchers.is;
 
 public class ObjectColumnTest extends SQLTransportIntegrationTest {
 
@@ -86,6 +91,7 @@ public class ObjectColumnTest extends SQLTransportIntegrationTest {
     }
 
     @Test
+    @UseJdbc(0) // inserting object requires other treatment for PostgreSQL
     public void testAddColumnToIgnoredObject() throws Exception {
         Map<String, Object> detailMap = new HashMap<String, Object>() {{
             put("num_pages", 240);
@@ -214,7 +220,7 @@ public class ObjectColumnTest extends SQLTransportIntegrationTest {
             });
         refresh();
         execute("select details from ot where details['isbn']='978-0345391827'");
-        assertEquals(0, response.rowCount());
+        assertEquals(1, response.rowCount());
 
         execute("select details from ot where details['num_pages']>224");
         assertEquals(1, response.rowCount());
@@ -267,7 +273,6 @@ public class ObjectColumnTest extends SQLTransportIntegrationTest {
     @Test
     public void testSelectDynamicObjectNewColumns() throws Exception {
         execute("create table test (message string, person object(dynamic)) with (number_of_replicas=0)");
-        ensureYellow();
         execute("insert into test (message, person) values " +
                 "('I''m addicted to kite', {name='Youri', addresses=[{city='Dirksland', country='NL'}]})");
         execute("refresh table test");
@@ -279,10 +284,9 @@ public class ObjectColumnTest extends SQLTransportIntegrationTest {
         assertEquals(1L, response.rowCount());
         assertArrayEquals(new String[]{"message", "person['name']", "person['addresses']['city']"},
             response.cols());
-        assertArrayEquals(
-            new Object[]{"I'm addicted to kite", "Youri", new Object[]{"Dirksland"}},
-            response.rows()[0]
-        );
+        assertThat(
+            response.rows()[0],
+            arrayContaining("I'm addicted to kite", "Youri", List.of("Dirksland")));
     }
 
     @Test
@@ -299,5 +303,15 @@ public class ObjectColumnTest extends SQLTransportIntegrationTest {
         assertEquals(1, response.rowCount());
         assertEquals(1, response.rows()[0].length);
         assertThat((Map<String, Object>) response.rows()[0][0], Matchers.<String, Object>hasEntry("nested", 2));
+    }
+
+    @Test
+    public void testAddUnderscoreColumnNameToObjectAtInsert() throws Exception {
+        execute("create table test (foo object) with (column_policy = 'dynamic')");
+        ensureYellow();
+        execute("INSERT INTO test (o) (select {\"_w\"= 20})");
+        refresh();
+        execute("select count(*) from test");
+        assertThat(response.rows()[0][0], is(1L));
     }
 }

@@ -21,7 +21,9 @@
 
 package io.crate.analyze.relations;
 
-import io.crate.analyze.symbol.Symbol;
+import io.crate.expression.symbol.Literal;
+import io.crate.expression.symbol.Symbol;
+import io.crate.metadata.ColumnIdent;
 import io.crate.metadata.table.Operation;
 import io.crate.sql.tree.QualifiedName;
 
@@ -30,7 +32,13 @@ import java.util.List;
 
 public interface FieldProvider<T extends Symbol> {
 
-    T resolveField(QualifiedName qualifiedName, Operation operation);
-
     T resolveField(QualifiedName qualifiedName, @Nullable List<String> path, Operation operation);
+
+    FieldProvider UNSUPPORTED = (qualifiedName, path, operation) -> {
+        throw new UnsupportedOperationException(
+            "Columns cannot be used in this context. " +
+            "Maybe you wanted to use a string literal which requires single quotes: '" + qualifiedName + "'");
+    };
+
+    FieldProvider<Literal> FIELDS_AS_LITERAL = ((qualifiedName, path, operation) -> Literal.of(new ColumnIdent(qualifiedName.toString(), path).fqn()));
 }

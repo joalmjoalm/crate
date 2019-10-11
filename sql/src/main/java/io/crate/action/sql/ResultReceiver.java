@@ -23,24 +23,25 @@
 package io.crate.action.sql;
 
 import io.crate.concurrent.CompletionListenable;
-import io.crate.core.collections.Row;
-import io.crate.operation.projectors.RowReceiver;
-import io.crate.planner.Plan;
+import io.crate.data.Row;
 
 import javax.annotation.Nonnull;
 
 /**
- * A subset / simplified form of {@link io.crate.operation.projectors.RowReceiver}.
- * <p>
- * Used to receive the Result from {@link io.crate.executor.transport.TransportExecutor#execute(Plan, RowReceiver)}
+ * Used via {@link RowConsumerToResultReceiver} to receive results from the execution of a plan
  */
-public interface ResultReceiver extends CompletionListenable {
+public interface ResultReceiver<T> extends CompletionListenable<T> {
 
     void setNextRow(Row row);
 
     void batchFinished();
 
-    void allFinished();
+    /**
+     * Called when receiver finished.
+     * @param interrupted indicates whether the receiver finished because all results were pushed (false)
+     *                    or receiving results was prematurely interrupted (true).
+     */
+    void allFinished(boolean interrupted);
 
     void fail(@Nonnull Throwable t);
 }

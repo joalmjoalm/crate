@@ -22,11 +22,11 @@
 package io.crate.blob;
 
 import io.crate.common.Hex;
+import io.netty.buffer.ByteBuf;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.client.Client;
-import org.elasticsearch.common.bytes.BytesArray;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.logging.Loggers;
-import org.jboss.netty.buffer.ChannelBuffer;
+import org.apache.logging.log4j.LogManager;
+import org.elasticsearch.transport.netty4.Netty4Utils;
 
 import java.util.UUID;
 
@@ -68,13 +68,14 @@ public class RemoteDigestBlob {
                     return EXISTS;
                 case 4:
                     return FAILED;
+                default:
+                    throw new IllegalArgumentException("No status match for [" + id + "]");
             }
-            throw new IllegalArgumentException("No status match for [" + id + "]");
         }
     }
 
 
-    private final static ESLogger logger = Loggers.getLogger(RemoteDigestBlob.class);
+    private static final Logger LOGGER = LogManager.getLogger(RemoteDigestBlob.class);
 
     private final String digest;
     private final Client client;
@@ -83,9 +84,9 @@ public class RemoteDigestBlob {
     private UUID transferId;
 
 
-    public RemoteDigestBlob(BlobService blobService, String index, String digest) {
+    public RemoteDigestBlob(Client client, String index, String digest) {
         this.digest = digest;
-        this.client = blobService.getInjector().getInstance(Client.class);
+        this.client = client;
         this.size = 0;
         this.index = index;
     }
@@ -95,8 +96,8 @@ public class RemoteDigestBlob {
     }
 
     public boolean delete() {
-        logger.trace("delete");
-        assert (transferId == null);
+        LOGGER.trace("delete");
+        assert transferId == null : "transferId should be null";
         DeleteBlobRequest request = new DeleteBlobRequest(
             index,
             Hex.decodeHex(digest)
@@ -105,13 +106,13 @@ public class RemoteDigestBlob {
         return client.execute(DeleteBlobAction.INSTANCE, request).actionGet().deleted;
     }
 
-    private Status start(ChannelBuffer buffer, boolean last) {
-        logger.trace("start blob upload");
-        assert (transferId == null);
+    private Status start(ByteBuf buffer, boolean last) {
+        LOGGER.trace("start blob upload");
+        assert transferId == null : "transferId should be null";
         StartBlobRequest request = new StartBlobRequest(
             index,
             Hex.decodeHex(digest),
-            new BytesArray(buffer.array()),
+            Netty4Utils.toBytesReference(buffer),
             last
         );
         transferId = request.transferId();
@@ -122,13 +123,13 @@ public class RemoteDigestBlob {
         return status;
     }
 
-    private Status chunk(ChannelBuffer buffer, boolean last) {
-        assert (transferId != null);
+    private Status chunk(ByteBuf buffer, boolean last) {
+        assert transferId != null : "transferId should not be null";
         PutChunkRequest request = new PutChunkRequest(
             index,
             Hex.decodeHex(digest),
             transferId,
-            new BytesArray(buffer.array()),
+            Netty4Utils.toBytesReference(buffer),
             size,
             last
         );
@@ -137,7 +138,7 @@ public class RemoteDigestBlob {
         return putChunkResponse.status();
     }
 
-    public Status addContent(ChannelBuffer buffer, boolean last) {
+    public Status addContent(ByteBuf buffer, boolean last) {
         if (startResponse == null) {
             // this is the first call to addContent
             return start(buffer, last);
